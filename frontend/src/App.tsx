@@ -133,6 +133,15 @@ interface DataInfo {
   min_labels_required?: number;
   min_span_hours?: number;
   train_sampling_interval_seconds?: number;
+  train_defaults?: { min_calibration_samples: number; min_edge_selected: number };
+  train_prefs?: { min_calibration_samples: number; min_edge_selected: number; auto_raise?: boolean };
+  train_recommended?: {
+    min_calibration_samples: number;
+    min_edge_selected: number;
+    label: string;
+    span_hours: number;
+  };
+  env_is_default_only?: boolean;
   symbols?: Array<{
     symbol: string;
     tick_count: number;
@@ -140,12 +149,152 @@ interface DataInfo {
     newest?: string;
     ready_to_train: boolean;
     est_labels?: number;
+    min_labels_required?: number;
     span_hours?: number;
     min_span_hours?: number;
   }>;
 }
+interface DownloadStatus {
+  status: 'idle' | 'running' | 'done' | 'error';
+  progress: string;
+  ticks_downloaded?: number;
+  error?: string | null;
+  target_ticks?: number | null;
+}
 interface DailyStatus { signals_today: number; max_signals: number; cooldown_active: boolean; timezone: string; }
 type Tab = 'dashboard' | 'train' | 'setup';
+
+function hoursBetween(oldest?: string, newest?: string): number | null {
+  if (!oldest || !newest) return null;
+  const a = Date.parse(oldest);
+  const b = Date.parse(newest);
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) return null;
+  return (b - a) / 3_600_000;
+}
+
+/** Presets shown in Train UI — keep cal/edge paired for clear guidance. */
+const STRICTNESS_LEVELS = [
+  {
+    id: 'starter',
+    cal: 20,
+    edge: 15,
+    minHours: 16,
+    minLabels: 100,
+    title: 'Starter',
+    when: 'First train / about 1 day of ticks',
+    happens: [
+      'Training is more likely to finish with ~16–24h of data.',
+      'Calibration uses fewer held-out samples (still valid, less stable).',
+      '“Demonstrated edge” is harder to claim — alerts stay cautious.',
+    ],
+    risk: 'Model can save, but probabilities/edge are less trustworthy.',
+  },
+  {
+    id: 'balanced',
+    cal: 30,
+    edge: 20,
+    minHours: 24,
+    minLabels: 140,
+    title: 'Balanced',
+    when: '1+ full day of continuous coverage',
+    happens: [
+      'Needs a larger calibration slice — may fail if span is still ~16h.',
+      'Edge check needs more selected test signals.',
+      'Better probability calibration than Starter.',
+    ],
+    risk: 'If data is short, train may error on calibration — lower level or wait.',
+  },
+  {
+    id: 'medium',
+    cal: 40,
+    edge: 25,
+    minHours: 48,
+    minLabels: 280,
+    title: 'Medium-strict',
+    when: 'About 2+ days of ticks',
+    happens: [
+      'Stricter gates: more cal samples + more edge evidence required.',
+      'Fewer weak models get “edge” status.',
+      'Good step-up after you have collected a second day.',
+    ],
+    risk: 'Too early → calibration/edge failures. Retrain later when meters fill.',
+  },
+  {
+    id: 'strict',
+    cal: 50,
+    edge: 30,
+    minHours: 72,
+    minLabels: 420,
+    title: 'Strict (best)',
+    when: '3+ days continuous (recommended long-term)',
+    happens: [
+      'Strongest calibration requirement (closer to production hardening).',
+      'Edge needs solid selected-test count before alerts can trust it.',
+      'Best quality when the DB has multi-day history.',
+    ],
+    risk: 'Will often fail on day-1 data. Use only after span meters show enough.',
+  },
+] as const;
+
+function matchStrictnessLevel(cal: number, edge: number) {
+  return STRICTNESS_LEVELS.find(l => l.cal === cal && l.edge === edge)
+    ?? STRICTNESS_LEVELS.find(l => l.cal === cal)
+    ?? null;
+}
+
+function explainTrainError(err?: string | null): { title: string; steps: string[] } | null {
+  if (!err) return null;
+  const e = err.toLowerCase();
+  if (e.includes('insufficient resolved labeled')) {
+    return {
+      title: 'Not enough labeled examples yet',
+      steps: [
+        'Training builds 1 label every contract duration (default 9 minutes), not every tick.',
+        'You need about 100 labels ≈ 16–20 hours of continuous tick coverage.',
+        'Confirm Setup so the worker keeps collecting, or use “Fill history (~24h)” below.',
+        'Then train again. Tick count alone is not enough — time span matters.',
+      ],
+    };
+  }
+  if (e.includes('insufficient calibration samples')) {
+    return {
+      title: 'Calibration split was too small',
+      steps: [
+        'Data is split into train / validate / calibrate / test, then some rows are purged to prevent leakage.',
+        'With ~1 day of data the calibration slice can fall below the minimum.',
+        'In this Train page pick Starter (cal 20 / edge 15), or wait for 2–3 more days — no .env / VPS edit needed.',
+        'Training can still finish without “demonstrated edge”; alerts stay strict until edge is proven.',
+      ],
+    };
+  }
+  if (e.includes('not enough ticks')) {
+    return {
+      title: 'Database still has too few ticks',
+      steps: [
+        'Confirm Setup (same symbol/barrier/duration you will train).',
+        'Wait for the live worker to save ticks, or use “Fill history (~24h)”.',
+        'Minimum to start the pipeline: 1,000 ticks. Comfortable: 25,000+ with 16h+ span.',
+      ],
+    };
+  }
+  if (e.includes('dataset split failed') || e.includes('empty set after purging')) {
+    return {
+      title: 'Split failed after purge gaps',
+      steps: [
+        'Contract windows overlap the next split, so many samples were removed.',
+        'Collect a longer continuous span (ideally 1+ full day), then retrain.',
+      ],
+    };
+  }
+  return {
+    title: 'Training stopped',
+    steps: [
+      'Read the technical message above.',
+      'Usually: more continuous ticks, matching Setup barrier/duration, then retry.',
+      'You do not need the VPS for normal train/download — use this page.',
+    ],
+  };
+}
 
 async function api<T>(path: string, opts?: RequestInit): Promise<T> {
   const r = await fetch(`${API}${path}`, { headers: {'Content-Type':'application/json'}, ...opts });
@@ -728,22 +877,61 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
 function TrainView() {
   const [info, setInfo]           = useState<DataInfo|null>(null);
   const [ts, setTs]               = useState<TrainStatus>({ status:'idle', progress:'' });
+  const [dl, setDl]               = useState<DownloadStatus>({ status:'idle', progress:'' });
   const [loadingInfo, setLI]      = useState(true);
+  const [guideOpen, setGuideOpen] = useState(true);
   const [symbol, setSymbol]       = useState('R_100');
   const [barrier, setBarrier]     = useState('0.09');
   const [dir, setDir]             = useState('both');
   const [dur, setDur]             = useState('540');
+  const [minCal, setMinCal]       = useState('20');
+  const [minEdge, setMinEdge]     = useState('15');
+  const [autoStrict, setAutoStrict] = useState(true);
+  const prefsLoaded = useRef(false);
   const pollRef = useRef<ReturnType<typeof setInterval>|null>(null);
+  const dlPollRef = useRef<ReturnType<typeof setInterval>|null>(null);
+
+  const persistPrefs = useCallback(async (cal: string, edge: string, auto: boolean) => {
+    try {
+      await api('/train/prefs', {
+        method: 'PUT',
+        body: JSON.stringify({
+          min_calibration_samples: Number(cal),
+          min_edge_selected: Number(edge),
+          auto_raise: auto,
+        }),
+      });
+    } catch {}
+  }, []);
 
   const loadInfo = useCallback(async (silent = false) => {
     if (!silent) setLI(true);
-    try { setInfo(await api<DataInfo>('/train/data-info')); } catch {}
+    try {
+      const d = await api<DataInfo>('/train/data-info');
+      setInfo(d);
+      if (!prefsLoaded.current && d.train_prefs) {
+        prefsLoaded.current = true;
+        setMinCal(String(d.train_prefs.min_calibration_samples));
+        setMinEdge(String(d.train_prefs.min_edge_selected));
+        setAutoStrict(d.train_prefs.auto_raise !== false);
+      }
+      if (autoStrict && d.train_recommended) {
+        const c = String(d.train_recommended.min_calibration_samples);
+        const e = String(d.train_recommended.min_edge_selected);
+        setMinCal(c);
+        setMinEdge(e);
+        await persistPrefs(c, e, true);
+      }
+    } catch {}
     if (!silent) setLI(false);
-  }, []);
+  }, [autoStrict, persistPrefs]);
 
-  useEffect(() => { loadInfo(); }, [loadInfo]);
+  useEffect(() => {
+    loadInfo();
+    api<TrainStatus>('/train/status').then(setTs).catch(() => {});
+    api<DownloadStatus>('/train/download-status').then(setDl).catch(() => {});
+  }, [loadInfo]);
 
-  // Live DB tick counts grow while the worker collects — refresh quietly
   useEffect(() => {
     const t = setInterval(() => { loadInfo(true); }, 10000);
     return () => clearInterval(t);
@@ -754,134 +942,556 @@ function TrainView() {
       try {
         const s = await api<TrainStatus>('/train/status');
         setTs(s);
-        if (s.status !== 'running') { clearInterval(pollRef.current!); pollRef.current = null; if (s.status==='done') loadInfo(); }
+        if (s.status !== 'running') {
+          clearInterval(pollRef.current!);
+          pollRef.current = null;
+          if (s.status === 'done') loadInfo();
+        }
       } catch {}
     };
-    if (ts.status === 'running' && !pollRef.current) { pollRef.current = setInterval(poll, 2000); }
-    return () => { if (pollRef.current && ts.status !== 'running') { clearInterval(pollRef.current); pollRef.current=null; } };
+    if (ts.status === 'running' && !pollRef.current) pollRef.current = setInterval(poll, 2000);
+    return () => {
+      if (pollRef.current && ts.status !== 'running') {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
   }, [ts.status, loadInfo]);
+
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const s = await api<DownloadStatus>('/train/download-status');
+        setDl(s);
+        if (s.status !== 'running') {
+          clearInterval(dlPollRef.current!);
+          dlPollRef.current = null;
+          if (s.status === 'done') loadInfo();
+        }
+      } catch {}
+    };
+    if (dl.status === 'running' && !dlPollRef.current) dlPollRef.current = setInterval(poll, 2000);
+    return () => {
+      if (dlPollRef.current && dl.status !== 'running') {
+        clearInterval(dlPollRef.current);
+        dlPollRef.current = null;
+      }
+    };
+  }, [dl.status, loadInfo]);
 
   const start = async () => {
     try {
-      await api(`/train/start?${new URLSearchParams({symbol,barrier_distance:barrier,barrier_direction:dir,duration_seconds:dur})}`, {method:'POST'});
-      setTs({ status:'running', progress:'Starting pipeline…' });
-    } catch (e:any) { setTs({ status:'error', progress:'', error: e.message }); }
+      await persistPrefs(minCal, minEdge, autoStrict);
+      await api(`/train/start?${new URLSearchParams({
+        symbol,
+        barrier_distance: barrier,
+        barrier_direction: dir,
+        duration_seconds: dur,
+        min_calibration_samples: minCal,
+        min_edge_selected: minEdge,
+        auto_raise: autoStrict ? 'true' : 'false',
+      })}`, { method: 'POST' });
+      setTs({ status: 'running', progress: `Starting pipeline (cal≥${minCal}, edge≥${minEdge})…` });
+    } catch (e: any) {
+      setTs({ status: 'error', progress: '', error: e.message });
+    }
   };
 
-  const symInfo  = info?.symbols?.find(s => s.symbol === symbol);
+  const applyRecommended = () => {
+    const rec = info?.train_recommended;
+    if (!rec) return;
+    const c = String(rec.min_calibration_samples);
+    const e = String(rec.min_edge_selected);
+    setMinCal(c);
+    setMinEdge(e);
+    void persistPrefs(c, e, autoStrict);
+  };
+
+  const startDownload = async () => {
+    try {
+      await api(`/train/download?${new URLSearchParams({
+        symbol,
+        days_back: '1',
+        target_ticks: '0',
+      })}`, { method: 'POST' });
+      setDl({ status: 'running', progress: 'Queued history download…', ticks_downloaded: 0 });
+    } catch (e: any) {
+      setDl({ status: 'error', progress: '', error: e.message });
+    }
+  };
+
+  const durSec = Math.max(60, parseInt(dur, 10) || 540);
+  const minLabels = info?.min_labels_required ?? 100;
+  const minSpanHours = info?.min_span_hours ?? ((minLabels * durSec + 600 + durSec) / 3600);
+  const symInfo = info?.symbols?.find(s => s.symbol === symbol);
   const tickCount = symInfo?.tick_count ?? 0;
-  const canTrain = tickCount >= 1000 && ts.status !== 'running';
+  const spanHours = symInfo?.span_hours ?? hoursBetween(symInfo?.oldest, symInfo?.newest) ?? 0;
+  const estLabels = symInfo?.est_labels ?? (
+    spanHours > 0 ? Math.max(0, Math.floor(((spanHours * 3600) - 600 - durSec) / durSec)) : 0
+  );
+  const readyByApi = Boolean(symInfo?.ready_to_train);
+  const readyByLocal = tickCount >= 1000 && estLabels >= minLabels && spanHours >= minSpanHours * 0.95;
+  const dataReady = readyByApi || readyByLocal;
+  const busy = ts.status === 'running' || dl.status === 'running';
+  const canTrain = tickCount >= 1000 && !busy;
+  const spanPct = Math.min(100, Math.round((spanHours / Math.max(minSpanHours, 0.1)) * 100));
+  const labelPct = Math.min(100, Math.round((estLabels / minLabels) * 100));
+  const errGuide = explainTrainError(ts.error);
+  const durHours = (durSec / 60).toFixed(durSec % 60 === 0 ? 0 : 1);
 
   return (
     <>
       <div className="glass page-header">
         <div>
           <h1 className="page-title">Train ML Model</h1>
-          <p className="page-subtitle">Train on ticks already saved by the live worker — no separate download needed.</p>
+          <p className="page-subtitle">
+            Everything here runs in the browser — fill history, check readiness, train, and change strictness.
+            After deploy you do <strong>not</strong> need to edit .env on the VPS for training options.
+          </p>
         </div>
       </div>
 
-      {/* Data availability */}
+      <div className="alert alert-success">
+        <CheckCircle size={14}/>
+        <div>
+          <strong>UI owns training settings.</strong> Calibration / edge levels are saved on the server from this page.
+          .env values are first-boot defaults only. When more data arrives: pick a higher level (or Auto-raise) → Train.
+        </div>
+      </div>
+
+      {/* Full guide */}
       <div className="glass">
         <div className="section-header">
-          <h3 className="section-title"><Database size={16}/>Training Data (from live DB)</h3>
+          <h3 className="section-title"><Info size={16}/>How training works (read this)</h3>
+          <button className="btn btn-ghost" onClick={() => setGuideOpen(v => !v)}>
+            {guideOpen ? 'Hide' : 'Show'} guide
+          </button>
+        </div>
+        {guideOpen && (
+          <div className="train-guide">
+            <ol className="train-guide-list">
+              <li>
+                <strong>Live ticks first.</strong> Confirm Setup (same symbol, barrier, duration).
+                The worker saves ticks automatically while the stack is running.
+              </li>
+              <li>
+                <strong>Time span matters more than tick count.</strong> The model creates
+                <em> one labeled example every {durHours} minutes</em> (non-overlapping).
+                You need ≥{minLabels} labels ≈ <strong>~{minSpanHours.toFixed(0)} hours</strong> continuous coverage.
+                5,000 ticks in 1 hour is still not enough.
+              </li>
+              <li>
+                <strong>Optional history fill.</strong> Use “Fill history (~24h)” to pull public Deriv history
+                into the DB. If download says <code>new_saved=0</code>, those ticks are already stored — that is OK.
+              </li>
+              <li>
+                <strong>When you change barrier / duration / direction.</strong> Train again with the
+                <em> same values as Setup</em>. A model trained on 0.09 / 540s will not match Setup 0.20 / 9m
+                (“No compatible model”). Changing duration also changes how many labels fit in the same span.
+              </li>
+              <li>
+                <strong>What training does.</strong> Labels → features → chronological split
+                (train / validate / calibrate / test) → purge gaps → train models → calibrate → final test.
+                Alerts stay off unless the model shows held-out edge and live gates pass (≥95% Analyze, confluence, EV).
+              </li>
+              <li>
+                <strong>Common errors.</strong> “Insufficient resolved labeled data” = span too short.
+                “Insufficient calibration samples” = lower <em>Min calibration samples</em> below
+                (or wait for more days). When you have 2–3+ days, raise calibration/edge (or leave
+                “Auto-raise” on). No VPS needed.
+              </li>
+            </ol>
+            <div className="train-guide-grid">
+              <div className="train-guide-card">
+                <div className="text-xs text-dim uppercase tracking-wide">Minimum to train</div>
+                <div className="font-mono text-sm mt-1">~{minSpanHours.toFixed(0)}h span · ≥{minLabels} labels · ≥1,000 ticks</div>
+              </div>
+              <div className="train-guide-card">
+                <div className="text-xs text-dim uppercase tracking-wide">Comfortable</div>
+                <div className="font-mono text-sm mt-1">1 full day (~24h) · 25k–45k ticks on R_100</div>
+              </div>
+              <div className="train-guide-card">
+                <div className="text-xs text-dim uppercase tracking-wide">Stronger later</div>
+                <div className="font-mono text-sm mt-1">2–3+ days continuous · better calibration & edge</div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Data readiness */}
+      <div className="glass">
+        <div className="section-header">
+          <h3 className="section-title"><Database size={16}/>Training data readiness</h3>
           <button id="btn-refresh-data" className="btn btn-ghost" onClick={() => loadInfo()}>
             {loadingInfo ? <Loader2 size={13} className="spin"/> : <RefreshCw size={13}/>} Refresh
           </button>
         </div>
-        {loadingInfo && <div className="flex items-center gap-2 text-dim text-sm"><Loader2 size={14} className="spin"/>Checking database…</div>}
-        {!loadingInfo && info && (info.has_data ? (
-          info.symbols?.map(sym => (
-            <div key={sym.symbol} className="data-row">
-              <div>
-                <div className="text-sm font-medium text-primary">{sym.symbol}</div>
-                <div className="text-xs text-dim mt-1 font-mono">
-                  {sym.oldest?.slice(0,16).replace('T',' ')} → {sym.newest?.slice(0,16).replace('T',' ')}
-                </div>
-              </div>
-              <div className="flex items-center gap-3">
-                <div className="text-right">
-                  <div className="font-mono font-semibold text-sm">{sym.tick_count.toLocaleString()} ticks</div>
-                  <div className="text-xs text-dim font-mono">
-                    {sym.span_hours != null ? `${sym.span_hours}h span` : ''}
-                    {sym.est_labels != null ? ` · ~${sym.est_labels} labels` : ''}
-                  </div>
-                </div>
-                <span className={`badge ${sym.ready_to_train ? 'badge-green' : 'badge-amber'}`}>
-                  {sym.ready_to_train
-                    ? '✓ Ready'
-                    : `Need ~${info.min_span_hours ?? sym.min_span_hours ?? 16}h span`}
-                </span>
-              </div>
-            </div>
-          ))
-        ) : (
-          <div className="alert alert-warning">
-            <AlertTriangle size={14}/>
-            {info.message ?? 'No tick data yet. Confirm Setup settings so the worker starts collecting, then wait for ticks to save.'}
-          </div>
-        ))}
-        {!loadingInfo && info && info.has_data && (
-          <div className="alert alert-info mt-2">
-            <Info size={14}/>
-            {info.note ??
-              `Non-overlapping samples need ≥${info.min_labels_required ?? 100} labels ` +
-              `(≈${info.min_span_hours ?? 16}h continuous coverage). Tick count alone is not enough.`}
+
+        {loadingInfo && (
+          <div className="flex items-center gap-2 text-dim text-sm">
+            <Loader2 size={14} className="spin"/>Checking database…
           </div>
         )}
+
+        {!loadingInfo && info && !info.has_data && (
+          <div className="alert alert-warning">
+            <AlertTriangle size={14}/>
+            {info.message ?? 'No tick data yet. Confirm Setup, then wait or fill history below.'}
+          </div>
+        )}
+
+        {!loadingInfo && info?.has_data && (
+          <>
+            {(info.symbols ?? []).map(sym => {
+              const sh = sym.span_hours ?? hoursBetween(sym.oldest, sym.newest) ?? 0;
+              const el = sym.est_labels ?? Math.max(0, Math.floor(((sh * 3600) - 600 - durSec) / durSec));
+              const ready = sym.symbol === symbol ? dataReady : (sym.ready_to_train || (el >= minLabels && sh >= minSpanHours * 0.95));
+              return (
+                <div key={sym.symbol} className="data-row">
+                  <div>
+                    <div className="text-sm font-medium text-primary">{sym.symbol}</div>
+                    <div className="text-xs text-dim mt-1 font-mono">
+                      {sym.oldest?.slice(0, 16).replace('T', ' ')} → {sym.newest?.slice(0, 16).replace('T', ' ')}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <div className="text-right">
+                      <div className="font-mono font-semibold text-sm">{sym.tick_count.toLocaleString()} ticks</div>
+                      <div className="text-xs text-dim font-mono">
+                        {sh.toFixed(1)}h span · ~{el} labels
+                      </div>
+                    </div>
+                    <span className={`badge ${ready ? 'badge-green' : 'badge-amber'}`}>
+                      {ready ? '✓ Ready to train' : `Need ~${minSpanHours.toFixed(0)}h span`}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+
+            {symInfo && (
+              <div className="train-meters mt-3">
+                <div className="train-meter">
+                  <div className="train-meter-head">
+                    <span>Time span</span>
+                    <span className="font-mono">{spanHours.toFixed(1)}h / {minSpanHours.toFixed(0)}h</span>
+                  </div>
+                  <div className="feat-bar-track"><div className="feat-bar-fill" style={{ width: `${spanPct}%` }}/></div>
+                </div>
+                <div className="train-meter">
+                  <div className="train-meter-head">
+                    <span>Est. labels</span>
+                    <span className="font-mono">~{estLabels} / {minLabels}</span>
+                  </div>
+                  <div className="feat-bar-track"><div className="feat-bar-fill" style={{ width: `${labelPct}%` }}/></div>
+                </div>
+              </div>
+            )}
+
+            <div className={`alert ${dataReady ? 'alert-success' : 'alert-warning'} mt-3`}>
+              {dataReady
+                ? <><CheckCircle size={14}/>Coverage looks enough for training with current settings. You can train below.</>
+                : <><AlertTriangle size={14}/>Not ready yet — keep collecting or fill history. Selected symbol has {spanHours.toFixed(1)}h span and ~{estLabels} labels (need ~{minSpanHours.toFixed(0)}h / {minLabels}).</>}
+            </div>
+          </>
+        )}
+
+        <div className="divider"/>
+        <div className="section-header mb-2">
+          <h3 className="section-title" style={{ fontSize: '0.95rem' }}>Fill history from Deriv (optional)</h3>
+        </div>
+        <p className="text-xs text-dim mb-3">
+          Pulls the public ~24h tick history into your DB. Safe to run even if ticks already exist
+          (duplicates are skipped). No VPS commands needed.
+        </p>
+        {dl.status === 'running' && (
+          <div className="train-progress"><Loader2 size={16} className="spin"/>{dl.progress || 'Downloading…'}</div>
+        )}
+        {dl.status === 'error' && (
+          <div className="alert alert-error"><XCircle size={14}/>{dl.error}</div>
+        )}
+        {dl.status === 'done' && (
+          <div className="alert alert-success">
+            <CheckCircle size={14}/>
+            History fill finished · {(dl.ticks_downloaded ?? 0).toLocaleString()} new ticks saved.
+            If that number is low, the DB already had most of the public history.
+          </div>
+        )}
+        <button
+          id="btn-fill-history"
+          className="btn btn-ghost w-full"
+          style={{ justifyContent: 'center' }}
+          onClick={startDownload}
+          disabled={busy}
+        >
+          {dl.status === 'running'
+            ? <><Loader2 size={16} className="spin"/>Filling history…</>
+            : <><Database size={16}/>Fill history (~24h) for {symbol}</>}
+        </button>
       </div>
 
       {/* Config + start */}
       <div className="glass">
         <div className="section-header mb-4">
-          <h3 className="section-title"><Brain size={16}/>Training Configuration</h3>
+          <h3 className="section-title"><Brain size={16}/>Training configuration</h3>
+        </div>
+        <div className="alert alert-info">
+          <Info size={14}/>
+          <div>
+            These must match <strong>Setup</strong>. If you change barrier or duration here, change Setup the same way
+            before Analyze / live alerts, then retrain.
+          </div>
         </div>
         <div className="grid-2">
           <div className="form-group">
             <label className="form-label">Symbol</label>
-            <select id="train-symbol" className="form-select" value={symbol} onChange={e=>setSymbol(e.target.value)}>
+            <select id="train-symbol" className="form-select" value={symbol} onChange={e => setSymbol(e.target.value)}>
               <option value="R_100">Volatility 100 Index (R_100)</option>
               <option value="1HZ100V">Volatility 100 (1s) Index (1HZ100V)</option>
             </select>
+            <div className="form-hint">Must match the symbol the worker is collecting.</div>
           </div>
           <div className="form-group">
             <label className="form-label">Direction</label>
-            <select id="train-direction" className="form-select" value={dir} onChange={e=>setDir(e.target.value)}>
+            <select id="train-direction" className="form-select" value={dir} onChange={e => setDir(e.target.value)}>
               <option value="both">Both (Upper + Lower)</option>
               <option value="upper">Upper Touch (+barrier)</option>
               <option value="lower">Lower Touch (−barrier)</option>
             </select>
+            <div className="form-hint">“Both” trains two models (upper then lower) in one job.</div>
           </div>
           <div className="form-group">
             <label className="form-label">Barrier Distance (price points)</label>
-            <input id="train-barrier" type="number" step="0.01" className="form-input" value={barrier} onChange={e=>setBarrier(e.target.value)}/>
-            <div className="form-hint">Relative offset from spot (e.g. 0.09 or 0.2), not percent. Must match Setup.</div>
+            <input id="train-barrier" type="number" step="0.01" className="form-input" value={barrier} onChange={e => setBarrier(e.target.value)}/>
+            <div className="form-hint">
+              Relative offset from spot (e.g. 0.09), not percent. Changing this means old models won’t match — retrain required.
+            </div>
           </div>
           <div className="form-group">
             <label className="form-label">Duration (seconds)</label>
-            <input id="train-duration" type="number" className="form-input" value={dur} onChange={e=>setDur(e.target.value)}/>
+            <input id="train-duration" type="number" className="form-input" value={dur} onChange={e => setDur(e.target.value)}/>
+            <div className="form-hint">
+              Default 540 = 9 minutes. Longer duration → fewer labels in the same span (harder to reach {minLabels}).
+            </div>
           </div>
         </div>
 
-        {ts.status === 'running' && <div className="train-progress"><Loader2 size={16} className="spin"/>{ts.progress || 'Training…'}</div>}
-        {ts.status === 'error'   && <div className="alert alert-error"><XCircle size={14}/>{ts.error}</div>}
-        {ts.status === 'done' && ts.result && <div className="alert alert-success"><CheckCircle size={14}/>Model saved · {ts.result.timestamp?.slice(0,15).replace('T',' ')}</div>}
+        <div className="divider"/>
+        <div className="section-header mb-2">
+          <h3 className="section-title" style={{ fontSize: '0.95rem' }}>Strictness (raise when you have more data)</h3>
+        </div>
+        <div className="alert alert-info">
+          <Info size={14}/>
+          <div>
+            Pick a level that matches your <strong>time span</strong> (not only tick count).
+            Changing these does <em>not</em> retrain by itself — click Train after you change them.
+            <div className="mt-1 text-xs">
+              <strong>Calibration</strong> = min held-out samples to trust probability scores (too high + short data → train fails).{' '}
+              <strong>Edge</strong> = min selected test signals to claim “demonstrated edge” (model can still save if edge fails).
+            </div>
+            {info?.train_recommended && (
+              <div className="mt-1 text-xs">
+                Suggested for your {Number(info.train_recommended.span_hours).toFixed(1)}h span:{' '}
+                <span className="font-mono">cal={info.train_recommended.min_calibration_samples}</span>,{' '}
+                <span className="font-mono">edge={info.train_recommended.min_edge_selected}</span>
+                {' '}({info.train_recommended.label})
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="strict-levels mb-3">
+          {STRICTNESS_LEVELS.map(level => {
+            const selected = Number(minCal) === level.cal && Number(minEdge) === level.edge;
+            const spanOk = spanHours >= level.minHours * 0.95;
+            const labelsOk = estLabels >= level.minLabels;
+            const dataOk = spanOk && labelsOk && tickCount >= 1000;
+            return (
+              <button
+                key={level.id}
+                type="button"
+                className={`strict-level-card ${selected ? 'is-selected' : ''} ${dataOk ? 'is-ready' : 'is-short'}`}
+                onClick={() => {
+                  setMinCal(String(level.cal));
+                  setMinEdge(String(level.edge));
+                  setAutoStrict(false);
+                  void persistPrefs(String(level.cal), String(level.edge), false);
+                }}
+              >
+                <div className="strict-level-top">
+                  <span className="strict-level-title">{level.title}</span>
+                  <span className={`badge ${dataOk ? 'badge-green' : 'badge-amber'}`}>
+                    {dataOk ? 'Your data OK' : 'Need more data'}
+                  </span>
+                </div>
+                <div className="font-mono text-xs text-dim mt-1">
+                  cal≥{level.cal} · edge≥{level.edge}
+                </div>
+                <div className="text-xs mt-2">
+                  <strong>Min data:</strong> ~{level.minHours}h span · ≥{level.minLabels} labels
+                </div>
+                <div className="text-xs text-dim mt-1">You have: {spanHours.toFixed(1)}h · ~{estLabels} labels</div>
+                <div className="text-xs text-dim mt-1">{level.when}</div>
+              </button>
+            );
+          })}
+        </div>
+
+        {(() => {
+          const level = matchStrictnessLevel(Number(minCal), Number(minEdge));
+          const needH = level?.minHours ?? Math.max(16, Math.ceil(Number(minCal) * 0.8));
+          const needL = level?.minLabels ?? Math.max(100, Number(minCal) * 5);
+          const ok = spanHours >= needH * 0.95 && estLabels >= needL && tickCount >= 1000;
+          return (
+            <div className={`alert ${ok ? 'alert-success' : 'alert-warning'} mb-3`}>
+              {ok ? <CheckCircle size={14}/> : <AlertTriangle size={14}/>}
+              <div>
+                <div className="font-medium">
+                  {level ? `${level.title} selected` : `Custom (cal={minCal}, edge={minEdge})`}
+                  {ok ? ' — your current data meets the minimum for this level.' : ' — your current data is below this level’s minimum.'}
+                </div>
+                <div className="text-xs mt-1">
+                  <strong>Minimum for this choice:</strong> ~{needH}h continuous span and ≥{needL} labels
+                  (you have {spanHours.toFixed(1)}h / ~{estLabels} labels).
+                </div>
+                {level && (
+                  <>
+                    <div className="text-xs mt-2"><strong>What happens if you train with this:</strong></div>
+                    <ul className="train-guide-list" style={{ marginTop: 4, marginBottom: 0 }}>
+                      {level.happens.map((h, i) => <li key={i}>{h}</li>)}
+                    </ul>
+                    <div className="text-xs mt-2"><strong>Trade-off:</strong> {level.risk}</div>
+                  </>
+                )}
+                {!ok && (
+                  <div className="text-xs mt-2">
+                    Wait for more live ticks, use Fill history, or pick a lower level (Starter) until the green “Your data OK” badge appears.
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })()}
+
+        <div className="grid-2">
+          <div className="form-group">
+            <label className="form-label">Min calibration samples</label>
+            <select
+              id="train-min-cal"
+              className="form-select"
+              value={minCal}
+              onChange={e => {
+                const v = e.target.value;
+                setMinCal(v);
+                setAutoStrict(false);
+                void persistPrefs(v, minEdge, false);
+              }}
+            >
+              <option value="20">20 — starter (~16–24h)</option>
+              <option value="30">30 — balanced (~24h+)</option>
+              <option value="40">40 — medium-strict (~48h+)</option>
+              <option value="50">50 — strict (~72h+)</option>
+            </select>
+            <div className="form-hint">
+              Raise this when you have more days. If train fails “Insufficient calibration samples”, lower it or wait.
+            </div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Min edge selected signals</label>
+            <select
+              id="train-min-edge"
+              className="form-select"
+              value={minEdge}
+              onChange={e => {
+                const v = e.target.value;
+                setMinEdge(v);
+                setAutoStrict(false);
+                void persistPrefs(minCal, v, false);
+              }}
+            >
+              <option value="15">15 — starter</option>
+              <option value="20">20 — balanced</option>
+              <option value="25">25 — medium-strict</option>
+              <option value="30">30 — strict</option>
+            </select>
+            <div className="form-hint">
+              Higher = harder to unlock “demonstrated edge”. Does not block saving the model.
+            </div>
+          </div>
+        </div>
+        <div className="flex items-center gap-3 mb-3" style={{ flexWrap: 'wrap' }}>
+          <label className="text-sm text-secondary flex items-center gap-2" style={{ cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={autoStrict}
+              onChange={e => {
+                const on = e.target.checked;
+                setAutoStrict(on);
+                if (on) applyRecommended();
+                else void persistPrefs(minCal, minEdge, false);
+              }}
+            />
+            Auto-raise level as more data arrives
+          </label>
+          <button type="button" className="btn btn-ghost" onClick={applyRecommended} disabled={!info?.train_recommended}>
+            Use suggested for current data
+          </button>
+        </div>
+
+        {ts.status === 'running' && (
+          <div className="train-progress"><Loader2 size={16} className="spin"/>{ts.progress || 'Training…'}</div>
+        )}
+        {ts.status === 'error' && (
+          <>
+            <div className="alert alert-error"><XCircle size={14}/><div><div className="font-medium">{errGuide?.title ?? 'Training error'}</div><div className="text-xs mt-1" style={{ opacity: 0.9 }}>{ts.error}</div></div></div>
+            {errGuide && (
+              <div className="alert alert-info">
+                <Info size={14}/>
+                <div>
+                  <div className="font-medium mb-1">What to do</div>
+                  <ol className="train-guide-list" style={{ margin: 0 }}>
+                    {errGuide.steps.map((s, i) => <li key={i}>{s}</li>)}
+                  </ol>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+        {ts.status === 'done' && ts.result && (
+          <div className="alert alert-success">
+            <CheckCircle size={14}/>
+            Model saved · {ts.result.timestamp?.slice(0, 15).replace('T', ' ')}
+            {ts.result.has_demonstrated_edge
+              ? ' · held-out edge found'
+              : ' · no demonstrated edge yet (alerts stay cautious)'}
+          </div>
+        )}
+
+        {!dataReady && canTrain && (
+          <div className="alert alert-warning">
+            <AlertTriangle size={14}/>
+            You can still start training, but it will likely fail until span/labels reach the bars above.
+            Prefer waiting or filling history first.
+          </div>
+        )}
 
         <button
           id="btn-start-training"
           className="btn btn-primary w-full"
-          style={{marginTop:'0.25rem', justifyContent:'center', padding:'0.85rem'}}
+          style={{ marginTop: '0.25rem', justifyContent: 'center', padding: '0.85rem' }}
           onClick={start}
           disabled={!canTrain}
         >
-          {ts.status==='running'
+          {ts.status === 'running'
             ? <><Loader2 size={16} className="spin"/>Training in progress…</>
-            : <><Brain size={16}/>Train on {tickCount.toLocaleString()} DB ticks</>}
+            : <><Brain size={16}/>Train on {tickCount.toLocaleString()} DB ticks ({spanHours.toFixed(1)}h)</>}
         </button>
         {!canTrain && ts.status !== 'running' && (
-          <p className="text-xs text-dim mt-2" style={{textAlign:'center'}}>
-            Need ≥ 1,000 ticks for "{symbol}" · currently {tickCount.toLocaleString()}.
-            Confirm Setup and let the live worker collect more.
+          <p className="text-xs text-dim mt-2" style={{ textAlign: 'center' }}>
+            {busy
+              ? 'Wait for the current download/training job to finish.'
+              : `Need ≥ 1,000 ticks for “${symbol}” · currently ${tickCount.toLocaleString()}. Confirm Setup or fill history.`}
           </p>
         )}
       </div>

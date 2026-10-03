@@ -103,6 +103,8 @@ class TrainingOrchestrator:
         ticks_df: pd.DataFrame,
         sampling_interval_seconds: int | None = None,
         quotes_df: pd.DataFrame | None = None,
+        min_calibration_samples: int | None = None,
+        min_edge_selected: int | None = None,
     ) -> dict:
         if sampling_interval_seconds is None:
             sampling_interval_seconds = int(settings.train_sampling_interval_seconds)
@@ -110,6 +112,18 @@ class TrainingOrchestrator:
         sampling_interval_seconds = max(
             int(sampling_interval_seconds), int(self.duration_seconds)
         )
+        self._min_cal = int(
+            settings.train_min_calibration_samples
+            if min_calibration_samples is None
+            else min_calibration_samples
+        )
+        self._min_edge = int(
+            settings.train_edge_min_selected
+            if min_edge_selected is None
+            else min_edge_selected
+        )
+        self._min_cal = max(11, min(200, self._min_cal))
+        self._min_edge = max(5, min(200, self._min_edge))
         logger.info(
             "training_pipeline_starting",
             n_ticks=len(ticks_df),
@@ -118,6 +132,8 @@ class TrainingOrchestrator:
             symbol=self.symbol,
             barrier_unit=BARRIER_UNIT,
             sampling_interval_seconds=sampling_interval_seconds,
+            min_calibration_samples=self._min_cal,
+            min_edge_selected=self._min_edge,
         )
 
         entry_times = self._sample_entry_times(ticks_df, sampling_interval_seconds)
@@ -260,8 +276,8 @@ class TrainingOrchestrator:
         )
 
         gap_seconds = int(settings.train_gap_seconds)
-        min_cal = int(settings.train_min_calibration_samples)
-        min_test = int(settings.train_edge_min_selected)
+        min_cal = int(getattr(self, "_min_cal", settings.train_min_calibration_samples))
+        min_test = int(getattr(self, "_min_edge", settings.train_edge_min_selected))
         try:
             split = chronological_split(
                 features_df=features_matrix,
@@ -296,7 +312,7 @@ class TrainingOrchestrator:
                     f"Insufficient calibration samples after purging: {len(split.X_cal)} "
                     f"< {min_cal} (total usable samples={effective_n}). "
                     f"Need roughly ~{need_h:.0f}h more continuous coverage, or lower "
-                    f"TRAIN_MIN_CALIBRATION_SAMPLES in .env.prod and recreate backend."
+                    f"Min calibration samples in the Train UI (Starter), then retrain."
                 )
             }
 
@@ -494,7 +510,7 @@ class TrainingOrchestrator:
         sel_cal_raw = _selected_raw(cal_preds, X_cal)
         calibrator = ProbabilityCalibrator(
             method="auto",
-            min_samples=int(settings.train_min_calibration_samples),
+            min_samples=int(getattr(self, "_min_cal", settings.train_min_calibration_samples)),
         )
         calibrator.fit(sel_cal_raw, y_cal.values)
         cal_metrics = compute_calibration_metrics(y_cal.values, calibrator.calibrate(sel_cal_raw))
@@ -738,7 +754,7 @@ class TrainingOrchestrator:
         quote_match_rate: float = 0.0,
         wf_fold_count: int = 0,
     ) -> tuple[bool, str]:
-        min_selected = int(settings.train_edge_min_selected)
+        min_selected = int(getattr(self, "_min_edge", settings.train_edge_min_selected))
         margin = float(settings.train_edge_margin)
         if report.selected_signal_count < min_selected:
             return False, (

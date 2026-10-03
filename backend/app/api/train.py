@@ -4,12 +4,14 @@ Fetches stored tick data from the database and runs the full training orchestrat
 """
 
 import asyncio
+import json
 import os
 from typing import Any
 
 import pandas as pd
 import structlog
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +33,78 @@ _training_state: dict = {
     "result": None,
     "error": None,
 }
+
+
+def _prefs_path() -> str:
+    return os.path.join(settings.model_dir, "train_ui_prefs.json")
+
+
+def _default_train_prefs() -> dict:
+    return {
+        "min_calibration_samples": int(settings.train_min_calibration_samples),
+        "min_edge_selected": int(settings.train_edge_min_selected),
+        "auto_raise": True,
+        "note": (
+            "These prefs are owned by the Train UI after deploy. "
+            ".env values are only first-boot defaults — change levels in the UI, not on the VPS."
+        ),
+    }
+
+
+def load_train_prefs() -> dict:
+    path = _prefs_path()
+    base = _default_train_prefs()
+    try:
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                saved = json.load(f)
+            if isinstance(saved, dict):
+                base.update({k: saved[k] for k in saved if k in base or k in (
+                    "min_calibration_samples", "min_edge_selected", "auto_raise",
+                )})
+    except Exception as e:
+        logger.warning("train_prefs_load_failed", error=str(e))
+    base["min_calibration_samples"] = max(11, min(200, int(base["min_calibration_samples"])))
+    base["min_edge_selected"] = max(5, min(200, int(base["min_edge_selected"])))
+    base["auto_raise"] = bool(base.get("auto_raise", True))
+    return base
+
+
+def save_train_prefs(prefs: dict) -> dict:
+    merged = _default_train_prefs()
+    merged.update(prefs or {})
+    merged["min_calibration_samples"] = max(11, min(200, int(merged["min_calibration_samples"])))
+    merged["min_edge_selected"] = max(5, min(200, int(merged["min_edge_selected"])))
+    merged["auto_raise"] = bool(merged.get("auto_raise", True))
+    os.makedirs(settings.model_dir, exist_ok=True)
+    path = _prefs_path()
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(merged, f, indent=2)
+    return merged
+
+
+class TrainPrefsBody(BaseModel):
+    min_calibration_samples: int = Field(20, ge=11, le=200)
+    min_edge_selected: int = Field(15, ge=5, le=200)
+    auto_raise: bool = True
+
+
+@router.get("/prefs")
+async def get_train_prefs() -> dict:
+    """UI-owned training strictness prefs (survives refresh; no .env edit needed)."""
+    prefs = load_train_prefs()
+    return {
+        **prefs,
+        "source": "ui_prefs_file",
+        "env_is_default_only": True,
+    }
+
+
+@router.put("/prefs")
+async def put_train_prefs(body: TrainPrefsBody) -> dict:
+    """Save Train UI strictness — call this instead of editing .env.prod."""
+    saved = save_train_prefs(body.model_dump())
+    return {**saved, "source": "ui_prefs_file", "env_is_default_only": True}
 
 
 @router.get("/status")
@@ -129,6 +203,18 @@ async def data_info(db: AsyncSession = Depends(get_db)) -> dict:
             }
         )
     total_ticks = sum(s["tick_count"] for s in symbols)
+    max_span_h = max((s.get("span_hours") or 0) for s in symbols) if symbols else 0.0
+    # Suggest stricter gates as coverage grows (UI can still override).
+    if max_span_h >= 72:
+        rec_cal, rec_edge, rec_label = 50, 30, "3+ days — stricter (recommended)"
+    elif max_span_h >= 48:
+        rec_cal, rec_edge, rec_label = 40, 25, "2+ days — medium-strict"
+    elif max_span_h >= 24:
+        rec_cal, rec_edge, rec_label = 30, 20, "1+ day — balanced"
+    else:
+        rec_cal, rec_edge, rec_label = 20, 15, "~1 day — starter (easier to finish)"
+
+    prefs = load_train_prefs()
     return {
         "has_data": total_ticks > 0,
         "total_ticks": total_ticks,
@@ -139,10 +225,22 @@ async def data_info(db: AsyncSession = Depends(get_db)) -> dict:
         "ready": any(s["ready_to_train"] for s in symbols),
         "symbols": symbols,
         "train_max_ticks": settings.train_max_ticks,
+        "train_defaults": {
+            "min_calibration_samples": settings.train_min_calibration_samples,
+            "min_edge_selected": settings.train_edge_min_selected,
+        },
+        "train_prefs": prefs,
+        "train_recommended": {
+            "min_calibration_samples": rec_cal,
+            "min_edge_selected": rec_edge,
+            "label": rec_label,
+            "span_hours": max_span_h,
+        },
+        "env_is_default_only": True,
         "note": (
             f"Training needs ≥{min_labels} non-overlapping labels "
             f"(one every {interval}s) ≈{min_span_seconds/3600.0:.1f}h continuous coverage. "
-            "Tick count alone is not enough."
+            "After deploy, change calibration/edge only in this UI — not in .env."
         ),
     }
 
@@ -182,6 +280,8 @@ async def _run_training_background(
     barrier_distance: float,
     barrier_direction: str,
     duration_seconds: int,
+    min_calibration_samples: int | None = None,
+    min_edge_selected: int | None = None,
 ):
     """Background coroutine that runs the training pipeline."""
     global _training_state
@@ -201,7 +301,14 @@ async def _run_training_background(
                 "result": None,
                 "error": None,
             }
-            await _run_training_background(symbol, barrier_distance, d, duration_seconds)
+            await _run_training_background(
+                symbol,
+                barrier_distance,
+                d,
+                duration_seconds,
+                min_calibration_samples=min_calibration_samples,
+                min_edge_selected=min_edge_selected,
+            )
             if _training_state.get("status") == "error":
                 return
             results.append({"direction": d, "result": _training_state.get("result")})
@@ -279,6 +386,8 @@ async def _run_training_background(
                 df,
                 sampling_interval_seconds=settings.train_sampling_interval_seconds,
                 quotes_df=quotes_df,
+                min_calibration_samples=min_calibration_samples,
+                min_edge_selected=min_edge_selected,
             ),
         )
 
@@ -364,20 +473,62 @@ async def start_training(
     barrier_distance: float = 0.09,
     barrier_direction: str = "upper",
     duration_seconds: int = 540,
+    min_calibration_samples: int | None = None,
+    min_edge_selected: int | None = None,
+    auto_raise: bool | None = None,
 ) -> dict:
     """
     Kick off the ML training pipeline in the background.
     Poll GET /train/status for progress and results.
+
+    UI values override saved prefs; saved prefs override .env defaults.
+    After deploy, change strictness in the UI — do not edit .env for this.
     """
     if _training_state["status"] == "running":
         raise HTTPException(status_code=409, detail="Training already in progress.")
 
-    # Schedule the async coroutine on the running event loop
-    asyncio.create_task(
-        _run_training_background(symbol, barrier_distance, barrier_direction, duration_seconds)
+    prefs = load_train_prefs()
+    cal = (
+        int(min_calibration_samples)
+        if min_calibration_samples is not None
+        else int(prefs["min_calibration_samples"])
+    )
+    edge = (
+        int(min_edge_selected)
+        if min_edge_selected is not None
+        else int(prefs["min_edge_selected"])
+    )
+    if not (11 <= cal <= 200):
+        raise HTTPException(status_code=400, detail="min_calibration_samples must be 11–200")
+    if not (5 <= edge <= 200):
+        raise HTTPException(status_code=400, detail="min_edge_selected must be 5–200")
+
+    save_train_prefs(
+        {
+            "min_calibration_samples": cal,
+            "min_edge_selected": edge,
+            "auto_raise": prefs["auto_raise"] if auto_raise is None else bool(auto_raise),
+        }
     )
 
-    return {"status": "started", "message": "Training job queued. Poll /train/status for updates."}
+    asyncio.create_task(
+        _run_training_background(
+            symbol,
+            barrier_distance,
+            barrier_direction,
+            duration_seconds,
+            min_calibration_samples=cal,
+            min_edge_selected=edge,
+        )
+    )
+
+    return {
+        "status": "started",
+        "message": "Training job queued. Poll /train/status for updates.",
+        "min_calibration_samples": cal,
+        "min_edge_selected": edge,
+        "env_is_default_only": True,
+    }
 
 
 # ── Download endpoint (no WebSocket needed) ────────────────────────────────────
