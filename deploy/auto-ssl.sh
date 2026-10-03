@@ -121,28 +121,38 @@ if [[ -s "$PEM" && -s "$KEY" ]]; then
 fi
 
 if [[ "$have_certs" == false ]]; then
+  # Prefer Cloudflare Origin cert via API when token is present
+  if grep -qE '^CLOUDFLARE_API_TOKEN=.' .env.prod 2>/dev/null; then
+    echo "CLOUDFLARE_API_TOKEN found — installing Origin Certificate..."
+    bash "$ROOT/deploy/install-cf-origin-cert.sh"
+    have_certs=true
+  fi
+fi
+
+if [[ "$have_certs" == false || ! -s "$PEM" || ! -s "$KEY" ]]; then
   if [[ "$CERT_MODE" == "origin" ]]; then
     cat <<EOF
-ERROR: Cloudflare Origin certs required but missing:
+ERROR: trusted Origin cert required but missing:
   $PEM
   $KEY
 
-Create in Cloudflare → SSL/TLS → Origin Server → Create Certificate
-Hostnames: ${DOMAIN_UI}, ${DOMAIN_API}
-Paste files, then re-run.
+Add CLOUDFLARE_API_TOKEN to .env.prod and run:
+  ./deploy/install-cf-origin-cert.sh
+
+Or create Origin Certificate in Cloudflare dashboard and save files above.
 EOF
     exit 1
   fi
 
-  echo "No origin cert found — generating self-signed cert (OK with Cloudflare SSL mode: Full)."
+  echo "WARNING: No Cloudflare Origin cert — creating self-signed."
+  echo "Browsers will show ERR_CERT_AUTHORITY_INVALID until you install a CF Origin cert."
   openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
     -keyout "$KEY" \
     -out "$PEM" \
     -subj "/CN=${DOMAIN_UI}" \
     -addext "subjectAltName=DNS:${DOMAIN_UI},DNS:${DOMAIN_API}"
   chmod 600 "$KEY"
-  echo "Created self-signed certs in certs/"
-  echo "For browser-trusted origin later: replace with Cloudflare Origin Certificate."
+  echo "Created self-signed certs. Fix trust with: ./deploy/install-cf-origin-cert.sh"
 fi
 
 # --- firewall ---
