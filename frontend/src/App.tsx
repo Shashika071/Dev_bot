@@ -552,9 +552,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
     alerts_paused?: boolean; pause_reason?: string|null;
     performance?: { resolved?: number; win_rate?: number|null; ci_lower?: number|null; mean_breakeven?: number|null };
   }|null>(null);
-  const watchStopRef = useRef(false);
-  // Near-continuous: small gap only so Deriv quote/analyze isn't stampeded
-  const WATCH_POLL_MS = 1000;
+  const watchPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const load = useCallback(async () => {
     setLoad(true); setErr('');
@@ -600,108 +598,119 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
     return () => clearInterval(id);
   }, [loadChart, tf]);
 
-  const stopAnalyzeWatch = () => {
-    watchStopRef.current = true;
-    setAnalyzeWatching(false);
-    setWatchMode(null);
-    setAnalyzeBusy(false);
-    setAnalyzeMsg(prev => prev.startsWith('Watching') ? 'Watching stopped.' : prev);
+  type WatchStatus = {
+    running?: boolean;
+    want_running?: boolean;
+    mode?: string;
+    ok?: boolean;
+    message?: string;
+    reason?: string;
+    analysis?: typeof analysisRows;
+    signal?: SigData & { calibrated_probability?: number; direction?: string; signal_id?: string };
+    trade?: { ok?: boolean; skipped?: boolean; contract_id?: number|string; error?: string; stake?: number };
   };
 
-  const isFatalAnalyzeReason = (reason: string) => {
-    const r = (reason || '').toLowerCase();
-    if (!r) return false;
-    if (r.includes('cooldown')) return false; // keep waiting
-    if (r.includes('train first') || r.includes('no compatible trained')) return true;
-    if (r.includes('confirm contract settings')) return true;
-    if (r.includes('max signals') || r.includes('daily cap') || r.includes('per day')) return true;
-    if (r.includes('need more ticks')) return true;
-    return false;
+  const applyWatchStatus = useCallback(async (st: WatchStatus, { reloadOnSignal = true } = {}) => {
+    const mode = (st.mode === 'force_model_candles' ? 'force_model_candles' : 'standard') as
+      'standard' | 'force_model_candles';
+    setAnalyzeMsg(st.message || st.reason || '');
+    setAnalyzeOk(!!st.ok);
+    setAnalysisRows(st.analysis || []);
+    if (st.trade && !st.trade.skipped) {
+      if (st.trade.ok) {
+        setTradeResultMsg(`Auto-trade OK · contract ${st.trade.contract_id} · stake ${st.trade.stake}`);
+      } else if (st.trade.error) {
+        setTradeResultMsg(`Auto-trade failed: ${st.trade.error}`);
+      }
+    }
+    if (st.running) {
+      setAnalyzeWatching(true);
+      setAnalyzeBusy(true);
+      setWatchMode(mode);
+    } else {
+      setAnalyzeWatching(false);
+      setAnalyzeBusy(false);
+      setWatchMode(null);
+      if (watchPollRef.current) {
+        clearInterval(watchPollRef.current);
+        watchPollRef.current = null;
+      }
+      if (reloadOnSignal && st.ok && st.signal) {
+        await load();
+      }
+    }
+  }, [load]);
+
+  const pollWatchStatus = useCallback(() => {
+    if (watchPollRef.current) clearInterval(watchPollRef.current);
+    watchPollRef.current = setInterval(async () => {
+      try {
+        const st = await api<WatchStatus>('/signals/watch/status');
+        await applyWatchStatus(st);
+      } catch { /* ignore transient */ }
+    }, 1000);
+  }, [applyWatchStatus]);
+
+  const stopAnalyzeWatch = async () => {
+    try {
+      const st = await api<WatchStatus>('/signals/watch/stop', { method: 'POST', body: '{}' });
+      await applyWatchStatus(st, { reloadOnSignal: false });
+    } catch {
+      setAnalyzeWatching(false);
+      setWatchMode(null);
+      setAnalyzeBusy(false);
+      setAnalyzeMsg('Watching stopped.');
+    }
   };
 
   const analyzeGenerate = async (mode: 'standard' | 'force_model_candles' = 'standard') => {
-    // One click → keep checking until signal, fatal stop, or user Stop
-    watchStopRef.current = false;
+    // Server-side watch — survives tab close / re-login
     setAnalyzeBusy(true);
     setAnalyzeWatching(true);
     setWatchMode(mode);
-    setAnalyzeMsg('');
+    setAnalyzeMsg('Starting server watch…');
     setAnalyzeOk(false);
     setAnalysisRows([]);
     setTradeResultMsg('');
-
-    const label = mode === 'force_model_candles' ? 'Force' : 'Analyze';
-    const body =
-      mode === 'force_model_candles'
-        ? { mode: 'force_model_candles', min_probability: forceMinP }
-        : { mode: 'standard' };
-
-    let attempt = 0;
     try {
-      while (!watchStopRef.current) {
-        attempt += 1;
-        setAnalyzeMsg(`Watching (${label})… check #${attempt} — waiting for setup, then signal` +
-          (mode === 'force_model_candles' ? ' / trade.' : '.'));
-
-        try {
-          const res = await api<{
-            ok: boolean;
-            reason?: string;
-            signal?: SigData & { calibrated_probability?: number; direction?: string; signal_id?: string };
-            analysis?: typeof analysisRows;
-            trade?: { ok?: boolean; skipped?: boolean; contract_id?: number|string; error?: string; stake?: number; reason?: string };
-          }>('/signals/analyze-generate', { method: 'POST', body: JSON.stringify(body) });
-
-          if (watchStopRef.current) break;
-          setAnalysisRows(res.analysis || []);
-
-          if (res.ok && res.signal) {
-            const s = res.signal;
-            const p = ((s.calibrated_probability ?? s.probability ?? 0) * 100).toFixed(1);
-            setAnalyzeOk(true);
-            setAnalyzeMsg(
-              `${label} signal: ${s.direction?.toUpperCase()} · ${p}% · ${s.signal_id} (after ${attempt} check${attempt > 1 ? 's' : ''})`
-            );
-            if (res.trade && !res.trade.skipped) {
-              if (res.trade.ok) {
-                setTradeResultMsg(`Auto-trade OK · contract ${res.trade.contract_id} · stake ${res.trade.stake}`);
-              } else {
-                setTradeResultMsg(`Auto-trade failed: ${res.trade.error || 'unknown'}`);
-              }
-            }
-            await load();
-            break;
-          }
-
-          const reason = res.reason || 'No setup yet.';
-          setAnalyzeOk(false);
-          setAnalyzeMsg(`Watching (${label})… #${attempt}: ${reason}`);
-          if (isFatalAnalyzeReason(reason)) break;
-        } catch (e: any) {
-          if (watchStopRef.current) break;
-          setAnalyzeOk(false);
-          setAnalyzeMsg(`Watching (${label})… #${attempt} error: ${e.message || 'failed'} — retrying…`);
-        }
-
-        // Wait before next check (abortable)
-        await new Promise<void>(resolve => {
-          const t = setTimeout(resolve, WATCH_POLL_MS);
-          const iv = setInterval(() => {
-            if (watchStopRef.current) {
-              clearTimeout(t);
-              clearInterval(iv);
-              resolve();
-            }
-          }, 200);
-          setTimeout(() => clearInterval(iv), WATCH_POLL_MS + 50);
-        });
-      }
-    } finally {
+      const body =
+        mode === 'force_model_candles'
+          ? { mode: 'force_model_candles', min_probability: forceMinP }
+          : { mode: 'standard' };
+      const st = await api<WatchStatus>('/signals/watch/start', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      await applyWatchStatus(st, { reloadOnSignal: false });
+      pollWatchStatus();
+    } catch (e: any) {
+      setAnalyzeOk(false);
+      setAnalyzeMsg(e.message || 'Failed to start watch');
       setAnalyzeWatching(false);
       setWatchMode(null);
       setAnalyzeBusy(false);
     }
   };
+
+  // Reconnect to server watch after refresh / re-login
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const st = await api<WatchStatus>('/signals/watch/status');
+        if (cancelled) return;
+        await applyWatchStatus(st, { reloadOnSignal: false });
+        if (st.running) pollWatchStatus();
+      } catch { /* ignore */ }
+    })();
+    return () => {
+      cancelled = true;
+      if (watchPollRef.current) {
+        clearInterval(watchPollRef.current);
+        watchPollRef.current = null;
+      }
+    };
+  }, [applyWatchStatus, pollWatchStatus]);
 
   const tickData = (chart?.points || []).map(p => ({
     t: new Date(p.epoch * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
@@ -766,39 +775,46 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
         </div>
       </div>
 
-      {(analyzeMsg || analysisRows.length > 0 || tradeResultMsg) && (
-        <div className={`alert ${analyzeOk ? 'alert-success' : 'alert-warning'}`} style={{marginBottom:'1rem'}}>
-          <AlertTriangle size={14}/>
-          <div style={{flex:1}}>
-            <div>{analyzeMsg}</div>
-            {tradeResultMsg && <div className="text-xs mt-1 font-mono">{tradeResultMsg}</div>}
-            {analysisRows.length > 0 && (
-              <div className="analyze-grid" style={{marginTop:8}}>
-                {analysisRows.map(a => (
-                  <div key={a.direction} className="analyze-row font-mono text-xs">
-                    <strong>{(a.direction || '').toUpperCase()}</strong>
-                    {!a.ok && <span> — {a.reason || 'n/a'}</span>}
-                    {a.ok && (
-                      <span>
-                        {' '}p={(a.calibrated_probability! * 100).toFixed(1)}%
-                        {' · '}BE={(a.breakeven_probability! * 100).toFixed(1)}%
-                        {' · '}margin={(a.margin_over_breakeven! * 100).toFixed(1)}%
-                        {a.confluence_met
-                          ? <span className="text-green"> · confluence ✓</span>
-                          : <span className="text-dim"> · no confluence</span>}
-                        {a.candle_confirm_met
-                          ? <span className="text-green"> · candles ✓{a.candle_confirm_score != null ? ` (${a.candle_confirm_score.toFixed(1)})` : ''}</span>
-                          : <span className="text-dim"> · no candle confirm</span>}
-                        {a.meets_confidence
-                          ? <span className="text-green"> · READY</span>
-                          : <span className="text-dim"> · below bar</span>}
-                        {a.selected_pipeline ? ` · ${a.selected_pipeline}` : ''}
-                      </span>
-                    )}
-                  </div>
-                ))}
-              </div>
+      {(analyzeMsg || analysisRows.length > 0 || tradeResultMsg || analyzeWatching) && (
+        <div className={`analyze-status-box ${analyzeOk ? 'alert-success' : 'alert-warning'}`}>
+          <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 2 }}/>
+          <div>
+            <div className="analyze-status-msg" title={analyzeMsg}>{analyzeMsg || (analyzeWatching ? 'Watching…' : '')}</div>
+            {tradeResultMsg && (
+              <div className="analyze-status-trade text-xs font-mono" title={tradeResultMsg}>{tradeResultMsg}</div>
             )}
+            <div className="analyze-grid">
+              {(analysisRows.length > 0 ? analysisRows : [
+                { direction: 'upper', ok: false, reason: '—' },
+                { direction: 'lower', ok: false, reason: '—' },
+              ]).slice(0, 2).map(a => (
+                <div key={a.direction} className="analyze-row font-mono text-xs" title={
+                  a.ok
+                    ? `p=${((a.calibrated_probability ?? 0) * 100).toFixed(1)}%`
+                    : (a.reason || '')
+                }>
+                  <strong>{(a.direction || '').toUpperCase()}</strong>
+                  {!a.ok && <span> — {a.reason || 'n/a'}</span>}
+                  {a.ok && (
+                    <span>
+                      {' '}p={(a.calibrated_probability! * 100).toFixed(1)}%
+                      {' · '}BE={(a.breakeven_probability! * 100).toFixed(1)}%
+                      {' · '}margin={(a.margin_over_breakeven! * 100).toFixed(1)}%
+                      {a.confluence_met
+                        ? <span className="text-green"> · confluence ✓</span>
+                        : <span className="text-dim"> · no confluence</span>}
+                      {a.candle_confirm_met
+                        ? <span className="text-green"> · candles ✓{a.candle_confirm_score != null ? ` (${a.candle_confirm_score.toFixed(1)})` : ''}</span>
+                        : <span className="text-dim"> · no candle confirm</span>}
+                      {a.meets_confidence
+                        ? <span className="text-green"> · READY</span>
+                        : <span className="text-dim"> · below bar</span>}
+                      {a.selected_pipeline ? ` · ${a.selected_pipeline}` : ''}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       )}
@@ -943,8 +959,8 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
             <p className="text-xs text-dim mt-3">
               Auto alerts need <span className="text-cyan">Edge OK</span> + tick confluence + candle confirm (1m/5m) + EV gates.
               <span className="text-amber"> Analyze & Signal</span> uses the same gates with a confidence floor (default ≥95%).
-              <span className="text-amber"> Analyze / Force</span> keep watching (~1s) until gates pass, then signal
-              (and auto-trade if enabled). Use Stop to cancel. Max 3/day Asia/Colombo.
+              <span className="text-amber"> Analyze / Force</span> run on the server (~1s) until gates pass — keeps going
+              if you close the tab. Stop cancels. Auto-trade if enabled. Max 3/day Asia/Colombo.
             </p>
           )}
         </div>
@@ -1885,6 +1901,24 @@ type TradePrefs = {
   token_mask?: string | null;
 };
 
+type TradeAccount = {
+  ok?: boolean;
+  error?: string;
+  loginid?: string;
+  currency?: string;
+  balance?: number;
+  is_virtual?: boolean;
+  account_type?: string;
+  email?: string;
+  fullname?: string;
+  today_profit?: number;
+  recent_profit?: number;
+  recent_trades?: number;
+  recent_wins?: number;
+  recent_losses?: number;
+  token_configured?: boolean;
+};
+
 const DEFAULT_TRADE: TradePrefs = {
   auto_trade_enabled: false,
   trade_stake: 1,
@@ -1915,6 +1949,22 @@ function SetupView({ online }: { online: boolean }) {
   const [tradeSaving, setTradeSaving] = useState(false);
   const [tradeMsg, setTradeMsg] = useState('');
   const [tradeOk, setTradeOk] = useState(false);
+  const [tradeAccount, setTradeAccount] = useState<TradeAccount | null>(null);
+  const [accountLoading, setAccountLoading] = useState(false);
+
+  const loadTradeAccount = async (refresh = true) => {
+    setAccountLoading(true);
+    try {
+      const a = await api<TradeAccount>(`/setup/trade-account?refresh=${refresh ? 'true' : 'false'}`);
+      setTradeAccount(a);
+      if (a.ok && a.currency) {
+        setTrade(prev => ({ ...prev, trade_currency: a.currency || prev.trade_currency }));
+      }
+    } catch {
+      setTradeAccount(null);
+    }
+    setAccountLoading(false);
+  };
 
   useEffect(() => {
     api<OpsPrefs & { guide?: Record<string, string> }>('/setup/ops-prefs')
@@ -1949,6 +1999,7 @@ function SetupView({ online }: { online: boolean }) {
           token_configured: !!r.token_configured,
           token_mask: r.token_mask ?? null,
         });
+        if (r.token_configured) loadTradeAccount(true);
       })
       .catch(() => {});
   }, []);
@@ -2003,7 +2054,11 @@ function SetupView({ online }: { online: boolean }) {
   const saveTradeToken = async () => {
     setTradeSaving(true); setTradeMsg('');
     try {
-      const r = await api<{ token_configured?: boolean; token_mask?: string }>('/setup/trade-token', {
+      const r = await api<{
+        token_configured?: boolean;
+        token_mask?: string;
+        account?: TradeAccount;
+      }>('/setup/trade-token', {
         method: 'PUT',
         body: JSON.stringify({ token: tradeToken }),
       });
@@ -2011,10 +2066,19 @@ function SetupView({ online }: { online: boolean }) {
         ...prev,
         token_configured: !!r.token_configured,
         token_mask: r.token_mask ?? null,
+        trade_currency: r.account?.currency || prev.trade_currency,
       }));
+      if (r.account) setTradeAccount(r.account);
       setTradeToken('');
       setTradeOk(true);
-      setTradeMsg('✓ Token encrypted and stored (shown as mask only).');
+      if (r.account?.ok) {
+        setTradeMsg(
+          `✓ Token saved · ${r.account.account_type?.toUpperCase()} ${r.account.loginid} · ` +
+          `balance ${r.account.balance} ${r.account.currency}`
+        );
+      } else {
+        setTradeMsg(`✓ Token saved${r.account?.error ? ` · account lookup: ${r.account.error}` : ''}`);
+      }
     } catch (e: any) {
       setTradeOk(false);
       setTradeMsg(`✗ ${e.message}`);
@@ -2027,6 +2091,7 @@ function SetupView({ online }: { online: boolean }) {
     try {
       await api('/setup/trade-token', { method: 'DELETE' });
       setTrade(prev => ({ ...prev, token_configured: false, token_mask: null, auto_trade_enabled: false }));
+      setTradeAccount(null);
       setTradeOk(true);
       setTradeMsg('✓ Token cleared. Auto-trade should stay off until you set a new token.');
     } catch (e: any) {
@@ -2401,6 +2466,65 @@ function SetupView({ online }: { online: boolean }) {
           />
           <div className="form-hint">Stored encrypted on the server. UI only shows last-4 mask.</div>
         </div>
+
+        {trade.token_configured && (
+          <div className="alert alert-info" style={{ marginBottom: '1rem' }}>
+            <Database size={14}/>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div className="flex items-center gap-2" style={{ flexWrap: 'wrap', marginBottom: 6 }}>
+                <strong>Linked account</strong>
+                {accountLoading && <Loader2 size={12} className="spin"/>}
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ padding: '2px 8px', fontSize: 12 }}
+                  onClick={() => loadTradeAccount(true)}
+                  disabled={accountLoading || !online}
+                >
+                  Refresh
+                </button>
+              </div>
+              {tradeAccount?.ok ? (
+                <div className="font-mono text-xs" style={{ display: 'grid', gap: 4 }}>
+                  <div>
+                    {tradeAccount.account_type === 'demo'
+                      ? <span className="badge badge-amber">DEMO</span>
+                      : <span className="badge badge-green">REAL</span>}
+                    {' '}{tradeAccount.loginid}
+                    {tradeAccount.fullname ? ` · ${tradeAccount.fullname}` : ''}
+                  </div>
+                  <div>
+                    Balance:{' '}
+                    <strong className="text-primary">
+                      {(tradeAccount.balance ?? 0).toFixed(2)} {tradeAccount.currency || ''}
+                    </strong>
+                  </div>
+                  <div>
+                    Today P/L:{' '}
+                    <strong style={{ color: (tradeAccount.today_profit ?? 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                      {(tradeAccount.today_profit ?? 0) >= 0 ? '+' : ''}
+                      {(tradeAccount.today_profit ?? 0).toFixed(2)} {tradeAccount.currency || ''}
+                    </strong>
+                    {' · '}Recent P/L:{' '}
+                    <strong style={{ color: (tradeAccount.recent_profit ?? 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                      {(tradeAccount.recent_profit ?? 0) >= 0 ? '+' : ''}
+                      {(tradeAccount.recent_profit ?? 0).toFixed(2)}
+                    </strong>
+                    {' · '}trades {tradeAccount.recent_trades ?? 0}
+                    {' '}(W{tradeAccount.recent_wins ?? 0}/L{tradeAccount.recent_losses ?? 0})
+                  </div>
+                  {tradeAccount.email && <div className="text-dim">{tradeAccount.email}</div>}
+                </div>
+              ) : (
+                <div className="text-xs">
+                  {tradeAccount?.error
+                    ? `Could not load account: ${tradeAccount.error}`
+                    : 'Save a valid trade-scope token to see balance and profit.'}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {tradeMsg && (
           <div className={`alert ${tradeOk ? 'alert-success' : 'alert-error'}`}>

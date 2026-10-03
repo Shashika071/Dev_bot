@@ -36,6 +36,13 @@ app.include_router(train.router)
 async def startup():
     logger.info("app_startup")
     await init_db()
+    # Resume Analyze/Force watcher if it was running before API restart
+    try:
+        from app.signal_engine.analyze_watch import analyze_watch
+
+        await analyze_watch.resume_if_needed()
+    except Exception as e:
+        logger.warning("analyze_watch_resume_skip", error=str(e))
 
 
 @app.get("/health")

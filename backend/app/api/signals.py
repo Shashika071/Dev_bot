@@ -23,6 +23,7 @@ from app.notifications.browser import (
 from app.signal_engine.chart_candles import INTERVAL_SECONDS, aggregate_ohlc
 from app.signal_engine.daily_cap import DailyCapManager
 from app.signal_engine.lifecycle import SignalLifecycleManager
+from app.signal_engine.analyze_watch import analyze_watch
 from app.signal_engine.manual_generate import generate_manual_signal
 from app.signal_engine.settings_lookup import get_latest_confirmed_settings
 
@@ -193,6 +194,27 @@ async def generate_signal(
         except Exception as e:
             result["trade"] = {"ok": False, "error": str(e)}
     return result
+
+
+@router.get("/watch/status")
+async def get_analyze_watch_status() -> dict:
+    """Current server-side Analyze/Force watcher status (survives tab close)."""
+    return analyze_watch.status()
+
+
+@router.post("/watch/start")
+async def start_analyze_watch(payload: dict | None = None) -> dict:
+    """Start continuous server-side watch until signal (or Stop / fatal)."""
+    body = payload or {}
+    mode = str(body.get("mode") or "standard").strip().lower()
+    min_p = body.get("min_probability")
+    min_probability = float(min_p) if min_p is not None else None
+    return await analyze_watch.start(mode=mode, min_probability=min_probability)
+
+
+@router.post("/watch/stop")
+async def stop_analyze_watch() -> dict:
+    return await analyze_watch.stop(reason="stopped_by_user")
 
 
 @router.post("/{signal_id}/entry")

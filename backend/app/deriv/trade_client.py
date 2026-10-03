@@ -24,6 +24,7 @@ ALLOWED_ROOT_KEYS = {
     "buy",
     "ping",
     "balance",
+    "profit_table",
     "get_account_status",
 }
 
@@ -130,6 +131,92 @@ class DerivTradeClient:
             is_virtual=auth.get("is_virtual"),
         )
         return auth
+
+    async def get_balance(self) -> dict:
+        data = await self.send({"balance": 1, "account": "current"})
+        return data.get("balance") or {}
+
+    async def get_profit_table(self, *, limit: int = 100) -> dict:
+        data = await self.send(
+            {
+                "profit_table": 1,
+                "description": 1,
+                "limit": int(limit),
+                "offset": 0,
+                "sort": "DESC",
+            }
+        )
+        return data.get("profit_table") or {}
+
+    async def fetch_account_summary(self) -> dict[str, Any]:
+        """
+        Authorize + balance + recent profit_table.
+        Returns loginid, currency, balance, is_virtual, today/total profit, etc.
+        """
+        auth = await self.authorize()
+        bal = {}
+        try:
+            bal = await self.get_balance()
+        except Exception as e:
+            logger.warning("deriv_balance_failed", error=str(e))
+
+        currency = (
+            bal.get("currency")
+            or auth.get("currency")
+            or "USD"
+        )
+        balance = float(bal.get("balance") if bal.get("balance") is not None else auth.get("balance") or 0)
+
+        today_profit = 0.0
+        total_profit = 0.0
+        trade_count = 0
+        wins = 0
+        losses = 0
+        try:
+            import datetime as _dt
+
+            pt = await self.get_profit_table(limit=100)
+            transactions = pt.get("transactions") or []
+            today = _dt.datetime.now(_dt.timezone.utc).date()
+            for tx in transactions:
+                try:
+                    profit = float(tx.get("profit") or 0)
+                except (TypeError, ValueError):
+                    continue
+                total_profit += profit
+                trade_count += 1
+                if profit > 0:
+                    wins += 1
+                elif profit < 0:
+                    losses += 1
+                # purchase_time is epoch seconds
+                ts = tx.get("purchase_time") or tx.get("transaction_time")
+                if ts is not None:
+                    try:
+                        d = _dt.datetime.fromtimestamp(float(ts), tz=_dt.timezone.utc).date()
+                        if d == today:
+                            today_profit += profit
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning("deriv_profit_table_failed", error=str(e))
+
+        return {
+            "ok": True,
+            "loginid": auth.get("loginid") or self._authorized_loginid,
+            "currency": currency,
+            "balance": balance,
+            "is_virtual": bool(auth.get("is_virtual")),
+            "email": auth.get("email"),
+            "fullname": auth.get("fullname"),
+            "account_type": "demo" if auth.get("is_virtual") else "real",
+            "today_profit": round(today_profit, 2),
+            "recent_profit": round(total_profit, 2),
+            "recent_trades": trade_count,
+            "recent_wins": wins,
+            "recent_losses": losses,
+            "country": auth.get("country"),
+        }
 
     async def get_proposal(
         self,

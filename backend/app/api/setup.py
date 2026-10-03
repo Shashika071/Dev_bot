@@ -155,17 +155,86 @@ async def put_trade_prefs(body: TradePrefsBody) -> dict:
     }
 
 
+async def _fetch_trade_account() -> dict:
+    """Authorize with stored token and return balance / profit summary."""
+    from app.deriv.trade_client import DerivTradeClient
+    from app.trade_prefs import get_trade_token
+
+    token = get_trade_token()
+    if not token:
+        return {"ok": False, "error": "No trade token configured", "token_configured": False}
+
+    client = DerivTradeClient(token)
+    try:
+        summary = await client.fetch_account_summary()
+        summary["token_configured"] = True
+        # Persist last snapshot for UI (no secrets)
+        try:
+            import json
+            import os
+            from app.config import settings
+
+            path = os.path.join(settings.model_dir, "deriv_trade_account.json")
+            os.makedirs(settings.model_dir, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(summary, f, indent=2, default=str)
+        except Exception:
+            pass
+        return summary
+    except Exception as e:
+        return {"ok": False, "error": str(e), "token_configured": True}
+    finally:
+        try:
+            await client.close()
+        except Exception:
+            pass
+
+
+@router.get("/trade-account")
+async def get_trade_account(refresh: bool = True) -> dict:
+    """
+    Show Deriv account details for the saved trade token:
+    loginid, demo/real, balance, today profit, recent P/L.
+    """
+    from app.trade_prefs import token_status
+
+    status = token_status()
+    if not status.get("token_configured"):
+        return {"ok": False, "token_configured": False, "error": "No trade token configured"}
+
+    if not refresh:
+        try:
+            import json
+            import os
+            from app.config import settings
+
+            path = os.path.join(settings.model_dir, "deriv_trade_account.json")
+            if os.path.isfile(path):
+                with open(path, encoding="utf-8") as f:
+                    cached = json.load(f)
+                if isinstance(cached, dict):
+                    return {**cached, "cached": True, **status}
+        except Exception:
+            pass
+
+    summary = await _fetch_trade_account()
+    return {**summary, **status}
+
+
 @router.put("/trade-token")
 async def put_trade_token(body: TradeTokenBody) -> dict:
     try:
         meta = save_trade_token(body.token)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    # Immediately authorize and return account details
+    account = await _fetch_trade_account()
     return {
         **meta,
         **load_trade_prefs(),
         "status": "saved",
         "message": "Token encrypted and stored. Full token is never returned to the UI.",
+        "account": account,
     }
 
 
@@ -176,6 +245,16 @@ async def delete_trade_token() -> dict:
     prefs = load_trade_prefs()
     if prefs.get("auto_trade_enabled"):
         prefs = save_trade_prefs({**prefs, "auto_trade_enabled": False})
+    # Clear cached account snapshot
+    try:
+        import os
+        from app.config import settings
+
+        path = os.path.join(settings.model_dir, "deriv_trade_account.json")
+        if os.path.isfile(path):
+            os.remove(path)
+    except Exception:
+        pass
     return {
         "token_configured": False,
         "token_mask": None,
