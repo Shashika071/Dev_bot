@@ -887,6 +887,8 @@ function TrainView() {
   const [minCal, setMinCal]       = useState('20');
   const [minEdge, setMinEdge]     = useState('15');
   const [autoStrict, setAutoStrict] = useState(true);
+  const [autoBusy, setAutoBusy] = useState(false);
+  const [autoMsg, setAutoMsg] = useState('');
   const prefsLoaded = useRef(false);
   const pollRef = useRef<ReturnType<typeof setInterval>|null>(null);
   const dlPollRef = useRef<ReturnType<typeof setInterval>|null>(null);
@@ -1007,6 +1009,113 @@ function TrainView() {
     void persistPrefs(c, e, autoStrict);
   };
 
+  const waitDownloadDone = async (timeoutMs = 180_000) => {
+    const startAt = Date.now();
+    while (Date.now() - startAt < timeoutMs) {
+      const s = await api<DownloadStatus>('/train/download-status');
+      setDl(s);
+      if (s.status === 'done' || s.status === 'error' || s.status === 'idle') return s;
+      await new Promise(r => setTimeout(r, 2000));
+    }
+    return await api<DownloadStatus>('/train/download-status');
+  };
+
+  const autoBestAll = async () => {
+    if (autoBusy || busy) return;
+    setAutoBusy(true);
+    setAutoMsg('');
+    const steps: string[] = [];
+    try {
+      setAutoMsg('1/4 Refreshing data coverage…');
+      const d = await api<DataInfo>('/train/data-info');
+      setInfo(d);
+      const rec = d.train_recommended ?? { min_calibration_samples: 20, min_edge_selected: 15, label: 'starter', span_hours: 0 };
+      const c = String(rec.min_calibration_samples);
+      const e = String(rec.min_edge_selected);
+      setMinCal(c);
+      setMinEdge(e);
+      setAutoStrict(true);
+      await persistPrefs(c, e, true);
+      steps.push(`Train strictness → cal ${c} / edge ${e} (${rec.label})`);
+
+      setAutoMsg('2/4 Saving best live bot gates…');
+      // Production-safe gates; only ease live cal sample floor slightly on short data.
+      const spanH = Number(rec.span_hours || 0);
+      const liveCal = spanH >= 72 ? 50 : spanH >= 48 ? 40 : spanH >= 24 ? 35 : 30;
+      await api('/setup/ops-prefs', {
+        method: 'PUT',
+        body: JSON.stringify({
+          max_signals_per_day: 3,
+          signal_cooldown_seconds: 540,
+          manual_min_confidence: 0.95,
+          manual_min_margin_over_breakeven: 0.03,
+          min_ev_margin: 0.02,
+          min_calibration_samples: liveCal,
+          require_touch_confluence: true,
+          confluence_min_score: 5,
+          confluence_min_gap: 1.5,
+          auto_pause_enabled: true,
+          auto_pause_min_resolved: 20,
+          auto_pause_ci_margin: 0,
+        }),
+      });
+      steps.push(`Bot gates → Analyze 95%, confluence on, live cal samples ${liveCal}`);
+
+      const sym = d.symbols?.find(s => s.symbol === symbol);
+      const sh = sym?.span_hours ?? hoursBetween(sym?.oldest, sym?.newest) ?? 0;
+      const needSpan = d.min_span_hours ?? 16;
+      if (sh < needSpan * 0.95) {
+        setAutoMsg('3/4 Filling history (~24h) because span is still short…');
+        try {
+          await api(`/train/download?${new URLSearchParams({
+            symbol,
+            days_back: '1',
+            target_ticks: '0',
+          })}`, { method: 'POST' });
+          setDl({ status: 'running', progress: 'Auto history fill…', ticks_downloaded: 0 });
+          const dlDone = await waitDownloadDone();
+          steps.push(
+            dlDone.status === 'done'
+              ? `History fill done (+${(dlDone.ticks_downloaded ?? 0).toLocaleString()} new ticks)`
+              : `History fill: ${dlDone.status}${dlDone.error ? ` — ${dlDone.error}` : ''}`
+          );
+        } catch (e: any) {
+          steps.push(`History fill skipped: ${e.message}`);
+        }
+      } else {
+        steps.push(`History fill skipped — span already ${sh.toFixed(1)}h (≥ ${needSpan}h)`);
+      }
+
+      await loadInfo(true);
+      const d2 = await api<DataInfo>('/train/data-info');
+      setInfo(d2);
+      const sym2 = d2.symbols?.find(s => s.symbol === symbol);
+      const ticks2 = sym2?.tick_count ?? 0;
+
+      if (ticks2 >= 1000) {
+        setAutoMsg('4/4 Starting training with best settings…');
+        await api(`/train/start?${new URLSearchParams({
+          symbol,
+          barrier_distance: barrier,
+          barrier_direction: dir,
+          duration_seconds: dur,
+          min_calibration_samples: c,
+          min_edge_selected: e,
+          auto_raise: 'true',
+        })}`, { method: 'POST' });
+        setTs({ status: 'running', progress: `Auto-train (cal≥${c}, edge≥${e})…` });
+        steps.push('Training started');
+      } else {
+        steps.push(`Training not started — only ${ticks2} ticks (need ≥1000). Confirm Setup and wait.`);
+      }
+
+      setAutoMsg(`Auto best complete:\n• ${steps.join('\n• ')}`);
+    } catch (e: any) {
+      setAutoMsg(`Auto best failed: ${e.message}${steps.length ? `\n• ${steps.join('\n• ')}` : ''}`);
+    }
+    setAutoBusy(false);
+  };
+
   const startDownload = async () => {
     try {
       await api(`/train/download?${new URLSearchParams({
@@ -1057,6 +1166,33 @@ function TrainView() {
           <strong>UI owns training settings.</strong> Calibration / edge levels are saved on the server from this page.
           .env values are first-boot defaults only. When more data arrives: pick a higher level (or Auto-raise) → Train.
         </div>
+      </div>
+
+      <div className="glass">
+        <div className="section-header">
+          <h3 className="section-title"><Zap size={16}/>One-click best setup</h3>
+        </div>
+        <p className="text-xs text-dim mb-3">
+          Automatically picks the best train strictness for your current span, saves safe live bot gates,
+          fills history if span is short, then starts training. No VPS / .env edits.
+        </p>
+        {autoMsg && (
+          <div className={`alert ${autoMsg.startsWith('Auto best failed') ? 'alert-error' : 'alert-info'} mb-3`}>
+            <Info size={14}/>
+            <pre style={{ margin: 0, whiteSpace: 'pre-wrap', fontFamily: 'inherit', fontSize: '0.82rem' }}>{autoMsg}</pre>
+          </div>
+        )}
+        <button
+          id="btn-auto-best"
+          className="btn btn-primary w-full"
+          style={{ justifyContent: 'center', padding: '0.9rem' }}
+          onClick={autoBestAll}
+          disabled={autoBusy || busy}
+        >
+          {autoBusy
+            ? <><Loader2 size={16} className="spin"/>Auto-setting data &amp; training…</>
+            : <><Zap size={16}/>Auto best: data + settings + train</>}
+        </button>
       </div>
 
       {/* Full guide */}

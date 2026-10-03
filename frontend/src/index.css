@@ -48,7 +48,10 @@
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-html { scroll-behavior: smooth; }
+html {
+  scroll-behavior: smooth;
+  color-scheme: dark;
+}
 
 body {
   font-family: var(--font-body);
@@ -56,6 +59,7 @@ body {
   color: var(--text-primary);
   line-height: 1.6;
   min-height: 100vh;
+  color-scheme: dark;
   overflow-x: hidden;
 
   /* Animated mesh gradient background */
@@ -487,9 +491,29 @@ body {
   font-size: 0.9rem;
   transition: all 0.2s;
   outline: none;
+  color-scheme: dark;
 }
 
 .form-select { appearance: none; cursor: pointer; }
+
+/* Native <option> list (Windows/Chrome often paints white otherwise) */
+.form-select option,
+.form-select optgroup {
+  background-color: #0a1628;
+  color: #e2eaf8;
+}
+
+.form-select option:checked,
+.form-select option:hover,
+.form-select option:focus {
+  background-color: #123056;
+  color: #ffffff;
+}
+
+select.form-select,
+select {
+  color-scheme: dark;
+}
 
 .form-input:focus, .form-select:focus {
   border-color: var(--cyan);
