@@ -1,8 +1,15 @@
 """
-Deriv trading WebSocket client — authorize / proposal / buy only.
+Deriv trading client — supports legacy API tokens and new PAT apps.
 
-Isolated from the public market-data client (which still forbids buy/sell).
-Use only when auto-trade is explicitly enabled and a trade token is configured.
+New PAT flow (developers.deriv.com):
+  REST: Authorization: Bearer <pat_...> + Deriv-App-ID
+  GET /trading/v1/options/accounts  → balance / account list
+  POST .../accounts/{id}/otp         → authenticated WebSocket URL
+  WS: proposal / buy on that URL
+
+Legacy flow (classic tokens):
+  wss://ws.derivws.com/websockets/v3?app_id=...
+  authorize → proposal → buy
 """
 
 from __future__ import annotations
@@ -11,12 +18,15 @@ import asyncio
 import json
 from typing import Any, Optional
 
+import httpx
 import structlog
 import websockets
 
 from app.config import settings
 
 logger = structlog.get_logger(__name__)
+
+API_BASE = "https://api.derivws.com"
 
 ALLOWED_ROOT_KEYS = {
     "authorize",
@@ -29,92 +39,273 @@ ALLOWED_ROOT_KEYS = {
 }
 
 
+def _is_pat(token: str) -> bool:
+    t = (token or "").strip().lower()
+    return t.startswith("pat_")
+
+
 class DerivTradeClient:
-    """
-    Short-lived authenticated WS for placing One-Touch contracts.
+    """Short-lived client for account lookup + One-Touch buy."""
 
-    Uses classic v3 account WebSocket (authorize/balance/proposal/buy) per
-    https://developers.deriv.com/docs/ — not the public market-data endpoint.
-    """
-
-    # Cloudflare 520s are common on a single edge — rotate hosts + retry.
-    _HOSTS = (
-        "ws.derivws.com",
-        "green.derivws.com",
-        "blue.derivws.com",
-        "ws.binaryws.com",
-    )
+    _HOSTS = ("ws.derivws.com", "green.derivws.com")
 
     def __init__(self, token: str, app_id: str | int | None = None):
         self.token = str(token).strip()
-        # Prefer configured app_id; 1089 is Deriv's documented public sample app_id
-        self.app_id = str(app_id or settings.deriv_app_id or "1089")
+        self.app_id = str(app_id or settings.deriv_app_id or "1089").strip()
         self.ws: Optional[Any] = None
         self._connected_url: Optional[str] = None
         self._req_id = 0
         self._pending: dict[int, asyncio.Future] = {}
         self._reader_task: Optional[asyncio.Task] = None
         self._authorized_loginid: Optional[str] = None
+        self._account_id: Optional[str] = None
+        self._use_pat = _is_pat(self.token)
 
-    def _candidate_urls(self) -> list[str]:
-        app_ids = [self.app_id]
-        # If custom/missing app_id fails InvalidAppID, also try common public IDs
-        for extra in ("1089", "36544"):
-            if extra not in app_ids:
-                app_ids.append(extra)
-        urls: list[str] = []
-        for host in self._HOSTS:
-            for aid in app_ids:
-                urls.append(f"wss://{host}/websockets/v3?app_id={aid}")
-        return urls
+    def _rest_headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.token}",
+            "Deriv-App-ID": self.app_id,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
 
     def _next_req_id(self) -> int:
         self._req_id += 1
         return self._req_id
 
+    async def list_accounts(self) -> list[dict]:
+        """GET options accounts (PAT / new API)."""
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            r = await http.get(
+                f"{API_BASE}/trading/v1/options/accounts",
+                headers=self._rest_headers(),
+            )
+            if r.status_code >= 400:
+                raise RuntimeError(
+                    f"Accounts API HTTP {r.status_code}: {r.text[:300]}"
+                )
+            body = r.json()
+        data = body.get("data") if isinstance(body, dict) else body
+        if isinstance(data, dict) and "accounts" in data:
+            data = data["accounts"]
+        if not isinstance(data, list):
+            raise RuntimeError(f"Unexpected accounts response: {str(body)[:200]}")
+        return data
+
+    async def request_otp_ws_url(self, account_id: str) -> str:
+        async with httpx.AsyncClient(timeout=20.0) as http:
+            r = await http.post(
+                f"{API_BASE}/trading/v1/options/accounts/{account_id}/otp",
+                headers=self._rest_headers(),
+            )
+            if r.status_code >= 400:
+                raise RuntimeError(f"OTP API HTTP {r.status_code}: {r.text[:300]}")
+            body = r.json()
+        data = body.get("data") if isinstance(body, dict) else {}
+        url = (data or {}).get("url") or (body.get("url") if isinstance(body, dict) else None)
+        if not url:
+            raise RuntimeError(f"OTP response missing url: {str(body)[:200]}")
+        return str(url)
+
+    def _pick_account(self, accounts: list[dict]) -> dict:
+        if not accounts:
+            raise RuntimeError("No Deriv options accounts on this PAT")
+        # Prefer demo first (safer), else first active
+        for a in accounts:
+            at = str(a.get("account_type") or a.get("group") or "").lower()
+            if "demo" in at or str(a.get("account_id") or "").upper().startswith(("VRTC", "VRT", "DOT")):
+                return a
+        return accounts[0]
+
+    async def fetch_account_summary(self) -> dict[str, Any]:
+        """Balance / account details for Setup UI."""
+        if self._use_pat:
+            return await self._fetch_summary_pat()
+        return await self._fetch_summary_legacy()
+
+    async def _fetch_summary_pat(self) -> dict[str, Any]:
+        accounts = await self.list_accounts()
+        chosen = self._pick_account(accounts)
+        self._account_id = str(
+            chosen.get("account_id") or chosen.get("loginid") or chosen.get("id") or ""
+        )
+        try:
+            balance = float(chosen.get("balance") or 0)
+        except (TypeError, ValueError):
+            balance = 0.0
+        currency = str(chosen.get("currency") or "USD")
+        at = str(chosen.get("account_type") or chosen.get("group") or "").lower()
+        is_virtual = "demo" in at or self._account_id.upper().startswith(("VRTC", "VRT", "DOT"))
+        # Enrich via OTP WS balance if REST balance missing
+        if balance <= 0:
+            try:
+                await self.connect_pat(self._account_id)
+                bal = await self.get_balance()
+                balance = float(bal.get("balance") or 0)
+                currency = str(bal.get("currency") or currency)
+            except Exception as e:
+                logger.warning("pat_balance_ws_failed", error=str(e))
+
+        return {
+            "ok": True,
+            "loginid": self._account_id,
+            "currency": currency,
+            "balance": balance,
+            "is_virtual": is_virtual,
+            "account_type": "demo" if is_virtual else "real",
+            "email": None,
+            "fullname": None,
+            "today_profit": None,
+            "recent_profit": None,
+            "recent_trades": None,
+            "recent_wins": None,
+            "recent_losses": None,
+            "accounts": [
+                {
+                    "account_id": a.get("account_id") or a.get("loginid"),
+                    "balance": a.get("balance"),
+                    "currency": a.get("currency"),
+                    "account_type": a.get("account_type") or a.get("group"),
+                }
+                for a in accounts
+            ],
+            "auth_mode": "pat",
+            "app_id": self.app_id,
+        }
+
+    async def _fetch_summary_legacy(self) -> dict[str, Any]:
+        auth = await self.authorize()
+        bal = {}
+        try:
+            bal = await self.get_balance()
+        except Exception as e:
+            logger.warning("deriv_balance_failed", error=str(e))
+
+        currency = bal.get("currency") or auth.get("currency") or "USD"
+        balance = float(
+            bal.get("balance") if bal.get("balance") is not None else auth.get("balance") or 0
+        )
+
+        today_profit = 0.0
+        total_profit = 0.0
+        trade_count = 0
+        wins = 0
+        losses = 0
+        try:
+            import datetime as _dt
+
+            pt = await self.get_profit_table(limit=100)
+            transactions = pt.get("transactions") or []
+            today = _dt.datetime.now(_dt.timezone.utc).date()
+            for tx in transactions:
+                try:
+                    profit = float(tx.get("profit") or 0)
+                except (TypeError, ValueError):
+                    continue
+                total_profit += profit
+                trade_count += 1
+                if profit > 0:
+                    wins += 1
+                elif profit < 0:
+                    losses += 1
+                ts = tx.get("purchase_time") or tx.get("transaction_time")
+                if ts is not None:
+                    try:
+                        d = _dt.datetime.fromtimestamp(float(ts), tz=_dt.timezone.utc).date()
+                        if d == today:
+                            today_profit += profit
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning("deriv_profit_table_failed", error=str(e))
+
+        return {
+            "ok": True,
+            "loginid": auth.get("loginid") or self._authorized_loginid,
+            "currency": currency,
+            "balance": balance,
+            "is_virtual": bool(auth.get("is_virtual")),
+            "email": auth.get("email"),
+            "fullname": auth.get("fullname"),
+            "account_type": "demo" if auth.get("is_virtual") else "real",
+            "today_profit": round(today_profit, 2),
+            "recent_profit": round(total_profit, 2),
+            "recent_trades": trade_count,
+            "recent_wins": wins,
+            "recent_losses": losses,
+            "auth_mode": "legacy",
+            "app_id": self.app_id,
+        }
+
     async def connect(self) -> None:
         if self.ws is not None:
             return
+        if self._use_pat:
+            if not self._account_id:
+                accounts = await self.list_accounts()
+                chosen = self._pick_account(accounts)
+                self._account_id = str(
+                    chosen.get("account_id") or chosen.get("loginid") or ""
+                )
+            await self.connect_pat(self._account_id)
+            return
+        await self._connect_legacy()
+
+    async def connect_pat(self, account_id: str) -> None:
+        if self.ws is not None:
+            await self.close()
+        url = await self.request_otp_ws_url(account_id)
+        self.ws = await websockets.connect(
+            url,
+            open_timeout=15,
+            ping_interval=20,
+            ping_timeout=20,
+            close_timeout=3,
+            user_agent_header="deriv-touch-bot/1.0",
+        )
+        self._connected_url = url.split("?")[0]
+        self._account_id = account_id
+        self._authorized_loginid = account_id
+        self._reader_task = asyncio.create_task(self._read_loop())
+        logger.info("deriv_trade_pat_ws_connected", account_id=account_id)
+
+    async def _connect_legacy(self) -> None:
         errors: list[str] = []
-        for url in self._candidate_urls():
-            for attempt in range(1, 3):
-                try:
-                    self.ws = await websockets.connect(
-                        url,
-                        open_timeout=20,
-                        ping_interval=20,
-                        ping_timeout=20,
-                        close_timeout=5,
-                        origin="https://app.deriv.com",
-                        user_agent_header="deriv-touch-bot/1.0",
-                    )
-                    self._connected_url = url
-                    self._reader_task = asyncio.create_task(self._read_loop())
-                    # Keep app_id that worked (from query)
-                    if "app_id=" in url:
-                        self.app_id = url.split("app_id=")[-1].split("&")[0]
-                    logger.info("deriv_trade_ws_connected", url=url, attempt=attempt)
-                    return
-                except Exception as e:
-                    msg = str(e)
-                    errors.append(f"{url} attempt{attempt}: {msg}")
-                    logger.warning(
-                        "deriv_trade_ws_connect_failed",
-                        url=url,
-                        attempt=attempt,
-                        error=msg,
-                    )
-                    self.ws = None
-                    # Brief backoff on Cloudflare 520 / transient gateway errors
-                    if "520" in msg or "502" in msg or "503" in msg:
-                        await asyncio.sleep(0.6 * attempt)
-                    else:
-                        break  # try next URL
+        deadline = asyncio.get_event_loop().time() + 18.0
+        app_ids = [self.app_id]
+        if "1089" not in app_ids:
+            app_ids.append("1089")
+        urls = [
+            f"wss://{host}/websockets/v3?app_id={aid}"
+            for host in self._HOSTS
+            for aid in app_ids
+        ]
+        for url in urls:
+            if asyncio.get_event_loop().time() >= deadline:
+                break
+            try:
+                self.ws = await websockets.connect(
+                    url,
+                    open_timeout=5,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    close_timeout=3,
+                    origin="https://app.deriv.com",
+                    user_agent_header="deriv-touch-bot/1.0",
+                )
+                self._connected_url = url
+                self._reader_task = asyncio.create_task(self._read_loop())
+                if "app_id=" in url:
+                    self.app_id = url.split("app_id=")[-1].split("&")[0]
+                logger.info("deriv_trade_ws_connected", url=url)
+                return
+            except Exception as e:
+                errors.append(f"{url}: {e}")
+                self.ws = None
+                await asyncio.sleep(0.2)
         raise ConnectionError(
-            "Could not open Deriv trade WebSocket (authorize endpoint). "
-            "HTTP 520 = Deriv/Cloudflare edge issue or blocked path — retried hosts. "
-            "Ensure token is valid and DERIV_APP_ID is set in .env.prod if you have a registered app. "
-            f"Last errors: {'; '.join(errors[-3:])}"
+            "Could not open legacy Deriv trade WebSocket. "
+            f"Last: {errors[-1] if errors else 'no attempts'}"
         )
 
     async def close(self) -> None:
@@ -194,7 +385,7 @@ class DerivTradeClient:
         return auth
 
     async def get_balance(self) -> dict:
-        data = await self.send({"balance": 1, "account": "current"})
+        data = await self.send({"balance": 1})
         return data.get("balance") or {}
 
     async def get_profit_table(self, *, limit: int = 100) -> dict:
@@ -209,76 +400,6 @@ class DerivTradeClient:
         )
         return data.get("profit_table") or {}
 
-    async def fetch_account_summary(self) -> dict[str, Any]:
-        """
-        Authorize + balance + recent profit_table.
-        Returns loginid, currency, balance, is_virtual, today/total profit, etc.
-        """
-        auth = await self.authorize()
-        bal = {}
-        try:
-            bal = await self.get_balance()
-        except Exception as e:
-            logger.warning("deriv_balance_failed", error=str(e))
-
-        currency = (
-            bal.get("currency")
-            or auth.get("currency")
-            or "USD"
-        )
-        balance = float(bal.get("balance") if bal.get("balance") is not None else auth.get("balance") or 0)
-
-        today_profit = 0.0
-        total_profit = 0.0
-        trade_count = 0
-        wins = 0
-        losses = 0
-        try:
-            import datetime as _dt
-
-            pt = await self.get_profit_table(limit=100)
-            transactions = pt.get("transactions") or []
-            today = _dt.datetime.now(_dt.timezone.utc).date()
-            for tx in transactions:
-                try:
-                    profit = float(tx.get("profit") or 0)
-                except (TypeError, ValueError):
-                    continue
-                total_profit += profit
-                trade_count += 1
-                if profit > 0:
-                    wins += 1
-                elif profit < 0:
-                    losses += 1
-                # purchase_time is epoch seconds
-                ts = tx.get("purchase_time") or tx.get("transaction_time")
-                if ts is not None:
-                    try:
-                        d = _dt.datetime.fromtimestamp(float(ts), tz=_dt.timezone.utc).date()
-                        if d == today:
-                            today_profit += profit
-                    except Exception:
-                        pass
-        except Exception as e:
-            logger.warning("deriv_profit_table_failed", error=str(e))
-
-        return {
-            "ok": True,
-            "loginid": auth.get("loginid") or self._authorized_loginid,
-            "currency": currency,
-            "balance": balance,
-            "is_virtual": bool(auth.get("is_virtual")),
-            "email": auth.get("email"),
-            "fullname": auth.get("fullname"),
-            "account_type": "demo" if auth.get("is_virtual") else "real",
-            "today_profit": round(today_profit, 2),
-            "recent_profit": round(total_profit, 2),
-            "recent_trades": trade_count,
-            "recent_wins": wins,
-            "recent_losses": losses,
-            "country": auth.get("country"),
-        }
-
     async def get_proposal(
         self,
         *,
@@ -291,28 +412,27 @@ class DerivTradeClient:
         currency: str = "USD",
         basis: str = "stake",
     ) -> dict:
-        data = await self.send(
-            {
-                "proposal": 1,
-                "amount": float(amount),
-                "basis": basis,
-                "contract_type": contract_type,
-                "currency": currency,
-                "duration": int(duration),
-                "duration_unit": duration_unit,
-                "symbol": symbol,
-                "barrier": barrier,
-            }
-        )
+        # New options WS often wants underlying_symbol; keep symbol for legacy
+        msg: dict[str, Any] = {
+            "proposal": 1,
+            "amount": float(amount),
+            "basis": basis,
+            "contract_type": contract_type,
+            "currency": currency,
+            "duration": int(duration),
+            "duration_unit": duration_unit,
+            "barrier": barrier,
+        }
+        if self._use_pat:
+            msg["underlying_symbol"] = symbol
+            msg["symbol"] = symbol
+        else:
+            msg["symbol"] = symbol
+        data = await self.send(msg)
         return data.get("proposal") or {}
 
     async def buy(self, proposal_id: str, price: float) -> dict:
-        data = await self.send(
-            {
-                "buy": str(proposal_id),
-                "price": float(price),
-            }
-        )
+        data = await self.send({"buy": str(proposal_id), "price": float(price)})
         return data.get("buy") or data
 
     async def place_one_touch(
@@ -326,12 +446,9 @@ class DerivTradeClient:
         stake: float,
         currency: str = "USD",
     ) -> dict[str, Any]:
-        """
-        Authorize (if needed), request proposal, buy One-Touch.
-        Returns {ok, contract_id, buy_price, longcode, error, raw}.
-        """
         try:
-            if not self._authorized_loginid:
+            await self.connect()
+            if not self._use_pat and not self._authorized_loginid:
                 await self.authorize()
             proposal = await self.get_proposal(
                 symbol=symbol,
@@ -346,24 +463,19 @@ class DerivTradeClient:
             pid = proposal.get("id")
             ask = float(proposal.get("ask_price") or 0)
             if not pid or ask <= 0:
-                return {
-                    "ok": False,
-                    "error": "Empty proposal from Deriv",
-                    "raw": proposal,
-                }
-            # Price buffer slightly above ask (Deriv accepts max price)
+                return {"ok": False, "error": "Empty proposal from Deriv", "raw": proposal}
             buy_price = round(ask * 1.02, 2)
             bought = await self.buy(pid, buy_price)
-            contract_id = bought.get("contract_id")
             return {
                 "ok": True,
-                "contract_id": contract_id,
+                "contract_id": bought.get("contract_id"),
                 "buy_price": bought.get("buy_price") or ask,
                 "longcode": bought.get("longcode") or proposal.get("longcode"),
-                "loginid": self._authorized_loginid,
+                "loginid": self._authorized_loginid or self._account_id,
                 "direction": direction,
                 "barrier": barrier,
                 "stake": stake,
+                "auth_mode": "pat" if self._use_pat else "legacy",
                 "raw": bought,
             }
         except Exception as e:
