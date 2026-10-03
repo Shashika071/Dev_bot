@@ -30,20 +30,43 @@ ALLOWED_ROOT_KEYS = {
 
 
 class DerivTradeClient:
-    """Short-lived authenticated WS for placing One-Touch contracts."""
+    """
+    Short-lived authenticated WS for placing One-Touch contracts.
+
+    Uses classic v3 account WebSocket (authorize/balance/proposal/buy) per
+    https://developers.deriv.com/docs/ — not the public market-data endpoint.
+    """
+
+    # Cloudflare 520s are common on a single edge — rotate hosts + retry.
+    _HOSTS = (
+        "ws.derivws.com",
+        "green.derivws.com",
+        "blue.derivws.com",
+        "ws.binaryws.com",
+    )
 
     def __init__(self, token: str, app_id: str | int | None = None):
         self.token = str(token).strip()
-        self.app_id = str(app_id or settings.deriv_app_id or "36544")
+        # Prefer configured app_id; 1089 is Deriv's documented public sample app_id
+        self.app_id = str(app_id or settings.deriv_app_id or "1089")
         self.ws: Optional[Any] = None
+        self._connected_url: Optional[str] = None
         self._req_id = 0
         self._pending: dict[int, asyncio.Future] = {}
         self._reader_task: Optional[asyncio.Task] = None
         self._authorized_loginid: Optional[str] = None
 
-    @property
-    def url(self) -> str:
-        return f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
+    def _candidate_urls(self) -> list[str]:
+        app_ids = [self.app_id]
+        # If custom/missing app_id fails InvalidAppID, also try common public IDs
+        for extra in ("1089", "36544"):
+            if extra not in app_ids:
+                app_ids.append(extra)
+        urls: list[str] = []
+        for host in self._HOSTS:
+            for aid in app_ids:
+                urls.append(f"wss://{host}/websockets/v3?app_id={aid}")
+        return urls
 
     def _next_req_id(self) -> int:
         self._req_id += 1
@@ -52,9 +75,47 @@ class DerivTradeClient:
     async def connect(self) -> None:
         if self.ws is not None:
             return
-        self.ws = await websockets.connect(self.url, open_timeout=20, ping_interval=20)
-        self._reader_task = asyncio.create_task(self._read_loop())
-        logger.info("deriv_trade_ws_connected", app_id=self.app_id)
+        errors: list[str] = []
+        for url in self._candidate_urls():
+            for attempt in range(1, 3):
+                try:
+                    self.ws = await websockets.connect(
+                        url,
+                        open_timeout=20,
+                        ping_interval=20,
+                        ping_timeout=20,
+                        close_timeout=5,
+                        origin="https://app.deriv.com",
+                        user_agent_header="deriv-touch-bot/1.0",
+                    )
+                    self._connected_url = url
+                    self._reader_task = asyncio.create_task(self._read_loop())
+                    # Keep app_id that worked (from query)
+                    if "app_id=" in url:
+                        self.app_id = url.split("app_id=")[-1].split("&")[0]
+                    logger.info("deriv_trade_ws_connected", url=url, attempt=attempt)
+                    return
+                except Exception as e:
+                    msg = str(e)
+                    errors.append(f"{url} attempt{attempt}: {msg}")
+                    logger.warning(
+                        "deriv_trade_ws_connect_failed",
+                        url=url,
+                        attempt=attempt,
+                        error=msg,
+                    )
+                    self.ws = None
+                    # Brief backoff on Cloudflare 520 / transient gateway errors
+                    if "520" in msg or "502" in msg or "503" in msg:
+                        await asyncio.sleep(0.6 * attempt)
+                    else:
+                        break  # try next URL
+        raise ConnectionError(
+            "Could not open Deriv trade WebSocket (authorize endpoint). "
+            "HTTP 520 = Deriv/Cloudflare edge issue or blocked path — retried hosts. "
+            "Ensure token is valid and DERIV_APP_ID is set in .env.prod if you have a registered app. "
+            f"Last errors: {'; '.join(errors[-3:])}"
+        )
 
     async def close(self) -> None:
         if self._reader_task:

@@ -2518,7 +2518,17 @@ function SetupView({ online }: { online: boolean }) {
               ) : (
                 <div className="text-xs">
                   {tradeAccount?.error
-                    ? `Could not load account: ${tradeAccount.error}`
+                    ? (
+                      <>
+                        Could not load account: {tradeAccount.error}
+                        {(tradeAccount.error.includes('520') || tradeAccount.error.includes('WebSocket')) && (
+                          <div className="text-dim mt-1">
+                            Tip: HTTP 520 is Deriv’s edge (temporary). Click Refresh, or set DERIV_APP_ID in .env.prod
+                            to your app id from developers.deriv.com, then rebuild backend.
+                          </div>
+                        )}
+                      </>
+                    )
                     : 'Save a valid trade-scope token to see balance and profit.'}
                 </div>
               )}
