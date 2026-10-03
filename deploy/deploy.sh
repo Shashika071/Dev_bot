@@ -113,6 +113,7 @@ Usage: $0 [up|down|status|logs|connect-nginx]
   logs           Follow deriv compose logs
   connect-nginx  Only attach $FIYOLA_NGINX to network $EDGE_NETWORK
   fix-db         Rewrite DATABASE_URL host to postgres and recreate backend/worker
+  auto-ssl|ssl   Auto HTTPS on :8443 (own certs, Fiyola untouched)
 
 Env overrides:
   EDGE_NETWORK=$EDGE_NETWORK
@@ -128,6 +129,7 @@ case "$ACTION" in
   logs)            cmd_logs ;;
   connect-nginx)   need docker; connect_nginx ;;
   fix-db)          need docker; bash "$ROOT/deploy/fix-backend-db.sh" ;;
+  auto-ssl|ssl)    need docker; bash "$ROOT/deploy/auto-ssl.sh" ;;
   -h|--help|help)  usage ;;
   *) echo "Unknown command: $ACTION"; usage; exit 1 ;;
 esac
