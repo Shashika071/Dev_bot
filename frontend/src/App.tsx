@@ -363,7 +363,8 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
   const [analysisRows, setAnalysisRows] = useState<Array<{
     direction: string; ok?: boolean; calibrated_probability?: number;
     breakeven_probability?: number; margin_over_breakeven?: number;
-    meets_confidence?: boolean; selected_pipeline?: string; reason?: string;
+    meets_confidence?: boolean; confluence_met?: boolean;
+    selected_pipeline?: string; reason?: string;
   }>>([]);
 
   const load = useCallback(async () => {
@@ -466,7 +467,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
             className="btn btn-primary"
             onClick={analyzeGenerate}
             disabled={analyzeBusy || !models?.trained}
-            title="Run full model analysis; only create a signal if confidence is high enough"
+            title="Require touch confluence plus high model confidence before creating a signal"
           >
             {analyzeBusy ? <Loader2 size={14} className="spin"/> : <Zap size={14}/>}
             Analyze & Signal
@@ -493,6 +494,9 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
                         {' '}p={(a.calibrated_probability! * 100).toFixed(1)}%
                         {' · '}BE={(a.breakeven_probability! * 100).toFixed(1)}%
                         {' · '}margin={(a.margin_over_breakeven! * 100).toFixed(1)}%
+                        {a.confluence_met
+                          ? <span className="text-green"> · confluence ✓</span>
+                          : <span className="text-dim"> · no confluence</span>}
                         {a.meets_confidence
                           ? <span className="text-green"> · READY</span>
                           : <span className="text-dim"> · below bar</span>}

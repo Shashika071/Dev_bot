@@ -7,6 +7,7 @@ from app.strategies.base import BaseStrategy, StrategySignal
 from app.strategies.ma_trend import MATrendStrategy
 from app.strategies.donchian import DonchianBreakoutStrategy
 from app.strategies.bbands_rsi import BollingerRSIStrategy
+from app.strategies.touch_confluence import TouchConfluenceStrategy
 import pandas as pd
 
 
@@ -37,6 +38,10 @@ class StrategyRegistry:
         cont = BollingerRSIStrategy(mode="continuation")
         cont.name = "bbands_rsi_continuation"
         self._strategies[cont.name] = cont
+
+        # Touch-specific confirmation: reachability must agree with trend,
+        # momentum, RSI, and breakout/expansion evidence.
+        self.register(TouchConfluenceStrategy())
 
     def evaluate_all(
         self,

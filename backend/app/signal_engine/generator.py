@@ -137,7 +137,13 @@ class SignalGenerator:
 
             candidates = self.strategies.evaluate_all(feat_df, current_price, barrier_distance)
             candidates = [c for c in candidates if c.direction == direction]
-            if not candidates and (force_no_edge or confidence_override):
+            if confidence_override and not force_no_edge:
+                # Manual Analyze & Signal requires the touch-specific market
+                # confluence as well as the model probability threshold.
+                candidates = [
+                    c for c in candidates if c.strategy_name == "touch_confluence"
+                ]
+            if not candidates and force_no_edge:
                 from app.strategies.base import StrategySignal
 
                 candidates = [

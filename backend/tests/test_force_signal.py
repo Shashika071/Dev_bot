@@ -29,6 +29,23 @@ class MagicSettings:
     duration_seconds = 540
 
 
+def _upper_confluence_features():
+    return pd.DataFrame({
+        "return_10": [0.001],
+        "return_60": [0.002],
+        "return_300": [0.003],
+        "price_range_60": [0.12],
+        "price_range_300": [0.25],
+        "ma_crossover": [1.0],
+        "ma_fast_slope": [0.002],
+        "ma_slow_slope": [0.001],
+        "rsi_14": [62.0],
+        "bb_position": [0.72],
+        "donchian_breakout_state": [1.0],
+        "realized_vol_60": [0.001],
+    })
+
+
 def _gen(p=0.78, has_edge=False):
     strategies = StrategyRegistry()
     strategies.register_defaults()
@@ -52,7 +69,7 @@ def _gen(p=0.78, has_edge=False):
 @pytest.mark.asyncio
 async def test_confidence_override_emits_when_high():
     gen, lifecycle = _gen(p=0.80)
-    feat = pd.DataFrame({"return_10": [0.0]})
+    feat = _upper_confluence_features()
     session = AsyncMock()
     with patch(
         "app.signal_engine.generator.get_latest_confirmed_settings",
@@ -79,7 +96,7 @@ async def test_confidence_override_emits_when_high():
 @pytest.mark.asyncio
 async def test_confidence_override_skips_when_low():
     gen, lifecycle = _gen(p=0.55)
-    feat = pd.DataFrame({"return_10": [0.0]})
+    feat = _upper_confluence_features()
     session = AsyncMock()
     with patch(
         "app.signal_engine.generator.get_latest_confirmed_settings",
@@ -95,6 +112,35 @@ async def test_confidence_override_skips_when_low():
             allowed_directions=["upper"],
             confidence_override=True,
             min_confidence=0.72,
+            min_margin_over_breakeven=0.03,
+        )
+    assert result is None
+    lifecycle.create_signal.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_confidence_override_requires_touch_confluence():
+    gen, lifecycle = _gen(p=0.99)
+    feat = pd.DataFrame({
+        "return_10": [0.001],
+        "price_range_60": [0.01],  # barrier is not reachable in recent range
+        "price_range_300": [0.02],
+    })
+    session = AsyncMock()
+    with patch(
+        "app.signal_engine.generator.get_latest_confirmed_settings",
+        new=AsyncMock(return_value=MagicSettings()),
+    ):
+        result = await gen.evaluate_and_generate(
+            session=session,
+            features_df=feat,
+            current_price=100.0,
+            barrier_distance=0.09,
+            symbol="R_100",
+            current_quote={"ask_price": 4.0, "payout": 10.0},
+            allowed_directions=["upper"],
+            confidence_override=True,
+            min_confidence=0.95,
             min_margin_over_breakeven=0.03,
         )
     assert result is None

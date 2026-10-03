@@ -242,7 +242,18 @@ async def generate_manual_signal(
         breakeven = (ask / payout) if payout > 0 else 1.0
         cal = float(pred["calibrated_probability"])
         margin = cal - breakeven
-        meets = cal >= min_conf and margin >= min_margin
+        confluence_strategy = generator.strategies.get_strategy("touch_confluence")
+        confluence = (
+            confluence_strategy.evaluate(feat_df, current_price, barrier_dist)
+            if confluence_strategy is not None
+            else None
+        )
+        confluence_met = bool(confluence and confluence.direction == direction)
+        meets = (
+            cal >= min_conf
+            and margin >= min_margin
+            and (force_no_edge or confluence_met)
+        )
         analysis.append({
             "direction": direction,
             "ok": True,
@@ -256,6 +267,8 @@ async def generate_manual_signal(
             "selected_pipeline": pred.get("selected_pipeline"),
             "component_probabilities": pred.get("component_probabilities") or {},
             "meets_confidence": meets,
+            "confluence_met": confluence_met,
+            "confluence_explanation": confluence.explanation if confluence_met else None,
             "spot": current_price,
         })
 
@@ -301,13 +314,15 @@ async def generate_manual_signal(
                 f" Best now: {best['direction'].upper()} "
                 f"{best['calibrated_probability']*100:.1f}% "
                 f"(breakeven {best['breakeven_probability']*100:.1f}%, "
-                f"margin {best['margin_over_breakeven']*100:.1f}%)."
+                f"margin {best['margin_over_breakeven']*100:.1f}%, "
+                f"confluence={'yes' if best.get('confluence_met') else 'no'})."
             )
         return {
             "ok": False,
             "reason": (
                 f"Analyzed — no high-confidence setup. "
-                f"Need p≥{min_conf*100:.0f}% and margin≥{min_margin*100:.0f}% over quote breakeven."
+                f"Need touch confluence, p≥{min_conf*100:.0f}%, and "
+                f"margin≥{min_margin*100:.0f}% over quote breakeven."
                 f"{best_line} Try again when the model is more confident."
             ),
             "analysis": analysis,
