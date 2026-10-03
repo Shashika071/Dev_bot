@@ -37,11 +37,6 @@ if [[ -z "$EMAIL" ]]; then
   exit 1
 fi
 
-HOOKS="$ROOT/deploy/certbot-hooks"
-# Strip Windows CRLF if present (breaks #!/bin/sh inside Docker)
-sed -i 's/\r$//' "$HOOKS/auth.sh" "$HOOKS/cleanup.sh" 2>/dev/null || true
-chmod +x "$HOOKS/auth.sh" "$HOOKS/cleanup.sh"
-
 cat <<EOF
 
 ============================================================
@@ -51,35 +46,31 @@ Domains:
   - ${DOMAIN_UI}
   - ${DOMAIN_API}
 
-Script will PRINT the TXT host + value, then WAIT until Google DNS
-sees it (no Enter needed). Keep Spaceship open and:
+Certbot WILL print the Value on screen. Then:
 
-  1) Add/update TXT
-       Host:  _acme-challenge.devbot   or   _acme-challenge.backdev
-       Value: (exact string printed)
-  2) Leave the terminal alone until it says "DNS OK"
+  1) Spaceship → TXT host:
+       _acme-challenge.devbot   or   _acme-challenge.backdev
+  2) Paste the Value Certbot showed
+  3) In a SECOND SSH tab, wait until dig shows that Value:
+       dig +short TXT _acme-challenge.devbot.crexline.com @8.8.8.8
+       dig +short TXT _acme-challenge.backdev.crexline.com @8.8.8.8
+  4) ONLY then press Enter in the Certbot tab
 
-If the Value is not visible in this terminal, open a SECOND SSH tab:
-  cat certs/letsencrypt/PENDING_TXT.txt
-
-You may get one or two prompts (one per domain). Do NOT press Ctrl+C.
+Do this for each domain prompt. Keep both TXT rows (do not delete).
 ============================================================
 
 EOF
 
 read -r -p "Press Enter to start Certbot..." _
 
-# Manual DNS with auth-hook that polls Google DNS before continuing
+# Classic manual mode — Certbot itself prints the TXT value (visible).
 docker run --rm -it \
   -v "$LE_DIR:/etc/letsencrypt" \
   -v "$WORK_DIR:/var/lib/letsencrypt" \
   -v "$LOGS_DIR:/var/log/letsencrypt" \
-  -v "$HOOKS:/hooks:ro" \
   certbot/certbot certonly \
   --manual \
   --preferred-challenges dns \
-  --manual-auth-hook /hooks/auth.sh \
-  --manual-cleanup-hook /hooks/cleanup.sh \
   --agree-tos \
   --no-eff-email \
   --email "$EMAIL" \
