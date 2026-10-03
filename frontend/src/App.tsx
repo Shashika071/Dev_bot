@@ -286,6 +286,16 @@ function explainTrainError(err?: string | null): { title: string; steps: string[
       ],
     };
   }
+  if (e.includes('only one label') || e.includes('all the same class') || e.includes('single_class')) {
+    return {
+      title: 'Labels not mixed enough (almost all touch or all miss)',
+      steps: [
+        'With your barrier/duration, nearly every sample had the same outcome (often all touches).',
+        'ML needs both wins and losses in train/calibration to score and calibrate.',
+        'Collect more days of ticks, or try a slightly harder barrier in Setup + Train, then retrain.',
+      ],
+    };
+  }
   return {
     title: 'Training stopped',
     steps: [

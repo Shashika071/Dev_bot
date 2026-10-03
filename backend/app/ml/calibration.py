@@ -46,6 +46,25 @@ class ProbabilityCalibrator:
         if len(raw) < 11:
             raise ValueError(f"Need at least 11 calibration samples, got {len(raw)}")
 
+        n_pos = int((y >= 0.5).sum())
+        n_neg = int(len(y) - n_pos)
+        # Single-class cal split: cannot fit Platt/isotonic meaningfully — identity map.
+        if n_pos == 0 or n_neg == 0:
+            self._calibrator = None
+            self._chosen_method = "identity_single_class"
+            self._raw_probs = raw
+            self._true_labels = y
+            self._calibrated_probs = np.clip(raw, 1e-6, 1 - 1e-6)
+            self._is_fitted = True
+            self.method = "identity"
+            logger.warning(
+                "calibrator_identity_single_class",
+                n_samples=len(raw),
+                n_pos=n_pos,
+                n_neg=n_neg,
+            )
+            return
+
         # Prefer Platt when cal set is small (isotonic overfits); isotonic when large.
         choose = self.method
         if choose == "auto":
@@ -80,9 +99,12 @@ class ProbabilityCalibrator:
 
     def calibrate(self, raw_probabilities: np.ndarray) -> np.ndarray:
         """Transform raw probabilities to calibrated probabilities."""
-        if not self._is_fitted or self._calibrator is None:
+        if not self._is_fitted:
             raise RuntimeError("Calibrator not fitted")
         raw = np.asarray(raw_probabilities, dtype=float).ravel()
+        if self._calibrator is None:
+            # Identity fallback (single-class calibration set)
+            return np.clip(raw, 1e-6, 1 - 1e-6)
         if isinstance(self._calibrator, IsotonicRegression):
             return self._calibrator.predict(raw)
         return self._calibrator.predict_proba(raw.reshape(-1, 1))[:, 1]
@@ -187,11 +209,41 @@ def compute_calibration_metrics(
     n_bins: int = 10,
 ) -> dict:
     """Compute calibration metrics for evaluation."""
-    prob_true, prob_pred = calibration_curve(
-        true_labels, predicted_probs, n_bins=n_bins, strategy="uniform"
-    )
-    brier = brier_score_loss(true_labels, predicted_probs)
-    ll = log_loss(true_labels, predicted_probs)
+    y = np.asarray(true_labels, dtype=float).ravel()
+    p = np.clip(np.asarray(predicted_probs, dtype=float).ravel(), 1e-6, 1 - 1e-6)
+    n_unique = int(np.unique(y).size)
+
+    brier = float(brier_score_loss(y, p))
+    # Always pass both class labels — sklearn errors if y is all-0 or all-1.
+    ll = float(log_loss(y, p, labels=[0, 1]))
+
+    if n_unique < 2:
+        return {
+            "brier_score": brier,
+            "log_loss": ll,
+            "calibration_slope": float("nan"),
+            "calibration_intercept": float("nan"),
+            "prob_true": [float(y.mean())],
+            "prob_pred": [float(p.mean())],
+            "n_bins": n_bins,
+            "single_class": True,
+        }
+
+    try:
+        prob_true, prob_pred = calibration_curve(
+            y, p, n_bins=n_bins, strategy="uniform"
+        )
+    except ValueError:
+        return {
+            "brier_score": brier,
+            "log_loss": ll,
+            "calibration_slope": float("nan"),
+            "calibration_intercept": float("nan"),
+            "prob_true": [],
+            "prob_pred": [],
+            "n_bins": n_bins,
+            "single_class": True,
+        }
 
     if len(prob_true) >= 2:
         slope_fit = np.polyfit(prob_pred, prob_true, 1)
@@ -202,11 +254,12 @@ def compute_calibration_metrics(
         cal_intercept = float("nan")
 
     return {
-        "brier_score": float(brier),
-        "log_loss": float(ll),
+        "brier_score": brier,
+        "log_loss": ll,
         "calibration_slope": cal_slope,
         "calibration_intercept": cal_intercept,
         "prob_true": prob_true.tolist(),
         "prob_pred": prob_pred.tolist(),
         "n_bins": n_bins,
+        "single_class": False,
     }

@@ -348,6 +348,30 @@ class TrainingOrchestrator:
             split.X_test, split.y_test, split.test_times, _seqs_for(split.test_times)
         )
 
+        def _label_balance(y) -> tuple[int, int]:
+            arr = np.asarray(y, dtype=float).ravel()
+            n_pos = int((arr >= 0.5).sum())
+            return n_pos, int(len(arr) - n_pos)
+
+        tr_pos, tr_neg = _label_balance(y_train)
+        if tr_pos == 0 or tr_neg == 0:
+            return {
+                "error": (
+                    f"Training labels are all the same class "
+                    f"(touched={tr_pos}, not_touched={tr_neg}). "
+                    f"Barrier {self.barrier_distance} is likely too easy/hard for this span. "
+                    f"Collect more days of ticks, or change barrier in Setup/Train and retrain."
+                )
+            }
+        cal_pos, cal_neg = _label_balance(y_cal)
+        if cal_pos == 0 or cal_neg == 0:
+            logger.warning(
+                "calibration_single_class",
+                touched=cal_pos,
+                not_touched=cal_neg,
+                note="Using identity calibrator; prefer more diverse data",
+            )
+
         results: dict = {}
         baseline_rate = float(y_train.mean())
         results["historical_frequency"] = {"touch_rate": baseline_rate}
