@@ -28,7 +28,7 @@ router = APIRouter(prefix="/setup", tags=["setup"])
 
 class OpsPrefsBody(BaseModel):
     max_signals_per_day: int = Field(3, ge=0, le=10)
-    signal_cooldown_seconds: int = Field(540, ge=0, le=7200)
+    signal_cooldown_seconds: int = Field(3600, ge=0, le=7200)
     manual_min_confidence: float = Field(0.95, ge=0.5, le=0.99)
     manual_min_margin_over_breakeven: float = Field(0.03, ge=0.0, le=0.5)
     min_ev_margin: float = Field(0.02, ge=0.0, le=0.5)
@@ -81,7 +81,7 @@ async def get_ops_prefs() -> dict:
         ],
         "guide": {
             "max_signals_per_day": "Max validated signals per Asia/Colombo day (3 = default).",
-            "signal_cooldown_seconds": "Min seconds between signals (540 = 9 minutes).",
+            "signal_cooldown_seconds": "Min seconds between signals (3600 = 1 hour market rest).",
             "manual_min_confidence": "Analyze & Signal needs this calibrated touch probability (0.95 = 95%).",
             "manual_min_margin_over_breakeven": "Analyze also needs this much above quote breakeven.",
             "min_ev_margin": "Live EV gate margin over breakeven for auto alerts.",

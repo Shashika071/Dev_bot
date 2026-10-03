@@ -608,6 +608,8 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
     analysis?: typeof analysisRows;
     signal?: SigData & { calibrated_probability?: number; direction?: string; signal_id?: string };
     trade?: { ok?: boolean; skipped?: boolean; contract_id?: number|string; error?: string; stake?: number };
+    signals_this_session?: number;
+    trades_ok_this_session?: number;
   };
 
   const applyWatchStatus = useCallback(async (st: WatchStatus, { reloadOnSignal = true } = {}) => {
@@ -618,7 +620,10 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
     setAnalysisRows(st.analysis || []);
     if (st.trade && !st.trade.skipped) {
       if (st.trade.ok) {
-        setTradeResultMsg(`Auto-trade OK · contract ${st.trade.contract_id} · stake ${st.trade.stake}`);
+        setTradeResultMsg(
+          `Auto-trade OK · contract ${st.trade.contract_id} · stake ${st.trade.stake}` +
+          (st.signals_this_session != null ? ` · session signals ${st.signals_this_session}` : '')
+        );
       } else if (st.trade.error) {
         setTradeResultMsg(`Auto-trade failed: ${st.trade.error}`);
       }
@@ -627,6 +632,10 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
       setAnalyzeWatching(true);
       setAnalyzeBusy(true);
       setWatchMode(mode);
+      // Reload feed when a new signal lands but keep watching
+      if (reloadOnSignal && st.ok && st.signal) {
+        await load();
+      }
     } else {
       setAnalyzeWatching(false);
       setAnalyzeBusy(false);
@@ -959,8 +968,8 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
             <p className="text-xs text-dim mt-3">
               Auto alerts need <span className="text-cyan">Edge OK</span> + tick confluence + candle confirm (1m/5m) + EV gates.
               <span className="text-amber"> Analyze & Signal</span> uses the same gates with a confidence floor (default ≥95%).
-              <span className="text-amber"> Analyze / Force</span> run on the server (~1s) until gates pass — keeps going
-              if you close the tab. Stop cancels. Auto-trade if enabled. Max 3/day Asia/Colombo.
+              <span className="text-amber"> Analyze / Force</span> keep searching until <strong>3 signals/day</strong>.
+              After each trade: cooldown (market rest) before the next — not immediate. Stop cancels.
             </p>
           )}
         </div>
@@ -1182,7 +1191,7 @@ function TrainView() {
         method: 'PUT',
         body: JSON.stringify({
           max_signals_per_day: 3,
-          signal_cooldown_seconds: 540,
+          signal_cooldown_seconds: 3600,
           manual_min_confidence: 0.95,
           manual_min_margin_over_breakeven: 0.03,
           min_ev_margin: 0.02,
@@ -1876,7 +1885,7 @@ type OpsPrefs = {
 
 const DEFAULT_OPS: OpsPrefs = {
   max_signals_per_day: 3,
-  signal_cooldown_seconds: 540,
+  signal_cooldown_seconds: 3600,
   manual_min_confidence: 0.95,
   manual_min_margin_over_breakeven: 0.03,
   min_ev_margin: 0.02,
@@ -2279,7 +2288,7 @@ function SetupView({ online }: { online: boolean }) {
             <label className="form-label">Cooldown cooldown (seconds)</label>
             <input type="number" className="form-input" min={0} max={7200} value={ops.signal_cooldown_seconds}
               onChange={e => setOpsField('signal_cooldown_seconds', Number(e.target.value))}/>
-            <div className="form-hint">{opsGuide.signal_cooldown_seconds || 'Default 540 = 9 minutes.'}</div>
+            <div className="form-hint">{opsGuide.signal_cooldown_seconds || 'Default 3600 = 1 hour market rest between signals.'}</div>
           </div>
           <div className="form-group">
             <label className="form-label">Analyze min confidence</label>

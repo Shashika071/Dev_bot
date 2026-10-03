@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     app_timezone: str = Field("Asia/Colombo", description="Timezone for daily signal cap reset")
     max_signals_per_day: int = Field(3, ge=0, le=10)
     signal_cooldown_seconds: int = Field(
-        540, ge=0, description="Min seconds between signals (from last created_at)"
+        3600, ge=0, description="Min seconds between signals (from last created_at); 3600 = 1h test rest"
     )
     contract_duration_seconds: int = Field(540, description="Default contract duration (9 min)")
     max_tick_age_seconds: int = Field(30, ge=1, description="Reject signals if latest tick older than this")

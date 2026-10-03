@@ -47,6 +47,8 @@ def _default_state() -> dict[str, Any]:
         "analysis": [],
         "signal": None,
         "trade": None,
+        "signals_this_session": 0,
+        "trades_ok_this_session": 0,
         "last_error": None,
     }
 
@@ -95,7 +97,7 @@ class AnalyzeWatchService:
             return True
         if "confirm contract settings" in r:
             return True
-        if "max signals" in r or "daily cap" in r or "per day" in r:
+        if "max signals" in r or "daily cap" in r or "signals today" in r or "per day" in r:
             return True
         if "need more ticks" in r:
             return True
@@ -222,23 +224,58 @@ class AnalyzeWatchService:
 
                             sig = result["signal"]
                             p = float(sig.get("calibrated_probability") or 0) * 100
+                            n_sig = int(self._state.get("signals_this_session") or 0) + 1
+                            n_tr = int(self._state.get("trades_ok_this_session") or 0)
+                            if trade and trade.get("ok"):
+                                n_tr += 1
+
+                            # Keep watching: cooldown = market rest before next;
+                            # stop only at daily cap (e.g. 3/day) or user Stop.
+                            from app.ops_prefs import load_ops_prefs
+                            from app.signal_engine.daily_cap import DailyCapManager
+
+                            ops = load_ops_prefs()
+                            max_day = int(ops.get("max_signals_per_day", 3))
+                            cool = int(ops.get("signal_cooldown_seconds", 540))
+                            day_count = await DailyCapManager().get_signals_today(
+                                session, str(sig.get("symbol") or "")
+                            )
+
+                            trade_bit = ""
+                            if trade and not trade.get("skipped"):
+                                if trade.get("ok"):
+                                    trade_bit = f" · trade OK {trade.get('contract_id')}"
+                                else:
+                                    trade_bit = f" · trade fail: {trade.get('error')}"
+
+                            done_for_day = day_count >= max_day
+                            msg = (
+                                f"{label} #{n_sig}: "
+                                f"{str(sig.get('direction') or '').upper()} · "
+                                f"{p:.1f}% · {sig.get('signal_id')}{trade_bit}. "
+                                f"Day {day_count}/{max_day}."
+                            )
+                            if done_for_day:
+                                msg += " Daily cap reached — watch stopped."
+                            else:
+                                msg += (
+                                    f" Market rest {cool}s cooldown, then searching next…"
+                                )
+
                             self._state.update(
                                 {
-                                    "running": False,
-                                    "want_running": False,
+                                    "running": not done_for_day,
+                                    "want_running": not done_for_day,
                                     "ok": True,
                                     "signal": sig,
                                     "trade": trade,
                                     "analysis": result.get("analysis") or [],
                                     "reason": "",
-                                    "message": (
-                                        f"{label} signal: "
-                                        f"{str(sig.get('direction') or '').upper()} · "
-                                        f"{p:.1f}% · {sig.get('signal_id')} "
-                                        f"(after {attempt} check{'s' if attempt > 1 else ''})"
-                                    ),
-                                    "stopped_at": time.time(),
-                                    "stop_reason": "signal_found",
+                                    "message": msg,
+                                    "signals_this_session": n_sig,
+                                    "trades_ok_this_session": n_tr,
+                                    "stopped_at": time.time() if done_for_day else None,
+                                    "stop_reason": "daily_cap" if done_for_day else None,
                                     "updated_at": time.time(),
                                     "last_error": None,
                                 }
@@ -249,16 +286,29 @@ class AnalyzeWatchService:
                                 mode=mode,
                                 signal_id=sig.get("signal_id"),
                                 attempt=attempt,
+                                day_count=day_count,
+                                continue_watch=not done_for_day,
                             )
-                            return
+                            if done_for_day:
+                                return
+                            # Continue loop — cooldown blocks until market rest ends
+                            continue
 
                         reason = result.get("reason") or "No setup yet."
+                        cool_wait = "cooldown" in reason.lower()
                         self._state.update(
                             {
                                 "ok": False,
                                 "reason": reason,
                                 "analysis": result.get("analysis") or [],
-                                "message": f"Watching ({label})… #{attempt}: {reason}",
+                                "message": (
+                                    f"Watching ({label})… #{attempt}: "
+                                    + (
+                                        f"Market rest — {reason}"
+                                        if cool_wait
+                                        else reason
+                                    )
+                                ),
                                 "updated_at": time.time(),
                                 "last_error": None,
                             }
