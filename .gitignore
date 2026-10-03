@@ -5,6 +5,9 @@
 *.pem
 certs/origin.pem
 certs/origin.key
+certs/letsencrypt/
+certs/certbot-work/
+certs/certbot-logs/
 
 # Python
 __pycache__/

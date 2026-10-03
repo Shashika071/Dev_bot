@@ -115,6 +115,7 @@ Usage: $0 [up|down|status|logs|connect-nginx]
   fix-db         Rewrite DATABASE_URL host to postgres and recreate backend/worker
   auto-ssl|ssl   Auto HTTPS on :8443 (own certs, Fiyola untouched)
   origin-cert    Install Cloudflare Origin Certificate via API
+  le-dns         Let's Encrypt via Spaceship DNS TXT (trusted HTTPS :8443)
 
 Env overrides:
   EDGE_NETWORK=$EDGE_NETWORK
@@ -132,6 +133,7 @@ case "$ACTION" in
   fix-db)          need docker; bash "$ROOT/deploy/fix-backend-db.sh" ;;
   auto-ssl|ssl)    need docker; bash "$ROOT/deploy/auto-ssl.sh" ;;
   origin-cert)     need docker; bash "$ROOT/deploy/install-cf-origin-cert.sh" ;;
+  le-dns|letsencrypt) need docker; bash "$ROOT/deploy/issue-letsencrypt-dns.sh" ;;
   -h|--help|help)  usage ;;
   *) echo "Unknown command: $ACTION"; usage; exit 1 ;;
 esac
