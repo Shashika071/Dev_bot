@@ -112,6 +112,7 @@ Usage: $0 [up|down|status|logs|connect-nginx]
   status         Show deriv + nginx containers / port binds
   logs           Follow deriv compose logs
   connect-nginx  Only attach $FIYOLA_NGINX to network $EDGE_NETWORK
+  fix-db         Rewrite DATABASE_URL host to postgres and recreate backend/worker
 
 Env overrides:
   EDGE_NETWORK=$EDGE_NETWORK
@@ -126,6 +127,7 @@ case "$ACTION" in
   status|ps)       cmd_status ;;
   logs)            cmd_logs ;;
   connect-nginx)   need docker; connect_nginx ;;
+  fix-db)          need docker; bash "$ROOT/deploy/fix-backend-db.sh" ;;
   -h|--help|help)  usage ;;
   *) echo "Unknown command: $ACTION"; usage; exit 1 ;;
 esac
