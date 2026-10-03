@@ -100,28 +100,50 @@ async def data_info(db: AsyncSession = Depends(get_db)) -> dict:
             "symbols": [],
         }
 
-    symbols = [
-        {
-            "symbol": s["symbol"],
-            "tick_count": s["tick_count"],
-            "oldest": s.get("oldest"),
-            "newest": s.get("newest"),
-            "ready_to_train": s["tick_count"] >= 5000,
-            "est_ticks_per_day": s.get("est_ticks_per_day"),
-            "span_days": s.get("span_days"),
-            "gap_flags": s.get("gap_flags"),
-        }
-        for s in symbols_raw
-    ]
+    # Non-overlapping sample spacing is clamped to ≥ contract duration in trainer.
+    duration = int(settings.contract_duration_seconds)
+    interval = max(int(settings.train_sampling_interval_seconds), duration)
+    min_labels = 100
+    # entry_epochs = arange(min+600, max-duration, interval)
+    min_span_seconds = min_labels * interval + 600 + duration
+
+    symbols = []
+    for s in symbols_raw:
+        span_s = float(s.get("span_days") or 0) * 86400.0
+        est_labels = max(0, int((span_s - 600 - duration) // interval)) if span_s > 0 else 0
+        ready = est_labels >= min_labels and int(s["tick_count"]) >= 1000
+        symbols.append(
+            {
+                "symbol": s["symbol"],
+                "tick_count": s["tick_count"],
+                "oldest": s.get("oldest"),
+                "newest": s.get("newest"),
+                "ready_to_train": ready,
+                "est_labels": est_labels,
+                "min_labels_required": min_labels,
+                "est_ticks_per_day": s.get("est_ticks_per_day"),
+                "span_days": s.get("span_days"),
+                "span_hours": round(span_s / 3600.0, 2),
+                "min_span_hours": round(min_span_seconds / 3600.0, 1),
+                "gap_flags": s.get("gap_flags"),
+            }
+        )
     total_ticks = sum(s["tick_count"] for s in symbols)
     return {
         "has_data": total_ticks > 0,
         "total_ticks": total_ticks,
-        "min_needed": 5000,
+        "min_needed": 1000,
+        "min_labels_required": min_labels,
+        "min_span_hours": round(min_span_seconds / 3600.0, 1),
+        "train_sampling_interval_seconds": interval,
         "ready": any(s["ready_to_train"] for s in symbols),
         "symbols": symbols,
         "train_max_ticks": settings.train_max_ticks,
-        "train_sampling_interval_seconds": settings.train_sampling_interval_seconds,
+        "note": (
+            f"Training needs ≥{min_labels} non-overlapping labels "
+            f"(one every {interval}s) ≈{min_span_seconds/3600.0:.1f}h continuous coverage. "
+            "Tick count alone is not enough."
+        ),
     }
 
 

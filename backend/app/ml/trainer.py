@@ -139,8 +139,31 @@ class TrainingOrchestrator:
             touched=int(labels_df["touched"].sum()) if not labels_df.empty else 0,
         )
 
-        if labels_df.empty or len(labels_df) < 100:
-            return {"error": "Insufficient resolved labeled data for training", "count": len(labels_df)}
+        min_labels = 100
+        if labels_df.empty or len(labels_df) < min_labels:
+            span_s = (
+                int(ticks_df["epoch"].max()) - int(ticks_df["epoch"].min())
+                if not ticks_df.empty
+                else 0
+            )
+            need_span_h = (
+                (min_labels * sampling_interval_seconds + 600 + self.duration_seconds) / 3600.0
+            )
+            return {
+                "error": (
+                    f"Insufficient resolved labeled data for training: "
+                    f"{len(labels_df)} resolved (need ≥{min_labels}). "
+                    f"Non-overlapping samples every {sampling_interval_seconds}s need "
+                    f"~{need_span_h:.1f}h continuous tick coverage "
+                    f"(current span ≈{span_s/3600.0:.1f}h, {len(ticks_df):,} ticks). "
+                    f"Let the worker collect longer, or POST /train/download?target_ticks=0 "
+                    f"to pull the last ~24h from Deriv, then train again."
+                ),
+                "count": len(labels_df),
+                "min_required": min_labels,
+                "span_hours": round(span_s / 3600.0, 2),
+                "sampling_interval_seconds": sampling_interval_seconds,
+            }
 
         rows = []
         feature_epochs = []

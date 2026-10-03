@@ -124,7 +124,26 @@ interface TrainResult {
   historical_frequency?: { touch_rate?: number };
   top_features?: Array<{feature:string; importance:number}>;
 }
-interface DataInfo { has_data: boolean; total_ticks?: number; ready?: boolean; message?: string; symbols?: Array<{symbol:string; tick_count:number; oldest?:string; newest?:string; ready_to_train:boolean}>; }
+interface DataInfo {
+  has_data: boolean;
+  total_ticks?: number;
+  ready?: boolean;
+  message?: string;
+  note?: string;
+  min_labels_required?: number;
+  min_span_hours?: number;
+  train_sampling_interval_seconds?: number;
+  symbols?: Array<{
+    symbol: string;
+    tick_count: number;
+    oldest?: string;
+    newest?: string;
+    ready_to_train: boolean;
+    est_labels?: number;
+    span_hours?: number;
+    min_span_hours?: number;
+  }>;
+}
 interface DailyStatus { signals_today: number; max_signals: number; cooldown_active: boolean; timezone: string; }
 type Tab = 'dashboard' | 'train' | 'setup';
 
@@ -781,9 +800,17 @@ function TrainView() {
                 </div>
               </div>
               <div className="flex items-center gap-3">
-                <span className="font-mono font-semibold text-sm">{sym.tick_count.toLocaleString()}</span>
+                <div className="text-right">
+                  <div className="font-mono font-semibold text-sm">{sym.tick_count.toLocaleString()} ticks</div>
+                  <div className="text-xs text-dim font-mono">
+                    {sym.span_hours != null ? `${sym.span_hours}h span` : ''}
+                    {sym.est_labels != null ? ` · ~${sym.est_labels} labels` : ''}
+                  </div>
+                </div>
                 <span className={`badge ${sym.ready_to_train ? 'badge-green' : 'badge-amber'}`}>
-                  {sym.ready_to_train ? '✓ Ready' : `Need ${Math.max(0, 5000-sym.tick_count).toLocaleString()} more`}
+                  {sym.ready_to_train
+                    ? '✓ Ready'
+                    : `Need ~${info.min_span_hours ?? sym.min_span_hours ?? 16}h span`}
                 </span>
               </div>
             </div>
@@ -797,8 +824,9 @@ function TrainView() {
         {!loadingInfo && info && info.has_data && (
           <div className="alert alert-info mt-2">
             <Info size={14}/>
-            Training uses all ticks currently in the database for the selected symbol.
-            Best results with 5,000+ ticks (≈1.5 hrs live at ~43k/day). Minimum to start: 1,000.
+            {info.note ??
+              `Non-overlapping samples need ≥${info.min_labels_required ?? 100} labels ` +
+              `(≈${info.min_span_hours ?? 16}h continuous coverage). Tick count alone is not enough.`}
           </div>
         )}
       </div>
