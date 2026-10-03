@@ -365,18 +365,24 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
     meets_confidence?: boolean; confluence_met?: boolean;
     selected_pipeline?: string; reason?: string;
   }>>([]);
+  const [perf, setPerf] = useState<{
+    alerts_paused?: boolean; pause_reason?: string|null;
+    performance?: { resolved?: number; win_rate?: number|null; ci_lower?: number|null; mean_breakeven?: number|null };
+  }|null>(null);
 
   const load = useCallback(async () => {
     setLoad(true); setErr('');
     try {
-      const [s, m, d] = await Promise.all([
+      const [s, m, d, p] = await Promise.all([
         api<SigData[]>('/signals/?limit=20'),
         api<ModelsResponse>('/train/models'),
         api<DataInfo>('/train/data-info'),
+        api<typeof perf>('/signals/performance?days=7').catch(() => null),
       ]);
       setSigs(s);
       setModels(m);
       setDbTicks(d.total_ticks ?? 0);
+      setPerf(p);
     } catch (e:any) { setErr(e.message); }
     finally { setLoad(false); }
   }, []);
@@ -631,10 +637,25 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
                 : <span className="badge badge-amber" style={{marginLeft:'1rem',flexShrink:0}}>No edge</span>}
             </div>
           ))}
+          {perf?.alerts_paused && (
+            <div className="alert alert-warning mt-2">
+              <AlertTriangle size={14}/>
+              Auto alerts paused{perf.pause_reason ? `: ${perf.pause_reason}` : '.'}
+              {' '}Analyze & Signal still available for research.
+            </div>
+          )}
+          {perf?.performance && (perf.performance.resolved ?? 0) > 0 && (
+            <p className="text-xs text-dim mt-2 font-mono">
+              Live 7d: n={perf.performance.resolved}
+              {perf.performance.win_rate != null ? ` · win ${(perf.performance.win_rate*100).toFixed(1)}%` : ''}
+              {perf.performance.ci_lower != null ? ` · CI≥${(perf.performance.ci_lower*100).toFixed(1)}%` : ''}
+              {perf.performance.mean_breakeven != null ? ` · BE ${(perf.performance.mean_breakeven*100).toFixed(1)}%` : ''}
+            </p>
+          )}
           {models?.trained && (
             <p className="text-xs text-dim mt-3">
-              Auto alerts need <span className="text-cyan">Edge OK</span>.
-              <span className="text-amber"> Analyze & Signal</span> runs the models now and only alerts if confidence is high (default ≥95% and above quote breakeven).
+              Auto alerts need <span className="text-cyan">Edge OK</span> + confluence + EV gates.
+              <span className="text-amber"> Analyze & Signal</span> uses the same confluence/EV evidence with a confidence floor (default ≥95%).
               Max 3/day Asia/Colombo.
             </p>
           )}

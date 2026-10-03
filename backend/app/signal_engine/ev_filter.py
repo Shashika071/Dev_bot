@@ -14,6 +14,8 @@ from typing import Optional
 
 import structlog
 
+from app.config import settings
+
 logger = structlog.get_logger(__name__)
 
 
@@ -37,12 +39,18 @@ class EVFilter:
 
     def __init__(
         self,
-        min_ev_margin: float = 0.02,
-        min_samples_in_range: int = 50,
+        min_ev_margin: float | None = None,
+        min_samples_in_range: int | None = None,
         require_demonstrated_edge: bool = True,
     ):
-        self.min_ev_margin = min_ev_margin
-        self.min_samples_in_range = min_samples_in_range
+        self.min_ev_margin = (
+            float(settings.min_ev_margin) if min_ev_margin is None else float(min_ev_margin)
+        )
+        self.min_samples_in_range = (
+            int(settings.min_calibration_samples)
+            if min_samples_in_range is None
+            else int(min_samples_in_range)
+        )
         self.require_demonstrated_edge = require_demonstrated_edge
 
     def evaluate(

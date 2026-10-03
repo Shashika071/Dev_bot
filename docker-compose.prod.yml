@@ -95,6 +95,30 @@ services:
     networks:
       - deriv_net
 
+  # One-off heavier training job (does not replace the live worker).
+  #   docker compose -p deriv -f docker-compose.prod.yml --env-file .env.prod \
+  #     --profile train run --rm train
+  train:
+    profiles: ["train"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file: .env.prod
+    environment:
+      BACKEND_URL: http://backend:8000
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    # Prefer HTTP train via UI; this profile is for CLI / ops runs.
+    command: python -c "print('Use UI Train tab or POST /train/start; models land in /app/data/models')"
+    mem_limit: 3072m
+    networks:
+      - deriv_net
+
 networks:
   deriv_net:
     driver: bridge

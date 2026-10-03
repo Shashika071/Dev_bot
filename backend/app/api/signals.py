@@ -206,6 +206,29 @@ async def daily_cap_status(db: AsyncSession = Depends(get_db)) -> dict:
     return await cap_mgr.get_status(db)
 
 
+@router.get("/performance")
+async def live_performance(
+    days: int = Query(default=7, ge=1, le=90),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Rolling resolved-outcome performance + pause state."""
+    from app.signal_engine.drift import compute_live_performance
+
+    conf = await get_latest_confirmed_settings(db)
+    perf = await compute_live_performance(
+        db,
+        days=days,
+        symbol=conf.symbol if conf else None,
+        validated_only=True,
+    )
+    return {
+        "performance": perf,
+        "alerts_paused": bool(getattr(conf, "alerts_paused", False)) if conf else False,
+        "pause_reason": getattr(conf, "pause_reason", None) if conf else None,
+        "symbol": conf.symbol if conf else None,
+    }
+
+
 @router.get("/worker-status")
 async def worker_status() -> dict:
     """Latest worker/Deriv connection snapshot for the dashboard."""

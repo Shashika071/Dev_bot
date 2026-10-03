@@ -23,9 +23,12 @@ from app.features.indicators import (
     donchian_channel,
     donchian_breakout_state,
     realised_volatility,
+    realised_volatility_time,
     returns_over_window,
+    returns_over_time_seconds,
     tick_cadence,
 )
+from app.features.regime import attach_regime_labels, regime_feature_columns
 
 logger = structlog.get_logger(__name__)
 
@@ -35,14 +38,18 @@ FEATURE_GROUPS = {
         "barrier_distance_points",
         "barrier_distance_pct",
         "barrier_distance_vol_normalized",
+        "barrier_reachability_60",
+        "barrier_reachability_300",
     ],
     "returns": [
         "return_10", "return_30", "return_60",
         "return_120", "return_300", "return_540",
+        "return_t60", "return_t300", "return_t540",
     ],
     "volatility": [
         "realized_vol_60", "realized_vol_120",
         "realized_vol_300", "realized_vol_540",
+        "realized_vol_t300", "realized_vol_t540",
         "price_range_60", "price_range_300",
     ],
     "trend": [
@@ -64,6 +71,7 @@ FEATURE_GROUPS = {
         "missing_data_flag",
         "seconds_since_last_tick",
     ],
+    "regime": regime_feature_columns(),
 }
 
 ALL_FEATURES = [f for group in FEATURE_GROUPS.values() for f in group]
@@ -107,15 +115,30 @@ def build_features(
     df["barrier_distance_points"] = barrier_distance
     df["barrier_distance_pct"] = barrier_distance / prices.replace(0, np.nan) * 100
 
-    # --- Returns ---
+    # --- Returns (tick-count + time-based) ---
     return_windows = [10, 30, 60, 120, 300, 540]
     returns = returns_over_window(prices, return_windows)
     for name, series in returns.items():
         df[name] = series
+    if "epoch" in df.columns:
+        for name, series in returns_over_time_seconds(
+            prices, df["epoch"], [60, 300, 540]
+        ).items():
+            df[name] = series
+    else:
+        df["return_t60"] = df["return_60"]
+        df["return_t300"] = df["return_300"]
+        df["return_t540"] = df["return_540"]
 
     # --- Volatility ---
     for window in [60, 120, 300, 540]:
         df[f"realized_vol_{window}"] = realised_volatility(prices, window)
+    if "epoch" in df.columns:
+        df["realized_vol_t300"] = realised_volatility_time(prices, df["epoch"], 300)
+        df["realized_vol_t540"] = realised_volatility_time(prices, df["epoch"], 540)
+    else:
+        df["realized_vol_t300"] = df["realized_vol_300"]
+        df["realized_vol_t540"] = df["realized_vol_540"]
 
     # Rolling range using rolling max/min of prices
     for window in [60, 300]:
@@ -123,11 +146,14 @@ def build_features(
         rolling_low = prices.rolling(window=window, min_periods=window).min()
         df[f"price_range_{window}"] = rolling_high - rolling_low
 
-    # Barrier distance normalized by volatility
+    # Barrier distance normalized by volatility + reachability proxies
     vol_60 = df.get("realized_vol_60", pd.Series(np.nan, index=df.index))
     df["barrier_distance_vol_normalized"] = (
         barrier_distance / (vol_60 * prices).replace(0, np.nan)
     )
+    bd = max(float(barrier_distance), 1e-9)
+    df["barrier_reachability_60"] = df["price_range_60"] / bd
+    df["barrier_reachability_300"] = df["price_range_300"] / bd
 
     # --- Moving Averages (Trend) ---
     fast_ma = exponential_moving_average(prices, ma_fast_period)
@@ -163,12 +189,29 @@ def build_features(
     df["seconds_since_last_tick"] = df["epoch"].diff()
     df["missing_data_flag"] = (df["seconds_since_last_tick"] > 5).astype(int)
 
+    df = attach_regime_labels(df)
     return df
 
 
 def get_feature_columns() -> list[str]:
     """Return list of all feature column names."""
     return ALL_FEATURES.copy()
+
+
+def drop_zero_variance_columns(features_df: pd.DataFrame, columns: list[str] | None = None) -> list[str]:
+    """Return feature columns that have non-zero variance in `features_df`."""
+    cols = columns or get_feature_columns()
+    kept = []
+    for c in cols:
+        if c not in features_df.columns:
+            continue
+        series = features_df[c]
+        if series.nunique(dropna=True) <= 1:
+            continue
+        if float(series.std(skipna=True) or 0.0) == 0.0:
+            continue
+        kept.append(c)
+    return kept or cols
 
 
 def select_feature_matrix(features_df: pd.DataFrame) -> pd.DataFrame:
@@ -178,6 +221,8 @@ def select_feature_matrix(features_df: pd.DataFrame) -> pd.DataFrame:
     """
     cols = get_feature_columns()
     out = features_df.copy()
+    if not any(c in out.columns for c in regime_feature_columns()):
+        out = attach_regime_labels(out)
     for c in cols:
         if c not in out.columns:
             out[c] = np.nan

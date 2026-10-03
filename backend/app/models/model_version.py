@@ -15,8 +15,12 @@ class ModelVersion(Base):
 
     # --- Model Identity ---
     model_name = Column(String(64), nullable=False, comment="e.g. catboost_upper_touch")
-    version_tag = Column(String(64), nullable=False, comment="e.g. v1.0.0-20240101")
+    version_tag = Column(String(64), nullable=False, unique=True, comment="e.g. v-upper-20240101")
     algorithm = Column(String(32), nullable=False, comment="catboost, xgboost, logistic, baseline")
+    direction = Column(String(8), nullable=True, index=True, comment="upper or lower")
+    symbol = Column(String(32), nullable=True, index=True)
+    barrier_distance = Column(Float, nullable=True)
+    duration_seconds = Column(Integer, nullable=True)
 
     # --- Training Details ---
     train_start = Column(DateTime(timezone=True), nullable=True)
@@ -28,6 +32,9 @@ class ModelVersion(Base):
     n_train_samples = Column(Integer, nullable=True)
     n_val_samples = Column(Integer, nullable=True)
     n_test_samples = Column(Integer, nullable=True)
+    n_cal_samples = Column(Integer, nullable=True)
+    sampling_interval_seconds = Column(Integer, nullable=True)
+    effective_sample_count = Column(Integer, nullable=True)
 
     # --- Features ---
     feature_names = Column(Text, nullable=True, comment="JSON list of feature names")
@@ -52,6 +59,10 @@ class ModelVersion(Base):
     has_demonstrated_edge = Column(Boolean, default=False,
                                     comment="True only after validation shows advantage")
     edge_description = Column(Text, nullable=True)
+    alerts_paused = Column(Boolean, default=False,
+                           comment="Live drift monitor paused validated alerts")
+    pause_reason = Column(Text, nullable=True)
+    metadata_json = Column(Text, nullable=True, comment="Full training metadata JSON")
 
     # --- File Paths ---
     model_path = Column(String(512), nullable=True, comment="Path to saved model file")

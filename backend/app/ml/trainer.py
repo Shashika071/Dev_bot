@@ -18,14 +18,16 @@ import structlog
 from sklearn.metrics import brier_score_loss, roc_auc_score
 
 from app.config import settings
-from app.features.dataset import chronological_split
+from app.features.dataset import chronological_split, embargo_overlapping_samples, walk_forward_splits
 from app.features.labels import filter_resolved_labels, label_touch_outcomes
 from app.features.pipeline import (
     build_features,
+    drop_zero_variance_columns,
     get_feature_columns,
     select_feature_matrix,
     validate_no_future_leakage,
 )
+from app.ml.quote_match import match_quotes_to_entries
 from app.features.sequences import build_price_sequence, stack_sequences
 from app.ml.baseline import HistoricalFrequencyBaseline, LogisticRegressionBaseline
 from app.ml.calibration import ProbabilityCalibrator, compute_calibration_metrics
@@ -99,8 +101,15 @@ class TrainingOrchestrator:
     def train_full_pipeline(
         self,
         ticks_df: pd.DataFrame,
-        sampling_interval_seconds: int = 60,
+        sampling_interval_seconds: int | None = None,
+        quotes_df: pd.DataFrame | None = None,
     ) -> dict:
+        if sampling_interval_seconds is None:
+            sampling_interval_seconds = int(settings.train_sampling_interval_seconds)
+        # Non-overlapping by default: spacing >= contract duration
+        sampling_interval_seconds = max(
+            int(sampling_interval_seconds), int(self.duration_seconds)
+        )
         logger.info(
             "training_pipeline_starting",
             n_ticks=len(ticks_df),
@@ -108,6 +117,7 @@ class TrainingOrchestrator:
             direction=self.barrier_direction,
             symbol=self.symbol,
             barrier_unit=BARRIER_UNIT,
+            sampling_interval_seconds=sampling_interval_seconds,
         )
 
         entry_times = self._sample_entry_times(ticks_df, sampling_interval_seconds)
@@ -188,7 +198,8 @@ class TrainingOrchestrator:
         sequences = stack_sequences([r["sequence"] for r in rows])
         labels_aligned = pd.Series([r["touched"] for r in rows], name="touched")
         times_aligned = pd.Series([r["entry_time"] for r in rows], name="entry_time")
-        feature_cols = get_feature_columns()
+        feature_cols = drop_zero_variance_columns(features_matrix, get_feature_columns())
+        features_matrix = features_matrix[feature_cols]
 
         # Keep sequences paired with tabular rows under chronological sort
         sort_idx = times_aligned.argsort()
@@ -196,27 +207,65 @@ class TrainingOrchestrator:
         labels_aligned = labels_aligned.iloc[sort_idx].reset_index(drop=True)
         times_aligned = times_aligned.iloc[sort_idx].reset_index(drop=True)
         sequences = sequences[np.asarray(sort_idx)]
+
+        # Extra embargo if residual overlap remains
+        keep = embargo_overlapping_samples(times_aligned, self.duration_seconds)
+        if int(keep.sum()) >= 100:
+            features_matrix = features_matrix.loc[keep.values].reset_index(drop=True)
+            labels_aligned = labels_aligned.loc[keep.values].reset_index(drop=True)
+            times_aligned = times_aligned.loc[keep.values].reset_index(drop=True)
+            sequences = sequences[np.asarray(keep.values)]
+
+        effective_n = len(times_aligned)
         seq_by_time = {
             pd.Timestamp(t): sequences[i] for i, t in enumerate(times_aligned)
         }
 
+        # Quote match for economic evaluation (fallback breakeven when unmatched)
+        entry_epochs = np.array(
+            [
+                int(t.timestamp()) if hasattr(t, "timestamp") else int(pd.Timestamp(t).timestamp())
+                for t in times_aligned
+            ],
+            dtype=np.int64,
+        )
+        quote_match = match_quotes_to_entries(
+            entry_epochs,
+            quotes_df if quotes_df is not None else pd.DataFrame(),
+            direction=self.barrier_direction,
+            max_age_seconds=int(settings.max_quote_age_seconds),
+        )
+
+        gap_seconds = int(settings.train_gap_seconds)
         try:
             split = chronological_split(
                 features_df=features_matrix,
                 labels=labels_aligned,
                 times=times_aligned,
                 outcome_window_seconds=self.duration_seconds,
-                gap_seconds=600,
+                gap_seconds=gap_seconds,
                 feature_columns=feature_cols,
             )
         except ValueError as e:
             return {"error": f"Dataset split failed: {e}"}
 
-        if len(split.X_cal) < 11:
+        # Walk-forward fold count for reporting / stability metadata
+        wf_folds = walk_forward_splits(
+            features_matrix,
+            labels_aligned,
+            times_aligned,
+            n_splits=3,
+            outcome_window_seconds=self.duration_seconds,
+            gap_seconds=gap_seconds,
+            feature_columns=feature_cols,
+        )
+
+        min_cal = int(settings.train_min_calibration_samples)
+        if len(split.X_cal) < min_cal:
             return {
                 "error": (
-                    f"Insufficient calibration samples after purging: {len(split.X_cal)}. "
-                    "Download more history or use a longer window."
+                    f"Insufficient calibration samples after purging: {len(split.X_cal)} "
+                    f"< {min_cal}. Collect more live ticks, then retrain."
                 )
             }
 
@@ -257,11 +306,13 @@ class TrainingOrchestrator:
         results["historical_frequency"] = {"touch_rate": baseline_rate}
         results["contract_semantics"] = CONTRACT_SEMANTICS
         results["barrier_unit"] = BARRIER_UNIT
+        match_rate = float(quote_match.get("match_rate") or 0.0)
         results["quote_backtest_note"] = (
-            "price_only_touch_analysis — historical per-sample quotes were not "
-            "joined for this run; payout metrics use a reference One-Touch "
-            "breakeven (~0.956) and are NOT demonstrated profitability."
+            f"quote_match_rate={match_rate:.2%}; unmatched rows use fallback "
+            "breakeven 0.956 and are flagged — not demonstrated profitability "
+            "unless match_rate is high and EV edge criteria pass."
         )
+        results["quote_match_rate"] = match_rate
 
         # --- Train base models on TRAIN only (val for early stopping) ---
         freq_baseline = HistoricalFrequencyBaseline()
@@ -350,37 +401,56 @@ class TrainingOrchestrator:
         # Candidate raw scores on VAL for selection (no test peeking)
         candidates_raw_val = {
             "baseline": np.full(len(y_val), baseline_rate),
-            "xgboost": val_preds["xgboost"],
+            "logistic_regression": lr_model.predict_proba(X_val),
             "catboost": val_preds["catboost"],
             "lstm": val_preds["lstm"],
             "weighted": weighted.predict(val_preds),
         }
+        if self.include_xgboost:
+            candidates_raw_val["xgboost"] = val_preds["xgboost"]
         if stacking is not None:
             candidates_raw_val["stacking"] = stacking.predict(val_preds)
 
-        # Select by validation Brier (lower is better). Tie-break: fewer extreme overconfident errors.
+        # Select by validation Brier improvement over constant baseline
+        baseline_brier = float(
+            brier_score_loss(y_val.values, np.clip(candidates_raw_val["baseline"], 1e-6, 1 - 1e-6))
+        )
         best_name = "catboost"
         best_brier = float("inf")
         val_scores = {}
         for name, preds in candidates_raw_val.items():
             brier = float(brier_score_loss(y_val.values, np.clip(preds, 1e-6, 1 - 1e-6)))
             val_scores[name] = brier
+            # Prefer models that beat baseline; among those, lowest Brier
             if brier < best_brier:
                 best_brier = brier
                 best_name = name
+        if best_brier >= baseline_brier - 1e-9 and "catboost" in candidates_raw_val:
+            # No improvement — still pick best, but mark weak selection
+            logger.warning(
+                "no_val_brier_improvement_over_baseline",
+                best=best_name,
+                best_brier=best_brier,
+                baseline_brier=baseline_brier,
+            )
 
         results["validation_selection"] = {
-            "metric": "brier_score",
+            "metric": "brier_score_vs_baseline",
             "scores": val_scores,
+            "baseline_brier": baseline_brier,
             "selected_pipeline": best_name,
+            "brier_improvement": baseline_brier - best_brier,
             "equal_weights_baseline": equal_weights(),
             "chosen_weights": weighted.weights,
+            "walk_forward_folds": len(wf_folds),
         }
         logger.info("pipeline_selected", selected=best_name, val_brier=best_brier)
 
-        def _selected_raw(preds_map):
+        def _selected_raw(preds_map, X=None):
             if best_name == "baseline":
                 return np.full(len(next(iter(preds_map.values()))), baseline_rate)
+            if best_name == "logistic_regression":
+                return lr_model.predict_proba(X if X is not None else X_cal)
             if best_name == "weighted":
                 return weighted.predict(preds_map)
             if best_name == "stacking":
@@ -390,34 +460,45 @@ class TrainingOrchestrator:
             return preds_map[best_name]
 
         # Calibrate selected pipeline on CAL only
-        sel_cal_raw = _selected_raw(cal_preds)
-        calibrator = ProbabilityCalibrator()
+        sel_cal_raw = _selected_raw(cal_preds, X_cal)
+        calibrator = ProbabilityCalibrator(
+            method="auto",
+            min_samples=int(settings.train_min_calibration_samples),
+        )
         calibrator.fit(sel_cal_raw, y_cal.values)
         cal_metrics = compute_calibration_metrics(y_cal.values, calibrator.calibrate(sel_cal_raw))
 
-        # One-shot TEST evaluation for all candidates (reporting); edge uses selected only
-        default_breakeven = np.full(len(y_test), 0.956)
+        # Map global quote_match arrays onto test indices
+        time_to_i = {pd.Timestamp(t): i for i, t in enumerate(times_aligned)}
+        test_idx = [time_to_i[pd.Timestamp(t)] for t in t_test]
+        test_be = quote_match["breakeven_probs"][test_idx]
+        test_prices = quote_match["quote_prices"][test_idx]
+        test_payouts = quote_match["quote_payouts"][test_idx]
+        test_matched = quote_match["matched"][test_idx]
+
         candidate_reports = {}
-        for name, raw_map_builder in [
-            ("baseline", lambda p: np.full(len(y_test), baseline_rate)),
-            ("xgboost", lambda p: p["xgboost"]),
-            ("catboost", lambda p: p["catboost"]),
-            ("lstm", lambda p: p["lstm"]),
-            ("weighted", lambda p: weighted.predict(p)),
-        ]:
-            raw = raw_map_builder(test_preds)
-            # Only selected pipeline gets the fitted calibrator for actionable metrics
-            if name == best_name:
-                proba = calibrator.calibrate(raw)
-            else:
-                proba = raw
+        builders = [
+            ("baseline", lambda p, X: np.full(len(y_test), baseline_rate)),
+            ("logistic_regression", lambda p, X: lr_model.predict_proba(X)),
+            ("catboost", lambda p, X: p["catboost"]),
+            ("lstm", lambda p, X: p["lstm"]),
+            ("weighted", lambda p, X: weighted.predict(p)),
+        ]
+        if self.include_xgboost:
+            builders.insert(2, ("xgboost", lambda p, X: p["xgboost"]))
+        for name, raw_map_builder in builders:
+            raw = raw_map_builder(test_preds, X_test)
+            proba = calibrator.calibrate(raw) if name == best_name else raw
             rep = evaluate_model(
                 name,
                 self.barrier_direction,
                 y_test.values,
                 proba,
-                breakeven_probs=default_breakeven,
+                breakeven_probs=test_be,
+                quote_prices=np.where(test_matched, test_prices, np.nan),
+                quote_payouts=np.where(test_matched, test_payouts, np.nan),
                 times=t_test,
+                margin_over_breakeven=float(settings.train_edge_margin),
             )
             candidate_reports[name] = rep
             results[name] = _report_to_dict(rep)
@@ -430,27 +511,31 @@ class TrainingOrchestrator:
                 self.barrier_direction,
                 y_test.values,
                 proba,
-                breakeven_probs=default_breakeven,
+                breakeven_probs=test_be,
+                quote_prices=np.where(test_matched, test_prices, np.nan),
+                quote_payouts=np.where(test_matched, test_payouts, np.nan),
                 times=t_test,
+                margin_over_breakeven=float(settings.train_edge_margin),
             )
             candidate_reports["stacking"] = rep
             results["stacking"] = _report_to_dict(rep)
 
         selected_report = candidate_reports[best_name]
-        has_edge, edge_description = self._compute_edge(selected_report)
+        mean_be = float(np.nanmean(test_be)) if len(test_be) else 0.956
+        has_edge, edge_description = self._compute_edge(
+            selected_report,
+            mean_breakeven=mean_be,
+            quote_match_rate=match_rate,
+            wf_fold_count=len(wf_folds),
+        )
         results["selected_pipeline"] = best_name
         results["has_demonstrated_edge"] = has_edge
         results["edge_description"] = edge_description
         results["catboost_feature_importance"] = cb_model.feature_importance().to_dict("records")
         results["xgboost_feature_importance"] = xgb_model.feature_importance().to_dict("records")
         results["top_features"] = results["catboost_feature_importance"][:12]
-        results["logistic_regression"] = evaluate_model(
-            "logistic_regression",
-            self.barrier_direction,
-            y_test.values,
-            lr_model.predict_proba(X_test),
-            times=t_test,
-        ).__dict__
+        results["block_bootstrap_ci"] = getattr(selected_report, "block_bootstrap_ci", None)
+        results["calibration_curve_data"] = getattr(selected_report, "calibration_curve_data", None)
 
         # Persist artefacts
         model_dir = _model_dir()
@@ -512,12 +597,14 @@ class TrainingOrchestrator:
             "validation_selection": results["validation_selection"],
             "metrics": {
                 "brier_score": selected_report.brier_score,
+                "log_loss": selected_report.log_loss_val,
                 "auc_roc": selected_report.auc_roc,
                 "selected_signal_count": selected_report.selected_signal_count,
                 "selected_win_rate": selected_report.selected_win_rate,
                 "selected_win_rate_ci_lower": selected_report.selected_win_rate_ci_lower,
                 "selected_win_rate_ci_upper": selected_report.selected_win_rate_ci_upper,
                 "baseline_win_rate": selected_report.baseline_win_rate,
+                "quote_based_net_return": selected_report.quote_based_net_return,
             },
             "split_info": {
                 "train": len(X_train),
@@ -526,8 +613,17 @@ class TrainingOrchestrator:
                 "test": len(X_test),
                 "purged": split.purged_count,
                 "unresolved_labels": unresolved,
+                "gap_seconds": gap_seconds,
             },
             "calibration_n_samples": len(X_cal),
+            "calibration_method": getattr(calibrator, "method", "isotonic"),
+            "sampling_interval_seconds": sampling_interval_seconds,
+            "effective_sample_count": effective_n,
+            "gap_seconds": gap_seconds,
+            "walk_forward_folds": len(wf_folds),
+            "quote_match_rate": match_rate,
+            "mean_quote_breakeven": mean_be,
+            "block_bootstrap_ci": results.get("block_bootstrap_ci"),
             "quote_backtest_note": results["quote_backtest_note"],
         }
 
@@ -603,25 +699,41 @@ class TrainingOrchestrator:
         )
         return results
 
-    def _compute_edge(self, report) -> tuple[bool, str]:
-        min_selected = 30
-        breakeven = 0.956
-        margin = 0.02
+    def _compute_edge(
+        self,
+        report,
+        *,
+        mean_breakeven: float = 0.956,
+        quote_match_rate: float = 0.0,
+        wf_fold_count: int = 0,
+    ) -> tuple[bool, str]:
+        min_selected = int(settings.train_edge_min_selected)
+        margin = float(settings.train_edge_margin)
         if report.selected_signal_count < min_selected:
             return False, (
                 f"Insufficient selected test signals: "
                 f"{report.selected_signal_count} < {min_selected}"
             )
-        threshold = breakeven + margin
+        if quote_match_rate < 0.25:
+            return False, (
+                f"Insufficient quote coverage for economic edge: "
+                f"match_rate={quote_match_rate:.2%} < 25%"
+            )
+        threshold = float(mean_breakeven) + margin
         if report.selected_win_rate_ci_lower <= threshold:
             return False, (
                 f"No demonstrated edge: CI lower "
-                f"{report.selected_win_rate_ci_lower:.4f} <= {threshold:.4f}"
+                f"{report.selected_win_rate_ci_lower:.4f} <= {threshold:.4f} "
+                f"(mean quote BE={mean_breakeven:.4f})"
             )
+        note = ""
+        if wf_fold_count < 2:
+            note = " (walk-forward folds < 2 — treat cautiously)"
         return True, (
             f"Edge supported: selected_win_rate={report.selected_win_rate:.4f}, "
             f"CI=[{report.selected_win_rate_ci_lower:.4f}, "
-            f"{report.selected_win_rate_ci_upper:.4f}], n={report.selected_signal_count}"
+            f"{report.selected_win_rate_ci_upper:.4f}], n={report.selected_signal_count}, "
+            f"quote_match={quote_match_rate:.2%}{note}"
         )
 
     def _sample_entry_times(self, ticks_df: pd.DataFrame, interval_seconds: int) -> pd.Series:

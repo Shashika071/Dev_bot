@@ -41,7 +41,14 @@ class StrategyRegistry:
 
         # Touch-specific confirmation: reachability must agree with trend,
         # momentum, RSI, and breakout/expansion evidence.
-        self.register(TouchConfluenceStrategy())
+        from app.config import settings as app_settings
+
+        self.register(
+            TouchConfluenceStrategy(
+                min_score=float(app_settings.confluence_min_score),
+                min_direction_gap=float(app_settings.confluence_min_gap),
+            )
+        )
 
     def evaluate_all(
         self,
@@ -53,6 +60,9 @@ class StrategyRegistry:
         Run all strategies and collect candidate signals.
         Returns list of signals from strategies that triggered.
         """
+        import structlog
+
+        log = structlog.get_logger(__name__)
         candidates = []
         for name, strategy in self._strategies.items():
             try:
@@ -60,7 +70,7 @@ class StrategyRegistry:
                 if signal is not None:
                     candidates.append(signal)
             except Exception as e:
-                pass  # Log but don't crash
+                log.warning("strategy_evaluate_failed", strategy=name, error=str(e))
         return candidates
 
     def get_strategy(self, name: str) -> Optional[BaseStrategy]:

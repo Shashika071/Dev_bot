@@ -125,11 +125,44 @@ def price_range(
 
 
 def returns_over_window(prices: pd.Series, windows: list[int]) -> dict[str, pd.Series]:
-    """Returns over multiple lookback windows."""
+    """Returns over multiple lookback windows (tick-count periods)."""
     result = {}
     for w in windows:
         result[f"return_{w}"] = prices.pct_change(periods=w)
     return result
+
+
+def returns_over_time_seconds(
+    prices: pd.Series,
+    epochs: pd.Series,
+    windows_seconds: list[int],
+) -> dict[str, pd.Series]:
+    """
+    Time-based returns approximated via tick-count windows scaled by median cadence.
+    (Exact asof join is expensive; this stays leakage-safe and aligned to epoch order.)
+    """
+    ep = epochs.astype(np.int64)
+    diffs = ep.diff().median()
+    cadence = float(diffs) if pd.notna(diffs) and float(diffs) > 0 else 2.0
+    out: dict[str, pd.Series] = {}
+    for w in windows_seconds:
+        periods = max(1, int(round(float(w) / cadence)))
+        out[f"return_t{w}"] = prices.pct_change(periods=periods)
+    return out
+
+
+def realised_volatility_time(
+    prices: pd.Series,
+    epochs: pd.Series,
+    window_seconds: int,
+) -> pd.Series:
+    """Std of 1-tick returns over an approximate prior `window_seconds`."""
+    ep = epochs.astype(np.int64)
+    diffs = ep.diff().median()
+    cadence = float(diffs) if pd.notna(diffs) and float(diffs) > 0 else 2.0
+    ticks = max(10, int(round(float(window_seconds) / cadence)))
+    returns = prices.pct_change()
+    return returns.rolling(window=ticks, min_periods=max(5, ticks // 3)).std()
 
 
 def distance_to_level(prices: pd.Series, level: pd.Series) -> pd.Series:

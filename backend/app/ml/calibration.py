@@ -10,6 +10,7 @@ from typing import Optional
 
 from sklearn.calibration import calibration_curve
 from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import brier_score_loss, log_loss
 
 logger = structlog.get_logger(__name__)
@@ -17,17 +18,19 @@ logger = structlog.get_logger(__name__)
 
 class ProbabilityCalibrator:
     """
-    Calibrates raw model probabilities using isotonic regression
-    fitted on held-out calibration data.
+    Calibrates raw model probabilities using isotonic or Platt (logistic)
+    regression fitted on held-out calibration data.
     """
 
-    def __init__(self, method: str = "isotonic"):
+    def __init__(self, method: str = "auto", min_samples: int = 50):
         self.method = method
-        self._calibrator: Optional[IsotonicRegression] = None
+        self.min_samples = min_samples
+        self._calibrator = None
         self._is_fitted = False
         self._raw_probs: Optional[np.ndarray] = None
         self._true_labels: Optional[np.ndarray] = None
         self._calibrated_probs: Optional[np.ndarray] = None
+        self._chosen_method: str = method
 
     @property
     def is_fitted(self) -> bool:
@@ -43,21 +46,35 @@ class ProbabilityCalibrator:
         if len(raw) < 11:
             raise ValueError(f"Need at least 11 calibration samples, got {len(raw)}")
 
-        if self.method == "isotonic":
+        # Prefer Platt when cal set is small (isotonic overfits); isotonic when large.
+        choose = self.method
+        if choose == "auto":
+            choose = "isotonic" if len(raw) >= self.min_samples else "platt"
+        self._chosen_method = choose
+
+        if choose == "isotonic":
             self._calibrator = IsotonicRegression(
                 y_min=0.0, y_max=1.0, out_of_bounds="clip"
             )
             self._calibrator.fit(raw, y)
+            calibrated = self._calibrator.predict(raw)
+        elif choose == "platt":
+            # Logistic regression on raw score as single feature
+            lr = LogisticRegression(solver="lbfgs", max_iter=1000)
+            lr.fit(raw.reshape(-1, 1), y.astype(int))
+            self._calibrator = lr
+            calibrated = lr.predict_proba(raw.reshape(-1, 1))[:, 1]
         else:
-            raise ValueError(f"Unknown calibration method: {self.method}")
+            raise ValueError(f"Unknown calibration method: {choose}")
 
         self._raw_probs = raw
         self._true_labels = y
-        self._calibrated_probs = self._calibrator.predict(raw)
+        self._calibrated_probs = np.asarray(calibrated, dtype=float)
         self._is_fitted = True
+        self.method = choose
         logger.info(
             "calibrator_fitted",
-            method=self.method,
+            method=choose,
             n_samples=len(raw),
         )
 
@@ -65,7 +82,10 @@ class ProbabilityCalibrator:
         """Transform raw probabilities to calibrated probabilities."""
         if not self._is_fitted or self._calibrator is None:
             raise RuntimeError("Calibrator not fitted")
-        return self._calibrator.predict(np.asarray(raw_probabilities, dtype=float).ravel())
+        raw = np.asarray(raw_probabilities, dtype=float).ravel()
+        if isinstance(self._calibrator, IsotonicRegression):
+            return self._calibrator.predict(raw)
+        return self._calibrator.predict_proba(raw.reshape(-1, 1))[:, 1]
 
     def count_in_range(self, probability: float, band: float = 0.05) -> int:
         """Count held-out calibration samples near a probability."""

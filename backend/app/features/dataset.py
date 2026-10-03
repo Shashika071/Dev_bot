@@ -182,6 +182,34 @@ def chronological_split(
     )
 
 
+def embargo_overlapping_samples(
+    times: pd.Series,
+    horizon_seconds: int,
+) -> pd.Series:
+    """
+    Keep a non-overlapping subset of chronologically sorted samples.
+
+    After keeping sample i, drop any later sample whose entry is within
+    `horizon_seconds` of sample i (reduces label dependence from 60s grids
+    on 540s contracts).
+    """
+    if times.empty:
+        return pd.Series(dtype=bool)
+    order = times.argsort()
+    times_sorted = times.iloc[order].reset_index(drop=True)
+    keep_sorted = np.zeros(len(times_sorted), dtype=bool)
+    next_allowed = -10**18
+    for i, t in enumerate(times_sorted):
+        epoch = _to_epoch(t)
+        if epoch >= next_allowed:
+            keep_sorted[i] = True
+            next_allowed = epoch + int(horizon_seconds)
+    # Map back to original index order
+    keep = pd.Series(False, index=times.index)
+    keep.iloc[order] = keep_sorted
+    return keep
+
+
 def walk_forward_splits(
     features_df: pd.DataFrame,
     labels: pd.Series,

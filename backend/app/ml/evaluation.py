@@ -83,6 +83,7 @@ def evaluate_model(
     times: Optional[pd.Series] = None,
     block_size: int = 100,
     n_bootstrap: int = 1000,
+    margin_over_breakeven: float = 0.02,
 ) -> EvaluationReport:
     """
     Comprehensive model evaluation.
@@ -99,6 +100,7 @@ def evaluate_model(
         times: Sample timestamps for time-block resampling.
         block_size: Block size for time-block bootstrap.
         n_bootstrap: Number of bootstrap iterations.
+        margin_over_breakeven: Required edge over breakeven for "selected" signals.
     """
     y_pred = (y_pred_proba >= threshold).astype(int)
 
@@ -128,7 +130,9 @@ def evaluate_model(
     max_losing = 0
 
     if breakeven_probs is not None:
-        selected_mask = y_pred_proba > breakeven_probs
+        selected_mask = y_pred_proba > (
+            np.asarray(breakeven_probs, dtype=float) + float(margin_over_breakeven)
+        )
         selected_count = int(selected_mask.sum())
 
         if selected_count > 0:

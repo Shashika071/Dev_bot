@@ -70,12 +70,23 @@ class SignalGenerator:
     def clear_models(self):
         self._models.clear()
 
-    async def check_prerequisites(self, session: AsyncSession) -> tuple[bool, str]:
+    async def check_prerequisites(
+        self,
+        session: AsyncSession,
+        *,
+        ignore_pause: bool = False,
+    ) -> tuple[bool, str]:
         settings_row = await get_latest_confirmed_settings(session)
         if not settings_row:
             return False, "Contract settings not confirmed. Complete setup first."
         if not self._models:
             return False, "ML model not loaded. Train a model first."
+        if (
+            not ignore_pause
+            and getattr(settings_row, "alerts_paused", False)
+        ):
+            reason = settings_row.pause_reason or "Alerts paused by drift monitor"
+            return False, reason
         return True, "All prerequisites met"
 
     async def evaluate_and_generate(
@@ -101,7 +112,10 @@ class SignalGenerator:
         calibrated probability clears min_confidence and margin over quote breakeven.
         force_no_edge: legacy blind bypass (avoid for UI; tests only).
         """
-        ok, reason = await self.check_prerequisites(session)
+        # Manual research analysis may run while auto-alerts are paused.
+        ok, reason = await self.check_prerequisites(
+            session, ignore_pause=bool(confidence_override or force_no_edge)
+        )
         if not ok:
             logger.debug("signal_prerequisites_failed", reason=reason)
             return None
@@ -125,6 +139,7 @@ class SignalGenerator:
 
         # Collect passing candidates, then pick best EV
         passing: list[dict] = []
+        require_confluence = bool(settings.require_touch_confluence) and not force_no_edge
 
         for direction in dirs:
             feat_df = None
@@ -137,9 +152,8 @@ class SignalGenerator:
 
             candidates = self.strategies.evaluate_all(feat_df, current_price, barrier_distance)
             candidates = [c for c in candidates if c.direction == direction]
-            if confidence_override and not force_no_edge:
-                # Manual Analyze & Signal requires the touch-specific market
-                # confluence as well as the model probability threshold.
+            if require_confluence:
+                # Auto alerts and Analyze & Signal both require direction-matched confluence.
                 candidates = [
                     c for c in candidates if c.strategy_name == "touch_confluence"
                 ]
@@ -262,32 +276,41 @@ class SignalGenerator:
                         reason="FORCE OVERRIDE — edge/EV gates bypassed by user",
                     )
                 elif confidence_override:
-                    breakeven = purchase_price / total_payout
-                    conservative = float(cal_prob)
-                    ev_net = conservative * total_payout - purchase_price
-                    margin = conservative - breakeven
-                    ok_conf = conservative >= conf_floor and margin >= margin_floor
-                    ev_result = EVFilterResult(
-                        passes=ok_conf,
+                    # Same conservative CI / freshness evidence as EV path, but
+                    # without requiring demonstrated edge (research Analyze).
+                    research_filter = EVFilter(
+                        min_ev_margin=margin_floor,
+                        min_samples_in_range=settings.min_calibration_samples,
+                        require_demonstrated_edge=False,
+                    )
+                    ev_result = research_filter.evaluate(
+                        calibrated_prob=cal_prob,
                         purchase_price=purchase_price,
                         total_payout=total_payout,
-                        breakeven_probability=breakeven,
-                        calibrated_probability=cal_prob,
-                        conservative_probability=conservative,
-                        ev_net=ev_net,
-                        margin=margin,
-                        min_required_margin=margin_floor,
-                        reason=(
-                            f"Confidence OK: p={conservative:.3f}≥{conf_floor:.3f}, "
-                            f"margin={margin:.3f}≥{margin_floor:.3f}"
-                            if ok_conf
-                            else (
-                                f"Confidence too low: p={conservative:.3f} "
-                                f"(need ≥{conf_floor:.3f}) and margin={margin:.3f} "
-                                f"(need ≥{margin_floor:.3f} over breakeven {breakeven:.3f})"
-                            )
-                        ),
+                        model_has_edge=has_edge,
+                        calibration_sample_count=int(stats.get("sample_count", 0)),
+                        empirical_hit_rate=stats.get("hit_rate"),
+                        empirical_ci_lower=stats.get("ci_lower"),
                     )
+                    # Also enforce absolute calibrated confidence floor for UI clarity
+                    if ev_result.passes and float(cal_prob) < conf_floor:
+                        from app.signal_engine.ev_filter import EVFilterResult as _EFR
+
+                        ev_result = _EFR(
+                            passes=False,
+                            purchase_price=ev_result.purchase_price,
+                            total_payout=ev_result.total_payout,
+                            breakeven_probability=ev_result.breakeven_probability,
+                            calibrated_probability=cal_prob,
+                            conservative_probability=ev_result.conservative_probability,
+                            ev_net=ev_result.ev_net,
+                            margin=ev_result.margin,
+                            min_required_margin=margin_floor,
+                            reason=(
+                                f"Calibrated confidence {cal_prob:.3f} "
+                                f"< floor {conf_floor:.3f}"
+                            ),
+                        )
                 else:
                     ev_result = self.ev_filter.evaluate(
                         calibrated_prob=cal_prob,

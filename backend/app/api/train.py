@@ -10,12 +10,15 @@ from typing import Any
 import pandas as pd
 import structlog
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.database import get_db, async_session
-from app.models.tick import Tick
+from app.features.tick_loader import load_ticks_dataframe, tick_coverage_stats
+from app.ml.registry import save_and_activate_model_version
 from app.ml.trainer import TrainingOrchestrator
+from app.models.quote import Quote
 from app.collector.http_history import download_and_store_ticks
 
 router = APIRouter(prefix="/train", tags=["training"])
@@ -85,34 +88,31 @@ async def list_trained_models() -> dict:
 @router.get("/data-info")
 async def data_info(db: AsyncSession = Depends(get_db)) -> dict:
     """Check how many ticks are available in the database for training."""
-    result = await db.execute(
-        select(
-            Tick.symbol,
-            func.count(Tick.id).label("tick_count"),
-            func.min(Tick.tick_time).label("oldest"),
-            func.max(Tick.tick_time).label("newest"),
-        ).group_by(Tick.symbol)
-    )
-    rows = result.all()
-
-    if not rows:
+    coverage = await tick_coverage_stats(db)
+    symbols_raw = coverage.get("symbols") or []
+    if not symbols_raw:
         return {
             "has_data": False,
-            "message": "No tick data collected yet. The worker must be connected to Deriv to collect ticks.",
+            "message": (
+                "No tick data collected yet. Confirm Setup so the live worker "
+                "starts saving ticks, then return here to train."
+            ),
             "symbols": [],
         }
 
     symbols = [
         {
-            "symbol": r.symbol,
-            "tick_count": r.tick_count,
-            "oldest": str(r.oldest) if r.oldest else None,
-            "newest": str(r.newest) if r.newest else None,
-            "ready_to_train": r.tick_count >= 5000,
+            "symbol": s["symbol"],
+            "tick_count": s["tick_count"],
+            "oldest": s.get("oldest"),
+            "newest": s.get("newest"),
+            "ready_to_train": s["tick_count"] >= 5000,
+            "est_ticks_per_day": s.get("est_ticks_per_day"),
+            "span_days": s.get("span_days"),
+            "gap_flags": s.get("gap_flags"),
         }
-        for r in rows
+        for s in symbols_raw
     ]
-
     total_ticks = sum(s["tick_count"] for s in symbols)
     return {
         "has_data": total_ticks > 0,
@@ -120,6 +120,38 @@ async def data_info(db: AsyncSession = Depends(get_db)) -> dict:
         "min_needed": 5000,
         "ready": any(s["ready_to_train"] for s in symbols),
         "symbols": symbols,
+        "train_max_ticks": settings.train_max_ticks,
+        "train_sampling_interval_seconds": settings.train_sampling_interval_seconds,
+    }
+
+
+@router.get("/health")
+async def train_health(db: AsyncSession = Depends(get_db)) -> dict:
+    """Tick coverage + active model registry summary."""
+    from app.models.model_version import ModelVersion
+
+    coverage = await tick_coverage_stats(db)
+    active = (
+        await db.execute(
+            select(ModelVersion).where(ModelVersion.is_active.is_(True))
+        )
+    ).scalars().all()
+    return {
+        "coverage": coverage,
+        "active_models": [
+            {
+                "id": m.id,
+                "direction": m.direction,
+                "symbol": m.symbol,
+                "version_tag": m.version_tag,
+                "algorithm": m.algorithm,
+                "has_demonstrated_edge": m.has_demonstrated_edge,
+                "alerts_paused": m.alerts_paused,
+                "auc_roc": m.auc_roc,
+                "brier_score": m.brier_score,
+            }
+            for m in active
+        ],
     }
 
 
@@ -162,31 +194,49 @@ async def _run_training_background(
     _training_state = {"status": "running", "progress": "Loading tick data...", "result": None, "error": None}
 
     try:
-        # Load ticks from the database
+        max_ticks = int(settings.train_max_ticks or 0)
         async with async_session() as session:
-            result = await session.execute(
-                select(Tick)
-                .where(Tick.symbol == symbol)
-                .order_by(Tick.epoch.asc())
+            df = await load_ticks_dataframe(
+                session,
+                symbol=symbol,
+                max_ticks=max_ticks,
             )
-            ticks = result.scalars().all()
+            # Load quotes for economic backtest join
+            qres = await session.execute(
+                select(Quote)
+                .where(Quote.symbol == symbol)
+                .where(Quote.barrier_direction == barrier_direction)
+                .order_by(Quote.id.asc())
+            )
+            quotes = qres.scalars().all()
+            quotes_df = pd.DataFrame(
+                [
+                    {
+                        "quote_epoch": q.quote_epoch or q.spot_time,
+                        "spot_time": q.spot_time,
+                        "barrier_direction": q.barrier_direction,
+                        "ask_price": float(q.ask_price),
+                        "payout": float(q.payout),
+                        "breakeven_prob": float(q.breakeven_prob) if q.breakeven_prob is not None else None,
+                    }
+                    for q in quotes
+                    if (q.quote_epoch or q.spot_time) and q.ask_price and q.payout
+                ]
+            )
 
-        if len(ticks) < 1000:
+        if len(df) < 1000:
             _training_state = {
                 "status": "error",
                 "progress": "",
                 "result": None,
-                "error": f"Not enough ticks: {len(ticks)} collected, need at least 1000.",
+                "error": f"Not enough ticks: {len(df)} collected, need at least 1000.",
             }
             return
 
-        _training_state["progress"] = f"Loaded {len(ticks):,} ticks — building features & labels..."
-
-        df = pd.DataFrame(
-            [{"epoch": t.epoch, "tick_time": t.tick_time, "quote": float(t.quote)} for t in ticks]
+        _training_state["progress"] = (
+            f"Loaded {len(df):,} ticks (+{len(quotes_df):,} quotes) — building features & labels..."
         )
 
-        # Run the training pipeline in a thread pool to avoid blocking the event loop
         loop = asyncio.get_event_loop()
         orchestrator = TrainingOrchestrator(
             barrier_distance=barrier_distance,
@@ -197,14 +247,17 @@ async def _run_training_background(
         )
 
         _training_state["progress"] = (
-            "Training XGBoost + CatBoost + LSTM and comparing ensembles (several minutes)..."
+            "Training with non-overlapping samples + walk-forward metadata "
+            "(XGBoost/CatBoost/LSTM/ensembles)…"
         )
 
         results = await loop.run_in_executor(
             None,
-            orchestrator.train_full_pipeline,
-            df,
-            60,  # sample decision points every 60s
+            lambda: orchestrator.train_full_pipeline(
+                df,
+                sampling_interval_seconds=settings.train_sampling_interval_seconds,
+                quotes_df=quotes_df,
+            ),
         )
 
         if "error" in results:
@@ -215,6 +268,15 @@ async def _run_training_background(
                 "error": results["error"],
             }
         else:
+            # Persist / activate model version in DB
+            meta = results.get("metadata") or {}
+            try:
+                async with async_session() as session:
+                    mv = await save_and_activate_model_version(session, meta, results)
+                    results["model_version_id"] = mv.id
+            except Exception as reg_err:
+                logger.warning("model_registry_persist_failed", error=str(reg_err))
+
             def _slim(block):
                 if not isinstance(block, dict):
                     return {}
@@ -251,7 +313,13 @@ async def _run_training_background(
                     "has_demonstrated_edge": results.get("has_demonstrated_edge"),
                     "edge_description": results.get("edge_description"),
                     "quote_backtest_note": results.get("quote_backtest_note"),
+                    "quote_match_rate": results.get("quote_match_rate"),
                     "version_tag": results.get("version_tag"),
+                    "model_version_id": results.get("model_version_id"),
+                    "walk_forward_folds": (results.get("metadata") or {}).get("walk_forward_folds"),
+                    "sampling_interval_seconds": (results.get("metadata") or {}).get(
+                        "sampling_interval_seconds"
+                    ),
                 },
                 "error": None,
             }

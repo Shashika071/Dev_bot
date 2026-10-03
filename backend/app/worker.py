@@ -31,10 +31,13 @@ from app.ml.bundle import ModelPipelineBundle
 from app.models.settings import ContractSettings
 from app.models.tick import Tick
 from app.notifications.telegram import TelegramNotifier
+from app.ml.registry import get_active_model_version
 from app.signal_engine.daily_cap import DailyCapManager
+from app.signal_engine.drift import maybe_auto_pause_alerts
 from app.signal_engine.ev_filter import EVFilter
 from app.signal_engine.generator import SignalGenerator
 from app.signal_engine.lifecycle import SignalLifecycleManager
+from app.signal_engine.outcome_resolver import resolve_pending_outcomes
 from app.signal_engine.settings_lookup import get_latest_confirmed_settings
 from app.strategies.registry import StrategyRegistry
 
@@ -206,9 +209,16 @@ async def worker_loop():
                         continue
                     try:
                         bundle = ModelPipelineBundle.load(meta)
+                        version_id = hash(tag) % 1_000_000 or 1
+                        async with async_session() as reg_session:
+                            mv = await get_active_model_version(
+                                reg_session, symbol=conf.symbol, direction=direction
+                            )
+                            if mv and mv.version_tag == tag:
+                                version_id = int(mv.id)
                         generator.set_model(
                             bundle=bundle,
-                            version_id=hash(tag) % 1_000_000 or 1,
+                            version_id=version_id,
                             has_edge=bool(meta.get("has_demonstrated_edge", False)),
                             direction=direction,
                             metadata=meta,
@@ -219,6 +229,7 @@ async def worker_loop():
                             "model_loaded",
                             direction=direction,
                             version_tag=tag,
+                            version_id=version_id,
                             selected=meta.get("selected_pipeline"),
                             has_edge=meta.get("has_demonstrated_edge"),
                         )
@@ -293,6 +304,14 @@ async def worker_loop():
                         await telegram.send_signal_alert(signal_data)
 
                     await lifecycle.expire_stale_signals(session)
+                    try:
+                        await resolve_pending_outcomes(session, symbol=active_symbol)
+                    except Exception as res_err:
+                        logger.warning("outcome_resolve_failed", error=str(res_err))
+                    try:
+                        await maybe_auto_pause_alerts(session)
+                    except Exception as drift_err:
+                        logger.warning("drift_monitor_failed", error=str(drift_err))
 
             except Exception as e:
                 logger.error("worker_loop_error", error=str(e))

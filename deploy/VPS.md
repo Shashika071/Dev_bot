@@ -88,3 +88,48 @@ docker compose -p deriv -f docker-compose.prod.yml --env-file .env.prod down
 
 Do **not** run `docker compose down -v` on Fiyola.  
 Do **not** delete Fiyola volumes.
+
+## 5) Production model hardening (migrations / retrain / monitor)
+
+After `git pull` on the VPS:
+
+```bash
+cd /home/cert/Dev_bot   # or your path
+cp -n .env.example .env.prod   # only if missing keys — merge new TRAIN_*/AUTO_PAUSE_* vars
+docker compose -p deriv \
+  -f docker-compose.prod.yml \
+  -f docker-compose.ssl-ports.yml \
+  --env-file .env.prod \
+  up -d --build
+```
+
+Schema: backend startup runs `create_all` then Alembic `upgrade head` (additive only).  
+Backup before major upgrades:
+
+```bash
+docker compose -p deriv -f docker-compose.prod.yml --env-file .env.prod exec -T postgres \
+  pg_dump -U deriv deriv_bot > backup-$(date +%F).sql
+tar czf models-backup-$(date +%F).tgz data/models
+```
+
+Train on **all current DB ticks** from the UI (Train tab), or:
+
+```bash
+curl -X POST "https://backdev.crexline.com:8443/train/start?symbol=R_100&barrier_distance=0.1&barrier_direction=both&duration_seconds=540"
+curl "https://backdev.crexline.com:8443/train/status"
+curl "https://backdev.crexline.com:8443/train/health"
+curl "https://backdev.crexline.com:8443/signals/performance?days=7"
+```
+
+Optional heavier train container (profile):
+
+```bash
+docker compose -p deriv -f docker-compose.prod.yml --env-file .env.prod --profile train run --rm train
+```
+
+Rollback app containers only (keeps `pgdata` + `data/models`):
+
+```bash
+docker compose -p deriv -f docker-compose.prod.yml -f docker-compose.ssl-ports.yml --env-file .env.prod down
+# restore code to previous git tag, then up -d --build again
+```

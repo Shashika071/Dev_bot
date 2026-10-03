@@ -22,11 +22,34 @@ class MagicModel:
         return np.array([self.p])
 
 
+class MagicCalibrator:
+    is_fitted = True
+
+    def __init__(self, p=0.78):
+        self.p = p
+
+    def calibrate(self, arr):
+        import numpy as np
+
+        return np.asarray([self.p] * len(np.asarray(arr).ravel()))
+
+    def empirical_stats(self, probability, band=0.05):
+        # Enough held-out samples for EV / research gates
+        return {
+            "sample_count": 80,
+            "hit_rate": float(self.p),
+            "ci_lower": float(self.p) - 0.01,
+            "ci_upper": min(0.99, float(self.p) + 0.01),
+        }
+
+
 class MagicSettings:
     barrier_direction = "upper"
     barrier_input = "0.09"
     barrier_unit_description = "relative_price_points"
     duration_seconds = 540
+    alerts_paused = False
+    pause_reason = None
 
 
 def _upper_confluence_features():
@@ -58,7 +81,7 @@ def _gen(p=0.78, has_edge=False):
     gen = SignalGenerator(strategies, EVFilter(), cap, lifecycle)
     gen.set_model(
         model=MagicModel(p),
-        calibrator=None,
+        calibrator=MagicCalibrator(p),
         version_id=1,
         has_edge=has_edge,
         direction="upper",
@@ -169,3 +192,30 @@ async def test_without_override_no_edge_rejects():
         )
     assert result is None
     lifecycle.create_signal.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_auto_path_requires_confluence_even_with_edge():
+    """Worker-style path (no confidence_override) also requires touch_confluence."""
+    gen, lifecycle = _gen(p=0.99, has_edge=True)
+    feat = pd.DataFrame({
+        "return_10": [0.001],
+        "price_range_60": [0.01],
+        "price_range_300": [0.02],
+    })
+    session = AsyncMock()
+    with patch(
+        "app.signal_engine.generator.get_latest_confirmed_settings",
+        new=AsyncMock(return_value=MagicSettings()),
+    ):
+        result = await gen.evaluate_and_generate(
+            session=session,
+            features_df=feat,
+            current_price=100.0,
+            barrier_distance=0.09,
+            symbol="R_100",
+            current_quote={"ask_price": 4.0, "payout": 10.0},
+            allowed_directions=["upper"],
+            confidence_override=False,
+        )
+    assert result is None

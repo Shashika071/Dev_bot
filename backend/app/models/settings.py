@@ -53,6 +53,12 @@ class ContractSettings(Base):
     api_active_symbols_raw = Column(Text, nullable=True,
                                      comment="Raw JSON from active_symbols for audit")
 
+    # --- Runtime alert control ---
+    alerts_paused = Column(Boolean, default=False, nullable=False,
+                           comment="When true, validated auto-alerts are suppressed")
+    pause_reason = Column(Text, nullable=True)
+    paused_at = Column(DateTime(timezone=True), nullable=True)
+
     # --- Notes ---
     notes = Column(Text, nullable=True)
 

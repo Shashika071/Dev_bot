@@ -51,6 +51,42 @@ class Settings(BaseSettings):
     manual_min_margin_over_breakeven: float = Field(
         0.03, ge=0.0, le=0.5, description="Min (cal_prob - quote breakeven) required for manual signal"
     )
+    # Live EV / calibration gates (worker auto alerts)
+    min_ev_margin: float = Field(
+        0.02, ge=0.0, le=0.5, description="Min conservative margin over quote breakeven"
+    )
+    min_calibration_samples: int = Field(
+        50, ge=5, description="Min held-out calibration samples near predicted probability"
+    )
+    require_touch_confluence: bool = Field(
+        True, description="Require direction-matched touch_confluence for alerts"
+    )
+    confluence_min_score: float = Field(5.0, ge=0.0, description="Touch confluence min score")
+    confluence_min_gap: float = Field(1.5, ge=0.0, description="Touch confluence score gap")
+    # Training sampling / validation
+    train_sampling_interval_seconds: int = Field(
+        540, ge=60, description="Entry sample spacing; default = non-overlapping with 540s contracts"
+    )
+    train_gap_seconds: int = Field(600, ge=0, description="Purge gap between chronological splits")
+    train_min_calibration_samples: int = Field(
+        50, ge=11, description="Min samples required on calibration split"
+    )
+    train_edge_min_selected: int = Field(30, ge=5, description="Min selected test signals for edge")
+    train_edge_margin: float = Field(
+        0.02, ge=0.0, description="Extra margin over mean quote breakeven for edge CI"
+    )
+    train_max_ticks: int = Field(
+        0, ge=0, description="Cap ticks loaded for training (0 = all available)"
+    )
+    # Live drift / auto-pause
+    auto_pause_enabled: bool = Field(True, description="Pause validated alerts on live underperformance")
+    auto_pause_min_resolved: int = Field(
+        20, ge=5, description="Min resolved validated signals before auto-pause can fire"
+    )
+    auto_pause_ci_margin: float = Field(
+        0.0, ge=-0.1, le=0.1,
+        description="Pause when live Wilson CI lower < mean breakeven + this margin",
+    )
     # Barrier semantics for relative One-Touch on Deriv synthetic indices:
     # values like 0.09 / 0.2 are relative price-point offsets from spot, not percent.
 
