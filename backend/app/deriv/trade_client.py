@@ -412,8 +412,7 @@ class DerivTradeClient:
         currency: str = "USD",
         basis: str = "stake",
     ) -> dict:
-        # New PAT options WS: underlying_symbol only (symbol is rejected).
-        # Legacy v3 authorize WS: symbol only.
+        # New API: symbol → underlying_symbol only (sending both → "Properties not allowed: symbol")
         msg: dict[str, Any] = {
             "proposal": 1,
             "amount": float(amount),
@@ -422,7 +421,7 @@ class DerivTradeClient:
             "currency": currency,
             "duration": int(duration),
             "duration_unit": duration_unit,
-            "barrier": barrier,
+            "barrier": str(barrier),
         }
         if self._use_pat:
             msg["underlying_symbol"] = symbol
@@ -461,15 +460,22 @@ class DerivTradeClient:
                 basis="stake",
             )
             pid = proposal.get("id")
-            ask = float(proposal.get("ask_price") or 0)
+            try:
+                ask = float(proposal.get("ask_price") or 0)
+            except (TypeError, ValueError):
+                ask = 0.0
             if not pid or ask <= 0:
                 return {"ok": False, "error": "Empty proposal from Deriv", "raw": proposal}
             buy_price = round(ask * 1.02, 2)
             bought = await self.buy(pid, buy_price)
+            try:
+                buy_price_out = float(bought.get("buy_price") or ask)
+            except (TypeError, ValueError):
+                buy_price_out = ask
             return {
                 "ok": True,
                 "contract_id": bought.get("contract_id"),
-                "buy_price": bought.get("buy_price") or ask,
+                "buy_price": buy_price_out,
                 "longcode": bought.get("longcode") or proposal.get("longcode"),
                 "loginid": self._authorized_loginid or self._account_id,
                 "direction": direction,
