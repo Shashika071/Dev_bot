@@ -1,0 +1,28 @@
+# Run bot on custom ports — does NOT touch Fiyola :80/:443 or nginx.
+#
+#   cp .env.prod.example .env.prod   # if needed
+#   # set VITE_* URLs with ports (see below), then:
+#   docker compose -p deriv \
+#     -f docker-compose.prod.yml \
+#     -f docker-compose.ports.yml \
+#     --env-file .env.prod up -d --build
+#
+# Browser:
+#   UI  http://devbot.crexline.com:8080   or  http://VPS_IP:8080
+#   API http://backdev.crexline.com:8001  or  http://VPS_IP:8001
+#
+# Cloudflare: use DNS-only (grey cloud) for these hostnames when using custom ports.
+# Orange-cloud proxy mainly works for 80/443.
+
+services:
+  frontend:
+    ports:
+      - "${DERIV_UI_PORT:-8080}:80"
+    networks:
+      - deriv_net
+
+  backend:
+    ports:
+      - "${DERIV_API_PORT:-8001}:8000"
+    networks:
+      - deriv_net

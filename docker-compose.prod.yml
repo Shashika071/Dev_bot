@@ -62,7 +62,6 @@ services:
     mem_limit: 1536m
     networks:
       - deriv_net
-      - edge
 
   worker:
     build:
@@ -95,13 +94,7 @@ services:
     mem_limit: 128m
     networks:
       - deriv_net
-      - edge
 
 networks:
   deriv_net:
     driver: bridge
-  # Shared with existing Fiyola nginx so it can proxy by container name.
-  # Create once if missing: docker network create edge
-  edge:
-    external: true
-    name: ${EDGE_NETWORK:-edge}

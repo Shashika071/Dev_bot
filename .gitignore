@@ -3,6 +3,8 @@
 .env.prod
 .env.local
 *.pem
+certs/origin.pem
+certs/origin.key
 
 # Python
 __pycache__/
