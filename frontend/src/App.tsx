@@ -531,6 +531,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
     direction: string; ok?: boolean; calibrated_probability?: number;
     breakeven_probability?: number; margin_over_breakeven?: number;
     meets_confidence?: boolean; confluence_met?: boolean;
+    candle_confirm_met?: boolean; candle_confirm_score?: number;
     selected_pipeline?: string; reason?: string;
   }>>([]);
   const [perf, setPerf] = useState<{
@@ -670,6 +671,9 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
                         {a.confluence_met
                           ? <span className="text-green"> · confluence ✓</span>
                           : <span className="text-dim"> · no confluence</span>}
+                        {a.candle_confirm_met
+                          ? <span className="text-green"> · candles ✓{a.candle_confirm_score != null ? ` (${a.candle_confirm_score.toFixed(1)})` : ''}</span>
+                          : <span className="text-dim"> · no candle confirm</span>}
                         {a.meets_confidence
                           ? <span className="text-green"> · READY</span>
                           : <span className="text-dim"> · below bar</span>}
@@ -822,8 +826,8 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
           )}
           {models?.trained && (
             <p className="text-xs text-dim mt-3">
-              Auto alerts need <span className="text-cyan">Edge OK</span> + confluence + EV gates.
-              <span className="text-amber"> Analyze & Signal</span> uses the same confluence/EV evidence with a confidence floor (default ≥95%).
+              Auto alerts need <span className="text-cyan">Edge OK</span> + tick confluence + candle confirm (1m/5m) + EV gates.
+              <span className="text-amber"> Analyze & Signal</span> uses the same gates with a confidence floor (default ≥95%).
               Max 3/day Asia/Colombo.
             </p>
           )}
@@ -1054,12 +1058,15 @@ function TrainView() {
           require_touch_confluence: true,
           confluence_min_score: 5,
           confluence_min_gap: 1.5,
+          require_candle_confirm: true,
+          candle_confirm_min_score: 4,
+          candle_confirm_min_gap: 1,
           auto_pause_enabled: true,
           auto_pause_min_resolved: 20,
           auto_pause_ci_margin: 0,
         }),
       });
-      steps.push(`Bot gates → Analyze 95%, confluence on, live cal samples ${liveCal}`);
+      steps.push(`Bot gates → Analyze 95%, confluence + candle confirm on, live cal samples ${liveCal}`);
 
       const sym = d.symbols?.find(s => s.symbol === symbol);
       const sh = sym?.span_hours ?? hoursBetween(sym?.oldest, sym?.newest) ?? 0;
@@ -1726,6 +1733,9 @@ type OpsPrefs = {
   require_touch_confluence: boolean;
   confluence_min_score: number;
   confluence_min_gap: number;
+  require_candle_confirm: boolean;
+  candle_confirm_min_score: number;
+  candle_confirm_min_gap: number;
   auto_pause_enabled: boolean;
   auto_pause_min_resolved: number;
   auto_pause_ci_margin: number;
@@ -1742,6 +1752,9 @@ const DEFAULT_OPS: OpsPrefs = {
   require_touch_confluence: true,
   confluence_min_score: 5,
   confluence_min_gap: 1.5,
+  require_candle_confirm: true,
+  candle_confirm_min_score: 4,
+  candle_confirm_min_gap: 1,
   auto_pause_enabled: true,
   auto_pause_min_resolved: 20,
   auto_pause_ci_margin: 0,
@@ -1777,6 +1790,9 @@ function SetupView({ online }: { online: boolean }) {
           require_touch_confluence: r.require_touch_confluence,
           confluence_min_score: r.confluence_min_score,
           confluence_min_gap: r.confluence_min_gap,
+          require_candle_confirm: r.require_candle_confirm !== false,
+          candle_confirm_min_score: r.candle_confirm_min_score ?? 4,
+          candle_confirm_min_gap: r.candle_confirm_min_gap ?? 1,
           auto_pause_enabled: r.auto_pause_enabled,
           auto_pause_min_resolved: r.auto_pause_min_resolved,
           auto_pause_ci_margin: r.auto_pause_ci_margin,
@@ -2017,6 +2033,18 @@ function SetupView({ online }: { online: boolean }) {
             <div className="form-hint">{opsGuide.confluence_min_gap || 'Gap between upper vs lower scores.'}</div>
           </div>
           <div className="form-group">
+            <label className="form-label">Candle confirm min score</label>
+            <input type="number" step="0.1" min={0} max={20} className="form-input" value={ops.candle_confirm_min_score}
+              onChange={e => setOpsField('candle_confirm_min_score', Number(e.target.value))}/>
+            <div className="form-hint">{opsGuide.candle_confirm_min_score || '1m/5m/15m + patterns (engulfing, pin, soldiers…) default 4.'}</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Candle confirm min gap</label>
+            <input type="number" step="0.1" min={0} max={10} className="form-input" value={ops.candle_confirm_min_gap}
+              onChange={e => setOpsField('candle_confirm_min_gap', Number(e.target.value))}/>
+            <div className="form-hint">{opsGuide.candle_confirm_min_gap || 'Score gap vs opposite candle direction.'}</div>
+          </div>
+          <div className="form-group">
             <label className="form-label">Auto-pause min resolved</label>
             <input type="number" min={5} max={200} className="form-input" value={ops.auto_pause_min_resolved}
               onChange={e => setOpsField('auto_pause_min_resolved', Number(e.target.value))}/>
@@ -2035,6 +2063,11 @@ function SetupView({ online }: { online: boolean }) {
             <input type="checkbox" checked={ops.require_touch_confluence}
               onChange={e => setOpsField('require_touch_confluence', e.target.checked)}/>
             Require touch confluence
+          </label>
+          <label className="text-sm flex items-center gap-2" style={{ cursor: 'pointer' }}>
+            <input type="checkbox" checked={ops.require_candle_confirm}
+              onChange={e => setOpsField('require_candle_confirm', e.target.checked)}/>
+            Require candle confirm (1m/5m)
           </label>
           <label className="text-sm flex items-center gap-2" style={{ cursor: 'pointer' }}>
             <input type="checkbox" checked={ops.auto_pause_enabled}

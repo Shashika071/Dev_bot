@@ -160,6 +160,36 @@ class SignalGenerator:
                 candidates = [
                     c for c in candidates if c.strategy_name == "touch_confluence"
                 ]
+
+            # Extra confirmation: 1m/5m candle structure must agree with direction
+            candle_result = None
+            require_candle = bool(ops.get("require_candle_confirm", True)) and not force_no_edge
+            if require_candle:
+                from app.strategies.candle_confirm import (
+                    evaluate_candle_confirm,
+                    ticks_from_features,
+                )
+
+                tick_frame = ticks_from_features(feat_df)
+                if tick_frame is None or len(tick_frame) < 80:
+                    logger.debug("signal_candle_confirm_insufficient_ticks", direction=direction)
+                    candidates = []
+                else:
+                    candle_result = evaluate_candle_confirm(
+                        tick_frame,
+                        direction,
+                        min_score=float(ops.get("candle_confirm_min_score", 4.0)),
+                        min_gap=float(ops.get("candle_confirm_min_gap", 1.0)),
+                    )
+                    if not candle_result.confirmed:
+                        logger.debug(
+                            "signal_candle_confirm_rejected",
+                            direction=direction,
+                            score=candle_result.score,
+                            explanation=candle_result.explanation,
+                        )
+                        candidates = []
+
             if not candidates and force_no_edge:
                 from app.strategies.base import StrategySignal
 
@@ -349,6 +379,15 @@ class SignalGenerator:
                         "selected_pipeline": selected_pipeline,
                         "version_tag": pack.get("version_tag", ""),
                         "barrier_unit": meta.get("barrier_unit", "relative_price_points"),
+                        "candle_confirm": (
+                            {
+                                "confirmed": True,
+                                "score": candle_result.score,
+                                "explanation": candle_result.explanation,
+                            }
+                            if candle_result is not None
+                            else None
+                        ),
                     }
                 )
 
@@ -374,9 +413,12 @@ class SignalGenerator:
 
         comps = best.get("component_probs") or {}
         comp_txt = ", ".join(f"{k}={v:.3f}" for k, v in comps.items())
+        candle_bit = ""
+        if best.get("candle_confirm"):
+            candle_bit = f" | candle✓ score={best['candle_confirm'].get('score', 0):.1f}"
         explanation = (
             f"{candidate.explanation} | selected={best.get('selected_pipeline')} "
-            f"| components: {comp_txt}"
+            f"| components: {comp_txt}{candle_bit}"
         )
         if force_no_edge:
             explanation = (

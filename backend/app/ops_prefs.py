@@ -35,6 +35,9 @@ def _defaults() -> dict[str, Any]:
         "require_touch_confluence": bool(settings.require_touch_confluence),
         "confluence_min_score": float(settings.confluence_min_score),
         "confluence_min_gap": float(settings.confluence_min_gap),
+        "require_candle_confirm": True,
+        "candle_confirm_min_score": 4.0,
+        "candle_confirm_min_gap": 1.0,
         "auto_pause_enabled": bool(settings.auto_pause_enabled),
         "auto_pause_min_resolved": int(settings.auto_pause_min_resolved),
         "auto_pause_ci_margin": float(settings.auto_pause_ci_margin),
@@ -58,6 +61,9 @@ def _clamp(prefs: dict[str, Any]) -> dict[str, Any]:
     out["require_touch_confluence"] = bool(out["require_touch_confluence"])
     out["confluence_min_score"] = max(0.0, min(50.0, float(out["confluence_min_score"])))
     out["confluence_min_gap"] = max(0.0, min(20.0, float(out["confluence_min_gap"])))
+    out["require_candle_confirm"] = bool(out.get("require_candle_confirm", True))
+    out["candle_confirm_min_score"] = max(0.0, min(20.0, float(out.get("candle_confirm_min_score", 4.0))))
+    out["candle_confirm_min_gap"] = max(0.0, min(10.0, float(out.get("candle_confirm_min_gap", 1.0))))
     out["auto_pause_enabled"] = bool(out["auto_pause_enabled"])
     out["auto_pause_min_resolved"] = max(5, min(200, int(out["auto_pause_min_resolved"])))
     out["auto_pause_ci_margin"] = max(-0.1, min(0.1, float(out["auto_pause_ci_margin"])))

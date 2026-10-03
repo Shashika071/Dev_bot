@@ -252,10 +252,25 @@ async def generate_manual_signal(
             else None
         )
         confluence_met = bool(confluence and confluence.direction == direction)
+
+        from app.ops_prefs import load_ops_prefs
+        from app.strategies.candle_confirm import evaluate_candle_confirm
+
+        ops = load_ops_prefs()
+        require_candle = bool(ops.get("require_candle_confirm", True)) and not force_no_edge
+        candle = evaluate_candle_confirm(
+            df,
+            direction,
+            min_score=float(ops.get("candle_confirm_min_score", 4.0)),
+            min_gap=float(ops.get("candle_confirm_min_gap", 1.0)),
+        )
+        candle_met = bool(candle.confirmed) if require_candle else True
+
         meets = (
             cal >= min_conf
             and margin >= min_margin
             and (force_no_edge or confluence_met)
+            and candle_met
         )
         analysis.append({
             "direction": direction,
@@ -272,6 +287,9 @@ async def generate_manual_signal(
             "meets_confidence": meets,
             "confluence_met": confluence_met,
             "confluence_explanation": confluence.explanation if confluence_met else None,
+            "candle_confirm_met": candle_met,
+            "candle_confirm_score": candle.score,
+            "candle_confirm_explanation": candle.explanation,
             "spot": current_price,
         })
 
@@ -318,13 +336,15 @@ async def generate_manual_signal(
                 f"{best['calibrated_probability']*100:.1f}% "
                 f"(breakeven {best['breakeven_probability']*100:.1f}%, "
                 f"margin {best['margin_over_breakeven']*100:.1f}%, "
-                f"confluence={'yes' if best.get('confluence_met') else 'no'})."
+                f"confluence={'yes' if best.get('confluence_met') else 'no'}, "
+                f"candles={'yes' if best.get('candle_confirm_met') else 'no'})."
             )
         return {
             "ok": False,
             "reason": (
                 f"Analyzed — no high-confidence setup. "
-                f"Need touch confluence, p≥{min_conf*100:.0f}%, and "
+                f"Need touch confluence, candle confirm (1m/5m), "
+                f"p≥{min_conf*100:.0f}%, and "
                 f"margin≥{min_margin*100:.0f}% over quote breakeven."
                 f"{best_line} Try again when the model is more confident."
             ),

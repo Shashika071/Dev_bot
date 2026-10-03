@@ -29,6 +29,9 @@ class OpsPrefsBody(BaseModel):
     require_touch_confluence: bool = True
     confluence_min_score: float = Field(5.0, ge=0.0, le=50.0)
     confluence_min_gap: float = Field(1.5, ge=0.0, le=20.0)
+    require_candle_confirm: bool = True
+    candle_confirm_min_score: float = Field(4.0, ge=0.0, le=20.0)
+    candle_confirm_min_gap: float = Field(1.0, ge=0.0, le=10.0)
     auto_pause_enabled: bool = True
     auto_pause_min_resolved: int = Field(20, ge=5, le=200)
     auto_pause_ci_margin: float = Field(0.0, ge=-0.1, le=0.1)
@@ -52,6 +55,9 @@ async def get_ops_prefs() -> dict:
             "require_touch_confluence",
             "confluence_min_score",
             "confluence_min_gap",
+            "require_candle_confirm",
+            "candle_confirm_min_score",
+            "candle_confirm_min_gap",
             "auto_pause_enabled",
             "auto_pause_min_resolved",
             "auto_pause_ci_margin",
@@ -76,6 +82,12 @@ async def get_ops_prefs() -> dict:
             "require_touch_confluence": "If on, only touch_confluence strategy can alert.",
             "confluence_min_score": "Minimum confluence score to fire.",
             "confluence_min_gap": "Min score gap between upper vs lower confluence.",
+            "require_candle_confirm": (
+                "If on, 1m/5m/15m candles + patterns must agree "
+                "(engulfing, stars, harami, tweezers, soldiers/crows, pins, etc.)."
+            ),
+            "candle_confirm_min_score": "Minimum candle confirmation score (multi-TF + patterns).",
+            "candle_confirm_min_gap": "Min score gap vs opposite candle direction.",
             "auto_pause_enabled": "Pause alerts if live results look worse than breakeven.",
             "auto_pause_min_resolved": "How many resolved live signals before auto-pause can fire.",
             "auto_pause_ci_margin": "Extra margin vs mean breakeven for the pause rule.",
