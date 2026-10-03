@@ -1,6 +1,6 @@
 """
 Signals API for listing alerts and recording manual entries.
-NO automated order placement exists here.
+Optional auto-trade runs only when explicitly enabled in Setup.
 """
 
 import time
@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
+from app.deriv.auto_trade import maybe_auto_trade_after_signal
 from app.models.signal import Signal
 from app.models.tick import Tick
 from app.notifications.browser import (
@@ -156,25 +157,41 @@ async def chart_candles(
 
 
 @router.post("/generate")
+@router.post("/analyze-generate")
 async def generate_signal(
     payload: dict | None = None,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """
     Analyze live ticks/quotes with trained models, then emit a signal only if
-    calibrated confidence clears MANUAL_MIN_CONFIDENCE and margin over quote
-    breakeven. Does not create a weak signal just because the button was clicked.
-    Optional force_no_edge=true is a blind bypass (not used by the dashboard).
-    Daily cap / cooldown still apply. Never places trades.
+    gates pass. Modes:
+      - standard (default): confluence + candles + p + margin
+      - force_model_candles: candles + min calibrated p only
+    Daily cap / cooldown still apply. Optional auto-trade if enabled in Setup.
     """
     body = payload or {}
     force = bool(body.get("force_no_edge", False))
-    result = await generate_manual_signal(db, force_no_edge=force)
+    mode = str(body.get("mode") or "standard").strip().lower()
+    if mode not in ("standard", "force_model_candles"):
+        mode = "standard"
+    min_p = body.get("min_probability")
+    min_probability = float(min_p) if min_p is not None else None
+    result = await generate_manual_signal(
+        db,
+        force_no_edge=force,
+        mode=mode,
+        min_probability=min_probability,
+    )
     if result.get("ok") and result.get("signal"):
         try:
             await send_signal_notification(result["signal"])
         except Exception:
             pass
+        try:
+            trade = await maybe_auto_trade_after_signal(db, result["signal"])
+            result["trade"] = trade
+        except Exception as e:
+            result["trade"] = {"ok": False, "error": str(e)}
     return result
 
 

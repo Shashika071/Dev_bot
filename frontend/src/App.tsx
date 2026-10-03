@@ -537,6 +537,8 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
   const [analyzeBusy, setAnalyzeBusy] = useState(false);
   const [analyzeMsg, setAnalyzeMsg] = useState('');
   const [analyzeOk, setAnalyzeOk] = useState(false);
+  const [forceMinP, setForceMinP] = useState(0.80);
+  const [tradeResultMsg, setTradeResultMsg] = useState('');
   const [analysisRows, setAnalysisRows] = useState<Array<{
     direction: string; ok?: boolean; calibrated_probability?: number;
     breakeven_probability?: number; margin_over_breakeven?: number;
@@ -581,28 +583,48 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
+    api<{ force_min_probability?: number }>('/setup/trade-prefs')
+      .then(r => {
+        if (r.force_min_probability != null) setForceMinP(Number(r.force_min_probability));
+      })
+      .catch(() => {});
+  }, []);
+  useEffect(() => {
     loadChart();
     const id = setInterval(loadChart, tf === 'tick' ? 2500 : 5000);
     return () => clearInterval(id);
   }, [loadChart, tf]);
 
-  const analyzeGenerate = async () => {
-    setAnalyzeBusy(true); setAnalyzeMsg(''); setAnalyzeOk(false); setAnalysisRows([]);
+  const analyzeGenerate = async (mode: 'standard' | 'force_model_candles' = 'standard') => {
+    setAnalyzeBusy(true); setAnalyzeMsg(''); setAnalyzeOk(false); setAnalysisRows([]); setTradeResultMsg('');
     try {
+      const body =
+        mode === 'force_model_candles'
+          ? { mode: 'force_model_candles', min_probability: forceMinP }
+          : { mode: 'standard' };
       const res = await api<{
         ok: boolean;
         reason?: string;
         signal?: SigData & { calibrated_probability?: number; direction?: string; signal_id?: string };
         analysis?: typeof analysisRows;
         thresholds?: { min_confidence: number; min_margin_over_breakeven: number };
-      }>('/signals/generate', { method: 'POST', body: JSON.stringify({}) });
+        trade?: { ok?: boolean; skipped?: boolean; contract_id?: number|string; error?: string; stake?: number; reason?: string };
+      }>('/signals/analyze-generate', { method: 'POST', body: JSON.stringify(body) });
 
       setAnalysisRows(res.analysis || []);
       if (res.ok && res.signal) {
         const s = res.signal;
         const p = ((s.calibrated_probability ?? s.probability ?? 0) * 100).toFixed(1);
+        const label = mode === 'force_model_candles' ? 'Force signal' : 'Signal';
         setAnalyzeOk(true);
-        setAnalyzeMsg(`Signal: ${s.direction?.toUpperCase()} · ${p}% confidence · ${s.signal_id}`);
+        setAnalyzeMsg(`${label}: ${s.direction?.toUpperCase()} · ${p}% confidence · ${s.signal_id}`);
+        if (res.trade && !res.trade.skipped) {
+          if (res.trade.ok) {
+            setTradeResultMsg(`Auto-trade OK · contract ${res.trade.contract_id} · stake ${res.trade.stake}`);
+          } else {
+            setTradeResultMsg(`Auto-trade failed: ${res.trade.error || 'unknown'}`);
+          }
+        }
         await load();
       } else {
         setAnalyzeOk(false);
@@ -649,12 +671,22 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
           <button
             id="btn-analyze-signal"
             className="btn btn-primary"
-            onClick={analyzeGenerate}
+            onClick={() => analyzeGenerate('standard')}
             disabled={analyzeBusy || !models?.trained}
             title="Require touch confluence plus high model confidence before creating a signal"
           >
             {analyzeBusy ? <Loader2 size={14} className="spin"/> : <Zap size={14}/>}
             Analyze & Signal
+          </button>
+          <button
+            id="btn-force-signal"
+            className="btn btn-ghost"
+            onClick={() => analyzeGenerate('force_model_candles')}
+            disabled={analyzeBusy || !models?.trained}
+            title={`Model + candles only; min p=${(forceMinP * 100).toFixed(0)}%. Skips confluence/EV/edge.`}
+          >
+            {analyzeBusy ? <Loader2 size={14} className="spin"/> : <Zap size={14}/>}
+            Force ({(forceMinP * 100).toFixed(0)}% + candles)
           </button>
           <button id="btn-refresh-signals" className="btn btn-ghost" onClick={load}>
             {loading ? <Loader2 size={14} className="spin"/> : <RefreshCw size={14}/>} Refresh
@@ -662,11 +694,12 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
         </div>
       </div>
 
-      {(analyzeMsg || analysisRows.length > 0) && (
+      {(analyzeMsg || analysisRows.length > 0 || tradeResultMsg) && (
         <div className={`alert ${analyzeOk ? 'alert-success' : 'alert-warning'}`} style={{marginBottom:'1rem'}}>
           <AlertTriangle size={14}/>
           <div style={{flex:1}}>
             <div>{analyzeMsg}</div>
+            {tradeResultMsg && <div className="text-xs mt-1 font-mono">{tradeResultMsg}</div>}
             {analysisRows.length > 0 && (
               <div className="analyze-grid" style={{marginTop:8}}>
                 {analysisRows.map(a => (
@@ -838,7 +871,8 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
             <p className="text-xs text-dim mt-3">
               Auto alerts need <span className="text-cyan">Edge OK</span> + tick confluence + candle confirm (1m/5m) + EV gates.
               <span className="text-amber"> Analyze & Signal</span> uses the same gates with a confidence floor (default ≥95%).
-              Max 3/day Asia/Colombo.
+              <span className="text-amber"> Force</span> uses model probability + candles only (min from Setup).
+              Signal-only by default; auto-trade only when enabled in Setup. Max 3/day Asia/Colombo.
             </p>
           )}
         </div>
@@ -1770,6 +1804,24 @@ const DEFAULT_OPS: OpsPrefs = {
   auto_pause_ci_margin: 0,
 };
 
+type TradePrefs = {
+  auto_trade_enabled: boolean;
+  trade_stake: number;
+  force_min_probability: number;
+  trade_currency: string;
+  token_configured?: boolean;
+  token_mask?: string | null;
+};
+
+const DEFAULT_TRADE: TradePrefs = {
+  auto_trade_enabled: false,
+  trade_stake: 1,
+  force_min_probability: 0.8,
+  trade_currency: 'USD',
+  token_configured: false,
+  token_mask: null,
+};
+
 function SetupView({ online }: { online: boolean }) {
   const [sym, setSym]       = useState('R_100');
   const [dur, setDur]       = useState('9');
@@ -1786,6 +1838,11 @@ function SetupView({ online }: { online: boolean }) {
   const [opsSaving, setOpsSaving] = useState(false);
   const [opsMsg, setOpsMsg] = useState('');
   const [opsOk, setOpsOk]   = useState(false);
+  const [trade, setTrade]   = useState<TradePrefs>(DEFAULT_TRADE);
+  const [tradeToken, setTradeToken] = useState('');
+  const [tradeSaving, setTradeSaving] = useState(false);
+  const [tradeMsg, setTradeMsg] = useState('');
+  const [tradeOk, setTradeOk] = useState(false);
 
   useEffect(() => {
     api<OpsPrefs & { guide?: Record<string, string> }>('/setup/ops-prefs')
@@ -1810,6 +1867,18 @@ function SetupView({ online }: { online: boolean }) {
         if (r.guide) setOpsGuide(r.guide);
       })
       .catch(() => {});
+    api<TradePrefs>('/setup/trade-prefs')
+      .then(r => {
+        setTrade({
+          auto_trade_enabled: !!r.auto_trade_enabled,
+          trade_stake: Number(r.trade_stake ?? 1),
+          force_min_probability: Number(r.force_min_probability ?? 0.8),
+          trade_currency: r.trade_currency || 'USD',
+          token_configured: !!r.token_configured,
+          token_mask: r.token_mask ?? null,
+        });
+      })
+      .catch(() => {});
   }, []);
 
   const setOpsField = <K extends keyof OpsPrefs>(key: K, value: OpsPrefs[K]) => {
@@ -1827,6 +1896,72 @@ function SetupView({ online }: { online: boolean }) {
       setOpsMsg(`✗ ${e.message}`);
     }
     setOpsSaving(false);
+  };
+
+  const saveTradePrefs = async () => {
+    setTradeSaving(true); setTradeMsg('');
+    try {
+      const r = await api<TradePrefs>('/setup/trade-prefs', {
+        method: 'PUT',
+        body: JSON.stringify({
+          auto_trade_enabled: trade.auto_trade_enabled,
+          trade_stake: trade.trade_stake,
+          force_min_probability: trade.force_min_probability,
+          trade_currency: trade.trade_currency,
+        }),
+      });
+      setTrade(prev => ({
+        ...prev,
+        auto_trade_enabled: !!r.auto_trade_enabled,
+        trade_stake: Number(r.trade_stake ?? prev.trade_stake),
+        force_min_probability: Number(r.force_min_probability ?? prev.force_min_probability),
+        trade_currency: r.trade_currency || prev.trade_currency,
+        token_configured: r.token_configured ?? prev.token_configured,
+        token_mask: r.token_mask ?? prev.token_mask,
+      }));
+      setTradeOk(true);
+      setTradeMsg('✓ Trade prefs saved.');
+    } catch (e: any) {
+      setTradeOk(false);
+      setTradeMsg(`✗ ${e.message}`);
+    }
+    setTradeSaving(false);
+  };
+
+  const saveTradeToken = async () => {
+    setTradeSaving(true); setTradeMsg('');
+    try {
+      const r = await api<{ token_configured?: boolean; token_mask?: string }>('/setup/trade-token', {
+        method: 'PUT',
+        body: JSON.stringify({ token: tradeToken }),
+      });
+      setTrade(prev => ({
+        ...prev,
+        token_configured: !!r.token_configured,
+        token_mask: r.token_mask ?? null,
+      }));
+      setTradeToken('');
+      setTradeOk(true);
+      setTradeMsg('✓ Token encrypted and stored (shown as mask only).');
+    } catch (e: any) {
+      setTradeOk(false);
+      setTradeMsg(`✗ ${e.message}`);
+    }
+    setTradeSaving(false);
+  };
+
+  const clearTradeToken = async () => {
+    setTradeSaving(true); setTradeMsg('');
+    try {
+      await api('/setup/trade-token', { method: 'DELETE' });
+      setTrade(prev => ({ ...prev, token_configured: false, token_mask: null, auto_trade_enabled: false }));
+      setTradeOk(true);
+      setTradeMsg('✓ Token cleared. Auto-trade should stay off until you set a new token.');
+    } catch (e: any) {
+      setTradeOk(false);
+      setTradeMsg(`✗ ${e.message}`);
+    }
+    setTradeSaving(false);
   };
 
   const checkApi = async () => {
@@ -1949,8 +2084,11 @@ function SetupView({ online }: { online: boolean }) {
         )}
 
         <div className="warn-box">
-          <div className="warn-title"><AlertTriangle size={14}/>Read-Only Research System</div>
-          <p className="warn-body">This system <strong>never</strong> executes trades automatically. All trades must be placed manually in your Deriv account. This is strictly a signal generation tool.</p>
+          <div className="warn-title"><AlertTriangle size={14}/>Signal-first · optional auto-trade</div>
+          <p className="warn-body">
+            By default this bot only generates signals. Auto-trade is <strong>off</strong> until you enable it below
+            with a Deriv API token (trade scope). Demo and real accounts are both allowed — real money risk is yours.
+          </p>
         </div>
 
         <div className="divider"/>
@@ -2103,6 +2241,129 @@ function SetupView({ online }: { online: boolean }) {
           {opsSaving ? <Loader2 size={14} className="spin"/> : <ShieldCheck size={14}/>}
           {opsSaving ? 'Saving gates…' : 'Save bot gates'}
         </button>
+      </div>
+
+      <div className="glass" style={{ marginTop: '1.25rem' }}>
+        <div className="section-header">
+          <h3 className="section-title"><AlertTriangle size={16}/>Auto-trade (optional)</h3>
+          {trade.token_configured
+            ? <span className="badge badge-green">Token {trade.token_mask || 'set'}</span>
+            : <span className="badge badge-dim">No token</span>}
+        </div>
+        <div className="alert alert-warning" style={{ marginBottom: '1rem' }}>
+          <AlertTriangle size={14}/>
+          <div>
+            Enabling auto-trade can place <strong>real or demo</strong> One-Touch buys after Analyze / Force.
+            Use a token with trade scope. Stake is taken from the field below — not from quote display price.
+          </div>
+        </div>
+
+        <label className="text-sm flex items-center gap-2 mb-3" style={{ cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={trade.auto_trade_enabled}
+            onChange={e => setTrade(prev => ({ ...prev, auto_trade_enabled: e.target.checked }))}
+          />
+          Enable auto-trade after Analyze / Force signal
+        </label>
+
+        <div className="grid-2">
+          <div className="form-group">
+            <label className="form-label">Stake</label>
+            <input
+              type="number"
+              step="0.01"
+              min={0.35}
+              className="form-input"
+              value={trade.trade_stake}
+              onChange={e => setTrade(prev => ({ ...prev, trade_stake: Number(e.target.value) }))}
+            />
+            <div className="form-hint">Amount sent in proposal/buy (account currency).</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Force min probability</label>
+            <select
+              className="form-select"
+              value={String(trade.force_min_probability)}
+              onChange={e => setTrade(prev => ({ ...prev, force_min_probability: Number(e.target.value) }))}
+            >
+              <option value="0.8">80%</option>
+              <option value="0.85">85%</option>
+              <option value="0.9">90%</option>
+              <option value="0.95">95%</option>
+            </select>
+            <div className="form-hint">Dashboard Force button uses this floor (candles still required).</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Currency</label>
+            <input
+              type="text"
+              className="form-input"
+              value={trade.trade_currency}
+              onChange={e => setTrade(prev => ({ ...prev, trade_currency: e.target.value.toUpperCase() }))}
+            />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Custom force min (0.50–0.99)</label>
+            <input
+              type="number"
+              step="0.01"
+              min={0.5}
+              max={0.99}
+              className="form-input"
+              value={trade.force_min_probability}
+              onChange={e => setTrade(prev => ({ ...prev, force_min_probability: Number(e.target.value) }))}
+            />
+          </div>
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">Deriv API token (trade scope)</label>
+          <input
+            type="password"
+            className="form-input"
+            placeholder={trade.token_configured ? `Configured ${trade.token_mask || ''}` : 'Paste token — never shown again'}
+            value={tradeToken}
+            onChange={e => setTradeToken(e.target.value)}
+            autoComplete="off"
+          />
+          <div className="form-hint">Stored encrypted on the server. UI only shows last-4 mask.</div>
+        </div>
+
+        {tradeMsg && (
+          <div className={`alert ${tradeOk ? 'alert-success' : 'alert-error'}`}>
+            {tradeOk ? <CheckCircle size={14}/> : <XCircle size={14}/>}
+            {tradeMsg}
+          </div>
+        )}
+
+        <div className="flex gap-3" style={{ flexWrap: 'wrap' }}>
+          <button
+            id="btn-save-trade-prefs"
+            className="btn btn-primary"
+            onClick={saveTradePrefs}
+            disabled={tradeSaving || !online}
+          >
+            {tradeSaving ? <Loader2 size={14} className="spin"/> : <ShieldCheck size={14}/>}
+            Save trade prefs
+          </button>
+          <button
+            id="btn-save-trade-token"
+            className="btn btn-ghost"
+            onClick={saveTradeToken}
+            disabled={tradeSaving || !online || tradeToken.trim().length < 8}
+          >
+            Save token
+          </button>
+          <button
+            id="btn-clear-trade-token"
+            className="btn btn-ghost"
+            onClick={clearTradeToken}
+            disabled={tradeSaving || !online || !trade.token_configured}
+          >
+            Clear token
+          </button>
+        </div>
       </div>
     </div>
   );

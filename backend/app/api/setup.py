@@ -15,6 +15,13 @@ from app.models.settings import ContractSettings
 from app.deriv.client import DerivWSClient
 from app.collector.discovery import ContractDiscovery
 from app.ops_prefs import load_ops_prefs, save_ops_prefs
+from app.trade_prefs import (
+    clear_trade_token,
+    load_trade_prefs,
+    save_trade_prefs,
+    save_trade_token,
+    trade_prefs_public,
+)
 
 router = APIRouter(prefix="/setup", tags=["setup"])
 
@@ -105,6 +112,78 @@ async def put_ops_prefs(body: OpsPrefsBody) -> dict:
         "env_is_default_only": True,
         "message": "Ops prefs saved. Live worker/backend pick them up on the next check (no recreate needed).",
     }
+
+
+class TradePrefsBody(BaseModel):
+    auto_trade_enabled: bool = False
+    trade_stake: float = Field(1.0, ge=0.35, le=10000.0)
+    force_min_probability: float = Field(0.80, ge=0.50, le=0.99)
+    trade_currency: str = Field("USD", min_length=1, max_length=8)
+
+
+class TradeTokenBody(BaseModel):
+    token: str = Field(..., min_length=8, max_length=256)
+
+
+@router.get("/trade-prefs")
+async def get_trade_prefs() -> dict:
+    """Auto-trade toggles + token status (never returns full token)."""
+    pub = trade_prefs_public()
+    return {
+        **pub,
+        "warning": (
+            "Auto-trade can spend real or demo money on Deriv. "
+            "Enable only with a token that has trade scope. Default is OFF."
+        ),
+        "guide": {
+            "auto_trade_enabled": "When on, Analyze / Force signal may place a buy after a signal is created.",
+            "trade_stake": "Stake amount sent in the proposal/buy (your account currency).",
+            "force_min_probability": "Force (model + candles) mode min calibrated probability (e.g. 0.8 = 80%).",
+            "trade_currency": "Currency for proposal (usually USD).",
+        },
+    }
+
+
+@router.put("/trade-prefs")
+async def put_trade_prefs(body: TradePrefsBody) -> dict:
+    saved = save_trade_prefs(body.model_dump())
+    return {
+        **saved,
+        **trade_prefs_public(),
+        "status": "saved",
+        "message": "Trade prefs saved. Auto-trade stays off unless enabled and a token is set.",
+    }
+
+
+@router.put("/trade-token")
+async def put_trade_token(body: TradeTokenBody) -> dict:
+    try:
+        meta = save_trade_token(body.token)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {
+        **meta,
+        **load_trade_prefs(),
+        "status": "saved",
+        "message": "Token encrypted and stored. Full token is never returned to the UI.",
+    }
+
+
+@router.delete("/trade-token")
+async def delete_trade_token() -> dict:
+    clear_trade_token()
+    # Hard safety: clearing token also disables auto-trade
+    prefs = load_trade_prefs()
+    if prefs.get("auto_trade_enabled"):
+        prefs = save_trade_prefs({**prefs, "auto_trade_enabled": False})
+    return {
+        "token_configured": False,
+        "token_mask": None,
+        **prefs,
+        "status": "cleared",
+        "message": "Trade token removed. Auto-trade disabled.",
+    }
+
 
 # Global Deriv client for API discovery requests
 _deriv_client = DerivWSClient()

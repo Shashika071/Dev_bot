@@ -104,23 +104,26 @@ class SignalGenerator:
         last_tick_age_seconds: Optional[float] = None,
         force_no_edge: bool = False,
         confidence_override: bool = False,
+        force_model_candles: bool = False,
         min_confidence: Optional[float] = None,
         min_margin_over_breakeven: Optional[float] = None,
     ) -> Optional[dict]:
         """
         confidence_override: allow signals without demonstrated edge, but only when
         calibrated probability clears min_confidence and margin over quote breakeven.
+        force_model_candles: model calibrated p + candle confirm only (skip confluence/EV/edge).
         force_no_edge: legacy blind bypass (avoid for UI; tests only).
         """
         # Manual research analysis may run while auto-alerts are paused.
         ok, reason = await self.check_prerequisites(
-            session, ignore_pause=bool(confidence_override or force_no_edge)
+            session,
+            ignore_pause=bool(confidence_override or force_no_edge or force_model_candles),
         )
         if not ok:
             logger.debug("signal_prerequisites_failed", reason=reason)
             return None
 
-        allow_stale = force_no_edge  # confidence path still needs fresh ticks
+        allow_stale = force_no_edge  # confidence / force_model_candles still need fresh ticks
         if last_tick_age_seconds is not None and last_tick_age_seconds > settings.max_tick_age_seconds:
             if not allow_stale:
                 logger.debug("signal_stale_ticks", age=last_tick_age_seconds)
@@ -142,7 +145,11 @@ class SignalGenerator:
         from app.ops_prefs import load_ops_prefs
 
         ops = load_ops_prefs()
-        require_confluence = bool(ops["require_touch_confluence"]) and not force_no_edge
+        require_confluence = (
+            bool(ops["require_touch_confluence"])
+            and not force_no_edge
+            and not force_model_candles
+        )
 
         for direction in dirs:
             feat_df = None
@@ -163,7 +170,11 @@ class SignalGenerator:
 
             # Extra confirmation: 1m/5m candle structure must agree with direction
             candle_result = None
-            require_candle = bool(ops.get("require_candle_confirm", True)) and not force_no_edge
+            candle_blocked = False
+            # Force model+candles always requires candles; standard respects ops toggle
+            require_candle = force_model_candles or (
+                bool(ops.get("require_candle_confirm", True)) and not force_no_edge
+            )
             if require_candle:
                 from app.strategies.candle_confirm import (
                     evaluate_candle_confirm,
@@ -174,6 +185,7 @@ class SignalGenerator:
                 if tick_frame is None or len(tick_frame) < 80:
                     logger.debug("signal_candle_confirm_insufficient_ticks", direction=direction)
                     candidates = []
+                    candle_blocked = True
                 else:
                     candle_result = evaluate_candle_confirm(
                         tick_frame,
@@ -189,20 +201,30 @@ class SignalGenerator:
                             explanation=candle_result.explanation,
                         )
                         candidates = []
+                        candle_blocked = True
 
-            if not candidates and force_no_edge:
+            # Inject model-only candidate when strategy/confluence is empty —
+            # never after a failed candle gate.
+            if not candidates and (force_no_edge or force_model_candles) and not candle_blocked:
                 from app.strategies.base import StrategySignal
 
                 candidates = [
                     StrategySignal(
                         direction=direction,
                         confidence_raw=0.5,
-                        strategy_name="manual_analyze",
+                        strategy_name=(
+                            "force_model_candles" if force_model_candles else "manual_analyze"
+                        ),
                         strategy_params={
                             "force_no_edge": force_no_edge,
+                            "force_model_candles": force_model_candles,
                             "confidence_override": confidence_override,
                         },
-                        explanation="Manual analyze candidate (model confidence gated)",
+                        explanation=(
+                            "Force model+candles candidate"
+                            if force_model_candles
+                            else "Manual analyze candidate (model confidence gated)"
+                        ),
                     )
                 ]
             if not candidates:
@@ -266,7 +288,7 @@ class SignalGenerator:
 
             # Quote freshness (optional quote_epoch)
             quote_epoch = quote.get("quote_epoch")
-            if quote_epoch and not force_no_edge:
+            if quote_epoch and not force_no_edge and not force_model_candles:
                 age = datetime.now(timezone.utc).timestamp() - float(quote_epoch)
                 if age > settings.max_quote_age_seconds:
                     logger.debug("signal_stale_quote", direction=direction, age=age)
@@ -291,7 +313,32 @@ class SignalGenerator:
             for candidate in candidates:
                 from app.signal_engine.ev_filter import EVFilterResult
 
-                if force_no_edge:
+                if force_model_candles:
+                    breakeven = purchase_price / total_payout
+                    conservative = float(cal_prob)
+                    ev_net = conservative * total_payout - purchase_price
+                    margin = conservative - breakeven
+                    passes = float(cal_prob) >= conf_floor
+                    ev_result = EVFilterResult(
+                        passes=passes,
+                        purchase_price=purchase_price,
+                        total_payout=total_payout,
+                        breakeven_probability=breakeven,
+                        calibrated_probability=cal_prob,
+                        conservative_probability=conservative,
+                        ev_net=ev_net,
+                        margin=margin,
+                        min_required_margin=0.0,
+                        reason=(
+                            f"FORCE model+candles: p={cal_prob:.3f} ≥ {conf_floor:.3f}"
+                            if passes
+                            else (
+                                f"FORCE model+candles: calibrated {cal_prob:.3f} "
+                                f"< floor {conf_floor:.3f}"
+                            )
+                        ),
+                    )
+                elif force_no_edge:
                     breakeven = purchase_price / total_payout
                     conservative = float(cal_prob)
                     ev_net = conservative * total_payout - purchase_price
@@ -395,7 +442,7 @@ class SignalGenerator:
             return None
 
         # Confidence/force: highest model probability; normal: best EV
-        if force_no_edge or confidence_override:
+        if force_no_edge or confidence_override or force_model_candles:
             best = max(passing, key=lambda x: x["cal_prob"])
         else:
             best = max(passing, key=lambda x: x["ev_result"].ev_net)
@@ -420,7 +467,13 @@ class SignalGenerator:
             f"{candidate.explanation} | selected={best.get('selected_pipeline')} "
             f"| components: {comp_txt}{candle_bit}"
         )
-        if force_no_edge:
+        if force_model_candles:
+            explanation = (
+                f"FORCE model+candles (p={best['cal_prob']:.3f}) — skips confluence, "
+                f"EV/margin, and demonstrated edge. Research/aggressive only. | "
+                + explanation
+            )
+        elif force_no_edge:
             explanation = (
                 "FORCE OVERRIDE (no demonstrated edge) — research only, not a validated alert. | "
                 + explanation
@@ -438,7 +491,12 @@ class SignalGenerator:
             "Synthetic index behavior may change without notice. "
             "Zero alerts is acceptable when edge is not demonstrated."
         )
-        if force_no_edge:
+        if force_model_candles:
+            limitations = (
+                "FORCE model+candles: confluence, EV margin, and demonstrated-edge gates "
+                "were skipped. NOT a validated alert. " + limitations
+            )
+        elif force_no_edge:
             limitations = (
                 "USER FORCE OVERRIDE: edge and EV evidence gates were bypassed. "
                 "This signal is NOT validated. Treat as research only. " + limitations
@@ -449,7 +507,7 @@ class SignalGenerator:
                 "does not have demonstrated historical edge. Research only. " + limitations
             )
 
-        validated = bool(best["has_edge"]) and not force_no_edge
+        validated = bool(best["has_edge"]) and not force_no_edge and not force_model_candles
         signal = await self.lifecycle.create_signal(
             session,
             symbol=symbol,
@@ -475,6 +533,7 @@ class SignalGenerator:
             strategy_params={
                 **(candidate.strategy_params or {}),
                 "force_no_edge": force_no_edge,
+                "force_model_candles": force_model_candles,
                 "confidence_override": confidence_override,
             },
             explanation=explanation,
@@ -505,5 +564,6 @@ class SignalGenerator:
             "explanation": explanation,
             "is_validated": validated,
             "force_no_edge": force_no_edge,
+            "force_model_candles": force_model_candles,
             "confidence_override": confidence_override,
         }

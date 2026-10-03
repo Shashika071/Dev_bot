@@ -100,13 +100,17 @@ async def generate_manual_signal(
     session: AsyncSession,
     *,
     force_no_edge: bool = False,
+    mode: str = "standard",
+    min_probability: Optional[float] = None,
     client: Optional[DerivWSClient] = None,
 ) -> dict[str, Any]:
     """
     Analyze live market with trained models.
-    Emit a signal only if confidence thresholds pass (default), or force_no_edge=True.
+    mode=standard: confluence + candles + p + margin (Analyze & Signal).
+    mode=force_model_candles: candles + calibrated p only (skip confluence/EV/edge).
     Always returns per-direction analysis for the UI.
     """
+    force_model_candles = str(mode or "standard").strip().lower() == "force_model_candles"
     conf = await get_latest_confirmed_settings(session)
     if not conf:
         return {"ok": False, "reason": "Confirm contract settings in Setup first.", "analysis": []}
@@ -217,10 +221,24 @@ async def generate_manual_signal(
         return {"ok": False, "reason": "Could not fetch live contract quotes from Deriv.", "analysis": []}
 
     from app.ops_prefs import load_ops_prefs
+    from app.trade_prefs import load_trade_prefs
 
     ops = load_ops_prefs()
-    min_conf = float(ops["manual_min_confidence"])
-    min_margin = float(ops["manual_min_margin_over_breakeven"])
+    trade = load_trade_prefs()
+    if force_model_candles:
+        min_conf = (
+            float(min_probability)
+            if min_probability is not None
+            else float(trade.get("force_min_probability", 0.80))
+        )
+        min_margin = 0.0
+    else:
+        min_conf = (
+            float(min_probability)
+            if min_probability is not None
+            else float(ops["manual_min_confidence"])
+        )
+        min_margin = float(ops["manual_min_margin_over_breakeven"])
     analysis: list[dict] = []
 
     for direction in dirs:
@@ -253,11 +271,11 @@ async def generate_manual_signal(
         )
         confluence_met = bool(confluence and confluence.direction == direction)
 
-        from app.ops_prefs import load_ops_prefs
         from app.strategies.candle_confirm import evaluate_candle_confirm
 
-        ops = load_ops_prefs()
-        require_candle = bool(ops.get("require_candle_confirm", True)) and not force_no_edge
+        require_candle = force_model_candles or (
+            bool(ops.get("require_candle_confirm", True)) and not force_no_edge
+        )
         candle = evaluate_candle_confirm(
             df,
             direction,
@@ -266,12 +284,15 @@ async def generate_manual_signal(
         )
         candle_met = bool(candle.confirmed) if require_candle else True
 
-        meets = (
-            cal >= min_conf
-            and margin >= min_margin
-            and (force_no_edge or confluence_met)
-            and candle_met
-        )
+        if force_model_candles:
+            meets = cal >= min_conf and candle_met
+        else:
+            meets = (
+                cal >= min_conf
+                and margin >= min_margin
+                and (force_no_edge or confluence_met)
+                and candle_met
+            )
         analysis.append({
             "direction": direction,
             "ok": True,
@@ -291,11 +312,13 @@ async def generate_manual_signal(
             "candle_confirm_score": candle.score,
             "candle_confirm_explanation": candle.explanation,
             "spot": current_price,
+            "mode": "force_model_candles" if force_model_candles else "standard",
         })
 
     thresholds = {
         "min_confidence": min_conf,
         "min_margin_over_breakeven": min_margin,
+        "mode": "force_model_candles" if force_model_candles else "standard",
     }
 
     can_issue, cap_reason = await DailyCapManager().can_issue_signal(session, conf.symbol)
@@ -308,7 +331,6 @@ async def generate_manual_signal(
             "current_price": current_price,
         }
 
-    # Prefer confidence-gated analyze (not blind force)
     signal_data = await generator.evaluate_and_generate(
         session,
         features_df=features_by_direction[dirs[0]],
@@ -320,8 +342,9 @@ async def generate_manual_signal(
         features_by_direction=features_by_direction,
         sequences_by_direction=sequences_by_direction,
         last_tick_age_seconds=last_tick_age,
-        force_no_edge=force_no_edge,
-        confidence_override=not force_no_edge,
+        force_no_edge=force_no_edge and not force_model_candles,
+        confidence_override=(not force_no_edge and not force_model_candles),
+        force_model_candles=force_model_candles,
         min_confidence=min_conf,
         min_margin_over_breakeven=min_margin,
     )
@@ -339,15 +362,23 @@ async def generate_manual_signal(
                 f"confluence={'yes' if best.get('confluence_met') else 'no'}, "
                 f"candles={'yes' if best.get('candle_confirm_met') else 'no'})."
             )
-        return {
-            "ok": False,
-            "reason": (
+        if force_model_candles:
+            reason = (
+                f"Force analyze — no setup. Need candle confirm and "
+                f"p≥{min_conf*100:.0f}% (skips confluence/EV/edge)."
+                f"{best_line}"
+            )
+        else:
+            reason = (
                 f"Analyzed — no high-confidence setup. "
                 f"Need touch confluence, candle confirm (1m/5m), "
                 f"p≥{min_conf*100:.0f}%, and "
                 f"margin≥{min_margin*100:.0f}% over quote breakeven."
                 f"{best_line} Try again when the model is more confident."
-            ),
+            )
+        return {
+            "ok": False,
+            "reason": reason,
             "analysis": analysis,
             "thresholds": thresholds,
             "current_price": current_price,
@@ -359,6 +390,8 @@ async def generate_manual_signal(
         "analysis": analysis,
         "thresholds": thresholds,
         "current_price": current_price,
-        "force_no_edge": force_no_edge,
-        "confidence_override": not force_no_edge,
+        "force_no_edge": force_no_edge and not force_model_candles,
+        "force_model_candles": force_model_candles,
+        "confidence_override": not force_no_edge and not force_model_candles,
+        "mode": "force_model_candles" if force_model_candles else "standard",
     }
