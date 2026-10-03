@@ -35,24 +35,49 @@ PY
 
 NEW_URL="postgresql+asyncpg://${POSTGRES_USER}:${ENC_PASS}@postgres:5432/${POSTGRES_DB}"
 
-# Rewrite DATABASE_URL line (host MUST be postgres — docker service name)
-if grep -qE '^DATABASE_URL=' .env.prod; then
-  sed -i.bak "s|^DATABASE_URL=.*|DATABASE_URL=${NEW_URL}|" .env.prod
-else
-  echo "DATABASE_URL=${NEW_URL}" >> .env.prod
+# Prefer a simple alphanumeric password to avoid .env / URL parse bugs
+if [[ "${POSTGRES_PASSWORD}" =~ [^A-Za-z0-9_-] ]]; then
+  echo "WARNING: POSTGRES_PASSWORD has special characters."
+  echo "If DB was already initialized with that password, keep it (URL-encoded below)."
+  echo "For a fresh deploy, prefer letters/numbers only, then wipe ./pgdata carefully."
 fi
 
-echo "Updated DATABASE_URL host to: postgres"
-echo "Recreating backend + worker..."
+# Rewrite DATABASE_URL line (host MUST be postgres — docker service name)
+NEW_URL="$NEW_URL" python3 - <<'PY'
+import os
+from pathlib import Path
+path = Path(".env.prod")
+text = path.read_text(encoding="utf-8")
+new_url = os.environ["NEW_URL"]
+lines = []
+found = False
+for line in text.splitlines():
+    if line.startswith("DATABASE_URL="):
+        lines.append(f"DATABASE_URL={new_url}")
+        found = True
+    else:
+        lines.append(line)
+if not found:
+    lines.append(f"DATABASE_URL={new_url}")
+path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+print("DATABASE_URL host set to postgres (password URL-encoded)")
+PY
 
+echo "Recreating backend + worker..."
 docker compose -p deriv -f docker-compose.prod.yml --env-file .env.prod up -d --force-recreate backend worker
 
-sleep 3
+sleep 4
+echo
+echo "=== env check inside backend (password redacted) ==="
+docker exec deriv-backend-1 sh -c 'echo "$DATABASE_URL" | sed -E "s#://([^:]+):([^@]+)@#://\1:***@#"' || true
+echo
+echo "=== DNS check: can backend resolve postgres? ==="
+docker exec deriv-backend-1 getent hosts postgres || docker exec deriv-backend-1 python -c "import socket; print(socket.getaddrinfo('postgres', 5432))" || true
 echo
 echo "=== backend status ==="
 docker ps -a --filter name=deriv-backend-1 --format 'table {{.Names}}\t{{.Status}}'
 echo
 echo "=== backend logs (tail) ==="
-docker logs deriv-backend-1 --tail 30 || true
+docker logs deriv-backend-1 --tail 40 || true
 echo
-echo "If still failing, paste: docker logs deriv-backend-1 --tail 80"
+echo "If still failing, paste the env check + DNS check + logs above."

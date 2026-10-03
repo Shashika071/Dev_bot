@@ -48,9 +48,11 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     restart: unless-stopped
+    # Use DATABASE_URL from .env.prod only (must be URL-encoded).
+    # Do NOT rebuild it here — passwords with @ # : break the host parse.
     env_file: .env.prod
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-deriv}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-deriv_bot}
+      BACKEND_URL: http://backend:8000
     volumes:
       - ./data:/app/data
     depends_on:
@@ -70,7 +72,6 @@ services:
     env_file: .env.prod
     environment:
       BACKEND_URL: http://backend:8000
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-deriv}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-deriv_bot}
     volumes:
       - ./data:/app/data
     depends_on:
