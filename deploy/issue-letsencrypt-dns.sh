@@ -38,6 +38,8 @@ if [[ -z "$EMAIL" ]]; then
 fi
 
 HOOKS="$ROOT/deploy/certbot-hooks"
+# Strip Windows CRLF if present (breaks #!/bin/sh inside Docker)
+sed -i 's/\r$//' "$HOOKS/auth.sh" "$HOOKS/cleanup.sh" 2>/dev/null || true
 chmod +x "$HOOKS/auth.sh" "$HOOKS/cleanup.sh"
 
 cat <<EOF
@@ -57,7 +59,10 @@ sees it (no Enter needed). Keep Spaceship open and:
        Value: (exact string printed)
   2) Leave the terminal alone until it says "DNS OK"
 
-You may get one or two prompts (one per domain).
+If the Value is not visible in this terminal, open a SECOND SSH tab:
+  cat certs/letsencrypt/PENDING_TXT.txt
+
+You may get one or two prompts (one per domain). Do NOT press Ctrl+C.
 ============================================================
 
 EOF
