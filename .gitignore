@@ -1,7 +1,7 @@
 # Secrets & local env
 .env
-.env.prod
 .env.local
+# .env.prod is tracked for this private repo (replace placeholders with real VPS secrets)
 *.pem
 certs/origin.pem
 certs/origin.key
