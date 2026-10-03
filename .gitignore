@@ -1,5 +1,7 @@
 # Secrets & local env
-
+.env
+.env.prod
+.env.local
 *.pem
 
 # Python

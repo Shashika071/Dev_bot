@@ -1,0 +1,106 @@
+# VPS deploy beside Fiyola — does NOT bind host :80 or :443.
+# Existing fiyola-prod-nginx proxies:
+#   https://devbot.crexline.com  -> deriv-frontend:80
+#   https://backdev.crexline.com -> deriv-backend:8000
+#
+# Usage on VPS:
+#   docker compose -p deriv -f docker-compose.prod.yml --env-file .env.prod up -d --build
+#   then attach nginx to this network (see deploy/fiyola-nginx-devbot.conf)
+
+name: deriv
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-deriv_bot}
+      POSTGRES_USER: ${POSTGRES_USER:-deriv}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.prod}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - effective_cache_size=256MB
+      - -c
+      - max_connections=40
+      - -c
+      - wal_buffers=4MB
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+    mem_limit: 768m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-deriv} -d ${POSTGRES_DB:-deriv_bot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - deriv_net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env.prod
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-deriv}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-deriv_bot}
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+    mem_limit: 1536m
+    networks:
+      - deriv_net
+      - edge
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env.prod
+    environment:
+      BACKEND_URL: http://backend:8000
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-deriv}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-deriv_bot}
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    command: python -m app.worker
+    mem_limit: 1536m
+    networks:
+      - deriv_net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+      args:
+        VITE_API_URL: ${VITE_API_URL:-https://backdev.crexline.com}
+        VITE_WS_URL: ${VITE_WS_URL:-wss://backdev.crexline.com}
+    restart: unless-stopped
+    mem_limit: 128m
+    networks:
+      - deriv_net
+      - edge
+
+networks:
+  deriv_net:
+    driver: bridge
+  # Shared with existing Fiyola nginx so it can proxy by container name.
+  # Create once if missing: docker network create edge
+  edge:
+    external: true
+    name: ${EDGE_NETWORK:-edge}
