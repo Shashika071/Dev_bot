@@ -126,7 +126,6 @@ interface TrainResult {
 }
 interface DataInfo { has_data: boolean; total_ticks?: number; ready?: boolean; message?: string; symbols?: Array<{symbol:string; tick_count:number; oldest?:string; newest?:string; ready_to_train:boolean}>; }
 interface DailyStatus { signals_today: number; max_signals: number; cooldown_active: boolean; timezone: string; }
-interface DownloadStatus { status: 'idle'|'running'|'done'|'error'; progress: string; ticks_downloaded: number; error?: string|null; }
 type Tab = 'dashboard' | 'train' | 'setup';
 
 async function api<T>(path: string, opts?: RequestInit): Promise<T> {
@@ -689,64 +688,26 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
 function TrainView() {
   const [info, setInfo]           = useState<DataInfo|null>(null);
   const [ts, setTs]               = useState<TrainStatus>({ status:'idle', progress:'' });
-  const [dl, setDl]               = useState<DownloadStatus>({ status:'idle', progress:'', ticks_downloaded:0 });
-  const [targetTicks, setTargetTicks] = useState('20000');
-  const [ticksPerDay, setTicksPerDay] = useState(43000);
-  const [tickPresets, setTickPresets] = useState<Array<{value:string; label:string}>>([
-    { value: '5000',  label: '5,000 ticks — minimum to start training' },
-    { value: '10000', label: '10,000 ticks — light' },
-    { value: '20000', label: '20,000 ticks — medium' },
-    { value: '30000', label: '30,000 ticks — solid' },
-    { value: '45000', label: '45,000 ticks — about 1 full day' },
-    { value: '60000', label: '60,000 ticks — more than 1 day (API may stop ~24h)' },
-    { value: '90000', label: '90,000 ticks — about 2 days (API may stop ~24h)' },
-    { value: '0',     label: 'ALL available from API (everything public history still has)' },
-  ]);
   const [loadingInfo, setLI]      = useState(true);
   const [symbol, setSymbol]       = useState('R_100');
   const [barrier, setBarrier]     = useState('0.09');
   const [dir, setDir]             = useState('both');
   const [dur, setDur]             = useState('540');
   const pollRef = useRef<ReturnType<typeof setInterval>|null>(null);
-  const dlPollRef = useRef<ReturnType<typeof setInterval>|null>(null);
 
-  const isAllTicks = targetTicks === '0';
-  const estDays = isAllTicks ? 1 : Math.max(0.1, Number(targetTicks) / Math.max(ticksPerDay, 1));
-  const estLabel = isAllTicks
-    ? `ALL ≈ up to ~${ticksPerDay.toLocaleString()} ticks (~24h public limit)`
-    : estDays < 1
-      ? `≈ ${(estDays * 24).toFixed(1)} hours at ~${ticksPerDay.toLocaleString()} ticks/day`
-      : `≈ ${estDays.toFixed(1)} days at ~${ticksPerDay.toLocaleString()} ticks/day`;
-  const pickHint =
-    Number(targetTicks) > 0 && Number(targetTicks) < 5000
-      ? 'Below minimum — pick at least 5,000 to train.'
-      : Number(targetTicks) >= 5000 && Number(targetTicks) < 20000
-        ? 'OK to train, but more ticks usually give a more stable model.'
-        : isAllTicks || Number(targetTicks) >= 45000
-          ? 'Best for training size — public API may still stop near 1 day.'
-          : 'Good middle size for a first serious train.';
-
-  const loadInfo = useCallback(async () => {
-    setLI(true);
+  const loadInfo = useCallback(async (silent = false) => {
+    if (!silent) setLI(true);
     try { setInfo(await api<DataInfo>('/train/data-info')); } catch {}
-    setLI(false);
+    if (!silent) setLI(false);
   }, []);
 
   useEffect(() => { loadInfo(); }, [loadInfo]);
 
+  // Live DB tick counts grow while the worker collects — refresh quietly
   useEffect(() => {
-    (async () => {
-      try {
-        const o = await api<{ ticks_per_day: number; presets?: Array<{ticks:number; label:string}> }>(
-          `/train/download-options?symbol=${symbol}`
-        );
-        if (o.ticks_per_day) setTicksPerDay(o.ticks_per_day);
-        if (o.presets?.length) {
-          setTickPresets(o.presets.map(p => ({ value: String(p.ticks), label: p.label })));
-        }
-      } catch {}
-    })();
-  }, [symbol]);
+    const t = setInterval(() => { loadInfo(true); }, 10000);
+    return () => clearInterval(t);
+  }, [loadInfo]);
 
   useEffect(() => {
     const poll = async () => {
@@ -760,44 +721,6 @@ function TrainView() {
     return () => { if (pollRef.current && ts.status !== 'running') { clearInterval(pollRef.current); pollRef.current=null; } };
   }, [ts.status, loadInfo]);
 
-  useEffect(() => {
-    const poll = async () => {
-      try {
-        const s = await api<DownloadStatus>('/train/download-status');
-        setDl(s);
-        if (s.status !== 'running') {
-          clearInterval(dlPollRef.current!);
-          dlPollRef.current = null;
-          if (s.status === 'done') loadInfo();
-        }
-      } catch {}
-    };
-    if (dl.status === 'running' && !dlPollRef.current) {
-      dlPollRef.current = setInterval(poll, 1500);
-      // Refresh DB tick count while download runs so "Training Data" updates live
-      const infoTimer = setInterval(() => { loadInfo(); }, 5000);
-      return () => {
-        clearInterval(infoTimer);
-        if (dlPollRef.current) { clearInterval(dlPollRef.current); dlPollRef.current = null; }
-      };
-    }
-    return () => { if (dlPollRef.current && dl.status !== 'running') { clearInterval(dlPollRef.current); dlPollRef.current=null; } };
-  }, [dl.status, loadInfo]);
-
-  const startDownload = async () => {
-    try {
-      await api(`/train/download?${new URLSearchParams({
-        symbol,
-        target_ticks: targetTicks,
-        days_back: '7',
-      })}`, {method:'POST'});
-      const goal = isAllTicks ? 'ALL available ticks' : `${Number(targetTicks).toLocaleString()} ticks`;
-      setDl({ status:'running', progress:`Starting download of ${goal}…`, ticks_downloaded:0 });
-    } catch (e:any) {
-      setDl({ status:'error', progress:'', ticks_downloaded:0, error: e.message });
-    }
-  };
-
   const start = async () => {
     try {
       await api(`/train/start?${new URLSearchParams({symbol,barrier_distance:barrier,barrier_direction:dir,duration_seconds:dur})}`, {method:'POST'});
@@ -806,23 +729,23 @@ function TrainView() {
   };
 
   const symInfo  = info?.symbols?.find(s => s.symbol === symbol);
-  const canTrain = (symInfo?.tick_count ?? 0) >= 1000 && ts.status !== 'running' && dl.status !== 'running';
-  const canDownload = dl.status !== 'running' && ts.status !== 'running';
+  const tickCount = symInfo?.tick_count ?? 0;
+  const canTrain = tickCount >= 1000 && ts.status !== 'running';
 
   return (
     <>
       <div className="glass page-header">
         <div>
           <h1 className="page-title">Train ML Model</h1>
-          <p className="page-subtitle">Fit the CatBoost classifier on collected tick data to unlock live signal generation.</p>
+          <p className="page-subtitle">Train on ticks already saved by the live worker — no separate download needed.</p>
         </div>
       </div>
 
       {/* Data availability */}
       <div className="glass">
         <div className="section-header">
-          <h3 className="section-title"><Database size={16}/>Training Data</h3>
-          <button id="btn-refresh-data" className="btn btn-ghost" onClick={loadInfo}>
+          <h3 className="section-title"><Database size={16}/>Training Data (from live DB)</h3>
+          <button id="btn-refresh-data" className="btn btn-ghost" onClick={() => loadInfo()}>
             {loadingInfo ? <Loader2 size={13} className="spin"/> : <RefreshCw size={13}/>} Refresh
           </button>
         </div>
@@ -839,80 +762,24 @@ function TrainView() {
               <div className="flex items-center gap-3">
                 <span className="font-mono font-semibold text-sm">{sym.tick_count.toLocaleString()}</span>
                 <span className={`badge ${sym.ready_to_train ? 'badge-green' : 'badge-amber'}`}>
-                  {sym.ready_to_train ? '✓ Ready' : `Need ${(5000-sym.tick_count).toLocaleString()} more`}
+                  {sym.ready_to_train ? '✓ Ready' : `Need ${Math.max(0, 5000-sym.tick_count).toLocaleString()} more`}
                 </span>
               </div>
             </div>
           ))
         ) : (
-          <div className="alert alert-warning"><AlertTriangle size={14}/>{info.message ?? 'No tick data yet — download history or wait for the live worker.'}</div>
+          <div className="alert alert-warning">
+            <AlertTriangle size={14}/>
+            {info.message ?? 'No tick data yet. Confirm Setup settings so the worker starts collecting, then wait for ticks to save.'}
+          </div>
         ))}
-        {!loadingInfo && info && !info.ready && info.has_data && (
-          <div className="alert alert-info mt-2"><Info size={14}/>Best results with 5,000+ ticks (≈1.5 hrs live). Or download history below in minutes.</div>
-        )}
-
-        <div className="divider"/>
-        <div className="section-header mb-3">
-          <h3 className="section-title"><TrendingUp size={16}/>Fast History Download</h3>
-        </div>
-        <div className="grid-2">
-          <div className="form-group">
-            <label className="form-label">Symbol</label>
-            <select id="download-symbol" className="form-select" value={symbol} onChange={e=>setSymbol(e.target.value)} disabled={!canDownload}>
-              <option value="R_100">Volatility 100 Index (R_100)</option>
-              <option value="1HZ100V">Volatility 100 (1s) Index (1HZ100V)</option>
-            </select>
-          </div>
-          <div className="form-group">
-            <label className="form-label">Pick tick size (what you need)</label>
-            <select
-              id="download-ticks"
-              className="form-select"
-              value={targetTicks}
-              onChange={e=>setTargetTicks(e.target.value)}
-              disabled={!canDownload}
-            >
-              <option value="" disabled>Select how many ticks you need…</option>
-              {tickPresets.map(p => (
-                <option key={p.value} value={p.value}>{p.label}</option>
-              ))}
-            </select>
-            <div className="form-hint">
-              <strong>What you picked:</strong>{' '}
-              {isAllTicks ? 'ALL available' : `${Number(targetTicks).toLocaleString()} ticks`}
-              {' '}· {estLabel}
-              <br/>
-              <strong>Need:</strong> {pickHint}
-              <br/>
-              {symbol} typical rate: <span className="font-mono">{ticksPerDay.toLocaleString()}</span> ticks/day.
-              Public API ≈ last 24h only.
-            </div>
-          </div>
-        </div>
-        {dl.status === 'running' && <div className="train-progress"><Loader2 size={16} className="spin"/>{dl.progress || 'Downloading…'}</div>}
-        {dl.status === 'error' && <div className="alert alert-error"><XCircle size={14}/>{dl.error}</div>}
-        {dl.status === 'done' && (
-          <div className="alert alert-success">
-            <CheckCircle size={14}/>
-            Saved {dl.ticks_downloaded.toLocaleString()} new ticks to the database
-            {symInfo ? ` · ${symbol} now has ${symInfo.tick_count.toLocaleString()} total` : ''}.
-            If progress stopped near 1 day, that is Deriv’s public history limit — not a save failure.
+        {!loadingInfo && info && info.has_data && (
+          <div className="alert alert-info mt-2">
+            <Info size={14}/>
+            Training uses all ticks currently in the database for the selected symbol.
+            Best results with 5,000+ ticks (≈1.5 hrs live at ~43k/day). Minimum to start: 1,000.
           </div>
         )}
-        <button
-          id="btn-download-history"
-          className="btn btn-ghost w-full"
-          style={{marginTop:'0.25rem', justifyContent:'center', padding:'0.75rem'}}
-          onClick={startDownload}
-          disabled={!canDownload}
-        >
-          {dl.status==='running'
-            ? <><Loader2 size={16} className="spin"/>Downloading {isAllTicks ? 'ALL available' : Number(targetTicks).toLocaleString()} ticks…</>
-            : <><Database size={16}/>Download {isAllTicks ? 'ALL available ticks' : `${Number(targetTicks).toLocaleString()} ticks`}</>}
-        </button>
-        <p className="text-xs text-dim mt-2" style={{textAlign:'center'}}>
-          Pulls ticks via Deriv public API in 5,000-tick chunks — much faster than waiting on the live stream.
-        </p>
       </div>
 
       {/* Config + start */}
@@ -958,11 +825,14 @@ function TrainView() {
           onClick={start}
           disabled={!canTrain}
         >
-          {ts.status==='running' ? <><Loader2 size={16} className="spin"/>Training in progress…</> : <><Brain size={16}/>Start Training</>}
+          {ts.status==='running'
+            ? <><Loader2 size={16} className="spin"/>Training in progress…</>
+            : <><Brain size={16}/>Train on {tickCount.toLocaleString()} DB ticks</>}
         </button>
         {!canTrain && ts.status !== 'running' && (
           <p className="text-xs text-dim mt-2" style={{textAlign:'center'}}>
-            Need ≥ 1,000 ticks for "{symbol}" · currently {(symInfo?.tick_count??0).toLocaleString()}
+            Need ≥ 1,000 ticks for "{symbol}" · currently {tickCount.toLocaleString()}.
+            Confirm Setup and let the live worker collect more.
           </p>
         )}
       </div>
