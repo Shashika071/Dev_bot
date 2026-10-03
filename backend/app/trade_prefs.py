@@ -40,6 +40,8 @@ def _defaults() -> dict[str, Any]:
         "trade_stake": 1.0,
         "force_min_probability": 0.80,
         "trade_currency": "USD",
+        # PAT apps use alphanumeric App ID from developers.deriv.com
+        "deriv_app_id": str(settings.deriv_app_id or ""),
     }
 
 
@@ -54,7 +56,15 @@ def _clamp(prefs: dict[str, Any]) -> dict[str, Any]:
     out["force_min_probability"] = max(0.50, min(0.99, float(out["force_min_probability"])))
     cur = str(out.get("trade_currency") or "USD").strip().upper() or "USD"
     out["trade_currency"] = cur[:8]
+    aid = str(out.get("deriv_app_id") or settings.deriv_app_id or "").strip()
+    out["deriv_app_id"] = aid[:64]
     return out
+
+
+def resolve_deriv_app_id() -> str:
+    """UI trade prefs first, then .env DERIV_APP_ID."""
+    prefs = load_trade_prefs()
+    return str(prefs.get("deriv_app_id") or settings.deriv_app_id or "").strip()
 
 
 def load_trade_prefs() -> dict[str, Any]:

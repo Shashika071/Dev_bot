@@ -1906,6 +1906,7 @@ type TradePrefs = {
   trade_stake: number;
   force_min_probability: number;
   trade_currency: string;
+  deriv_app_id: string;
   token_configured?: boolean;
   token_mask?: string | null;
 };
@@ -1933,6 +1934,7 @@ const DEFAULT_TRADE: TradePrefs = {
   trade_stake: 1,
   force_min_probability: 0.8,
   trade_currency: 'USD',
+  deriv_app_id: '',
   token_configured: false,
   token_mask: null,
 };
@@ -2005,6 +2007,7 @@ function SetupView({ online }: { online: boolean }) {
           trade_stake: Number(r.trade_stake ?? 1),
           force_min_probability: Number(r.force_min_probability ?? 0.8),
           trade_currency: r.trade_currency || 'USD',
+          deriv_app_id: r.deriv_app_id || '',
           token_configured: !!r.token_configured,
           token_mask: r.token_mask ?? null,
         });
@@ -2040,6 +2043,7 @@ function SetupView({ online }: { online: boolean }) {
           trade_stake: trade.trade_stake,
           force_min_probability: trade.force_min_probability,
           trade_currency: trade.trade_currency,
+          deriv_app_id: trade.deriv_app_id,
         }),
       });
       setTrade(prev => ({
@@ -2048,6 +2052,7 @@ function SetupView({ online }: { online: boolean }) {
         trade_stake: Number(r.trade_stake ?? prev.trade_stake),
         force_min_probability: Number(r.force_min_probability ?? prev.force_min_probability),
         trade_currency: r.trade_currency || prev.trade_currency,
+        deriv_app_id: r.deriv_app_id || prev.deriv_app_id,
         token_configured: r.token_configured ?? prev.token_configured,
         token_mask: r.token_mask ?? prev.token_mask,
       }));
@@ -2464,11 +2469,24 @@ function SetupView({ online }: { online: boolean }) {
         </div>
 
         <div className="form-group">
-          <label className="form-label">Deriv API token (trade scope)</label>
+          <label className="form-label">Deriv App ID (from Apps dashboard)</label>
+          <input
+            type="text"
+            className="form-input"
+            placeholder="e.g. 34zF9oNWha3e4D1ZD2k9w"
+            value={trade.deriv_app_id}
+            onChange={e => setTrade(prev => ({ ...prev, deriv_app_id: e.target.value.trim() }))}
+            autoComplete="off"
+          />
+          <div className="form-hint">Must match the PAT app. Save trade prefs after changing.</div>
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">Deriv API token (PAT — trade scope)</label>
           <input
             type="password"
             className="form-input"
-            placeholder={trade.token_configured ? `Configured ${trade.token_mask || ''}` : 'Paste token — never shown again'}
+            placeholder={trade.token_configured ? `Configured ${trade.token_mask || ''}` : 'Paste pat_… token — never shown again'}
             value={tradeToken}
             onChange={e => setTradeToken(e.target.value)}
             autoComplete="off"

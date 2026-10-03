@@ -51,7 +51,15 @@ class DerivTradeClient:
 
     def __init__(self, token: str, app_id: str | int | None = None):
         self.token = str(token).strip()
-        self.app_id = str(app_id or settings.deriv_app_id or "1089").strip()
+        # PAT apps: use App ID from Setup / .env — never fall back to legacy 1089
+        if app_id is None or str(app_id).strip() == "":
+            try:
+                from app.trade_prefs import resolve_deriv_app_id
+
+                app_id = resolve_deriv_app_id()
+            except Exception:
+                app_id = settings.deriv_app_id
+        self.app_id = str(app_id or "").strip()
         self.ws: Optional[Any] = None
         self._connected_url: Optional[str] = None
         self._req_id = 0
@@ -60,6 +68,11 @@ class DerivTradeClient:
         self._authorized_loginid: Optional[str] = None
         self._account_id: Optional[str] = None
         self._use_pat = _is_pat(self.token)
+        if self._use_pat and not self.app_id:
+            raise RuntimeError(
+                "PAT token requires App ID. Set Setup → Deriv App ID "
+                "or DERIV_APP_ID in .env.prod (from developers.deriv.com → Apps)."
+            )
 
     def _rest_headers(self) -> dict[str, str]:
         return {
@@ -75,14 +88,24 @@ class DerivTradeClient:
 
     async def list_accounts(self) -> list[dict]:
         """GET options accounts (PAT / new API)."""
+        if not self.app_id:
+            raise RuntimeError("Missing Deriv App ID for PAT request")
         async with httpx.AsyncClient(timeout=20.0) as http:
             r = await http.get(
                 f"{API_BASE}/trading/v1/options/accounts",
                 headers=self._rest_headers(),
             )
             if r.status_code >= 400:
+                detail = r.text[:300]
+                if r.status_code == 401 and "application" in detail.lower():
+                    raise RuntimeError(
+                        f"Invalid application (App ID mismatch). "
+                        f"Using App ID={self.app_id!r}. "
+                        f"Copy exact App ID from developers.deriv.com → Apps "
+                        f"and save it in Setup or DERIV_APP_ID. Raw: {detail}"
+                    )
                 raise RuntimeError(
-                    f"Accounts API HTTP {r.status_code}: {r.text[:300]}"
+                    f"Accounts API HTTP {r.status_code}: {detail}"
                 )
             body = r.json()
         data = body.get("data") if isinstance(body, dict) else body

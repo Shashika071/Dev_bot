@@ -119,6 +119,7 @@ class TradePrefsBody(BaseModel):
     trade_stake: float = Field(1.0, ge=0.35, le=10000.0)
     force_min_probability: float = Field(0.80, ge=0.50, le=0.99)
     trade_currency: str = Field("USD", min_length=1, max_length=8)
+    deriv_app_id: str = Field("", max_length=64)
 
 
 class TradeTokenBody(BaseModel):
@@ -140,6 +141,7 @@ async def get_trade_prefs() -> dict:
             "trade_stake": "Stake amount sent in the proposal/buy (your account currency).",
             "force_min_probability": "Force (model + candles) mode min calibrated probability (e.g. 0.8 = 80%).",
             "trade_currency": "Currency for proposal (usually USD).",
+            "deriv_app_id": "App ID from developers.deriv.com → Apps (must match your PAT app).",
         },
     }
 
@@ -156,19 +158,21 @@ async def put_trade_prefs(body: TradePrefsBody) -> dict:
 
 
 async def _fetch_trade_account() -> dict:
-    """Authorize with stored token and return balance / profit summary."""
+    """Authorize with stored token and return balance / profit summary (hard timeout)."""
     from app.deriv.trade_client import DerivTradeClient
-    from app.trade_prefs import get_trade_token
+    from app.trade_prefs import get_trade_token, resolve_deriv_app_id
 
     token = get_trade_token()
     if not token:
         return {"ok": False, "error": "No trade token configured", "token_configured": False}
 
-    client = DerivTradeClient(token)
-    try:
+    app_id = resolve_deriv_app_id()
+    client = DerivTradeClient(token, app_id=app_id or None)
+
+    async def _run() -> dict:
         summary = await client.fetch_account_summary()
         summary["token_configured"] = True
-        # Persist last snapshot for UI (no secrets)
+        summary["app_id_used"] = app_id
         try:
             import json
             import os
@@ -181,8 +185,23 @@ async def _fetch_trade_account() -> dict:
         except Exception:
             pass
         return summary
+
+    try:
+        return await asyncio.wait_for(_run(), timeout=22.0)
+    except asyncio.TimeoutError:
+        return {
+            "ok": False,
+            "error": "Account lookup timed out (22s).",
+            "token_configured": True,
+            "app_id_used": app_id,
+        }
     except Exception as e:
-        return {"ok": False, "error": str(e), "token_configured": True}
+        return {
+            "ok": False,
+            "error": str(e),
+            "token_configured": True,
+            "app_id_used": app_id,
+        }
     finally:
         try:
             await client.close()
