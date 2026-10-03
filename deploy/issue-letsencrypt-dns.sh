@@ -37,6 +37,9 @@ if [[ -z "$EMAIL" ]]; then
   exit 1
 fi
 
+HOOKS="$ROOT/deploy/certbot-hooks"
+chmod +x "$HOOKS/auth.sh" "$HOOKS/cleanup.sh"
+
 cat <<EOF
 
 ============================================================
@@ -46,37 +49,32 @@ Domains:
   - ${DOMAIN_UI}
   - ${DOMAIN_API}
 
-When Certbot prints a TXT record like:
-  _acme-challenge.devbot
-  value: xxxxxxxxx
+Script will PRINT the TXT host + value, then WAIT until Google DNS
+sees it (no Enter needed). Keep Spaceship open and:
 
-Do this in Spaceship:
-  1) Domains → crexline.com → DNS
-  2) Add record:
-       Type: TXT
-       Name/Host: _acme-challenge.devbot
-         (or _acme-challenge.backdev — use exactly what Certbot shows)
-       Value: (paste Certbot value)
-       TTL: Auto / 5 min
-  3) Wait 1–2 minutes
-  4) Press Enter in this terminal so Certbot can continue
+  1) Add/update TXT
+       Host:  _acme-challenge.devbot   or   _acme-challenge.backdev
+       Value: (exact string printed)
+  2) Leave the terminal alone until it says "DNS OK"
 
-Tip: keep Spaceship DNS tab open. You may need TWO TXT records
-(one per domain) before pressing Enter the second time.
+You may get one or two prompts (one per domain).
 ============================================================
 
 EOF
 
 read -r -p "Press Enter to start Certbot..." _
 
-# Interactive DNS manual mode
+# Manual DNS with auth-hook that polls Google DNS before continuing
 docker run --rm -it \
   -v "$LE_DIR:/etc/letsencrypt" \
   -v "$WORK_DIR:/var/lib/letsencrypt" \
   -v "$LOGS_DIR:/var/log/letsencrypt" \
+  -v "$HOOKS:/hooks:ro" \
   certbot/certbot certonly \
   --manual \
   --preferred-challenges dns \
+  --manual-auth-hook /hooks/auth.sh \
+  --manual-cleanup-hook /hooks/cleanup.sh \
   --agree-tos \
   --no-eff-email \
   --email "$EMAIL" \
