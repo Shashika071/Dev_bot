@@ -82,8 +82,7 @@ docker run --rm -it \
   --email "$EMAIL" \
   -d "$DOMAIN_UI" \
   -d "$DOMAIN_API" \
-  --cert-name crexline-devbot \
-  --manual-public-ip-logging-ok
+  --cert-name crexline-devbot
 
 LIVE="$LE_DIR/live/crexline-devbot"
 if [[ ! -f "$LIVE/fullchain.pem" || ! -f "$LIVE/privkey.pem" ]]; then
