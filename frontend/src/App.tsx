@@ -535,6 +535,8 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
   const [loading, setLoad]  = useState(true);
   const [err, setErr]       = useState('');
   const [analyzeBusy, setAnalyzeBusy] = useState(false);
+  const [analyzeWatching, setAnalyzeWatching] = useState(false);
+  const [watchMode, setWatchMode] = useState<'standard' | 'force_model_candles' | null>(null);
   const [analyzeMsg, setAnalyzeMsg] = useState('');
   const [analyzeOk, setAnalyzeOk] = useState(false);
   const [forceMinP, setForceMinP] = useState(0.80);
@@ -550,6 +552,9 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
     alerts_paused?: boolean; pause_reason?: string|null;
     performance?: { resolved?: number; win_rate?: number|null; ci_lower?: number|null; mean_breakeven?: number|null };
   }|null>(null);
+  const watchStopRef = useRef(false);
+  // Near-continuous: small gap only so Deriv quote/analyze isn't stampeded
+  const WATCH_POLL_MS = 1000;
 
   const load = useCallback(async () => {
     setLoad(true); setErr('');
@@ -595,45 +600,105 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
     return () => clearInterval(id);
   }, [loadChart, tf]);
 
-  const analyzeGenerate = async (mode: 'standard' | 'force_model_candles' = 'standard') => {
-    setAnalyzeBusy(true); setAnalyzeMsg(''); setAnalyzeOk(false); setAnalysisRows([]); setTradeResultMsg('');
-    try {
-      const body =
-        mode === 'force_model_candles'
-          ? { mode: 'force_model_candles', min_probability: forceMinP }
-          : { mode: 'standard' };
-      const res = await api<{
-        ok: boolean;
-        reason?: string;
-        signal?: SigData & { calibrated_probability?: number; direction?: string; signal_id?: string };
-        analysis?: typeof analysisRows;
-        thresholds?: { min_confidence: number; min_margin_over_breakeven: number };
-        trade?: { ok?: boolean; skipped?: boolean; contract_id?: number|string; error?: string; stake?: number; reason?: string };
-      }>('/signals/analyze-generate', { method: 'POST', body: JSON.stringify(body) });
+  const stopAnalyzeWatch = () => {
+    watchStopRef.current = true;
+    setAnalyzeWatching(false);
+    setWatchMode(null);
+    setAnalyzeBusy(false);
+    setAnalyzeMsg(prev => prev.startsWith('Watching') ? 'Watching stopped.' : prev);
+  };
 
-      setAnalysisRows(res.analysis || []);
-      if (res.ok && res.signal) {
-        const s = res.signal;
-        const p = ((s.calibrated_probability ?? s.probability ?? 0) * 100).toFixed(1);
-        const label = mode === 'force_model_candles' ? 'Force signal' : 'Signal';
-        setAnalyzeOk(true);
-        setAnalyzeMsg(`${label}: ${s.direction?.toUpperCase()} · ${p}% confidence · ${s.signal_id}`);
-        if (res.trade && !res.trade.skipped) {
-          if (res.trade.ok) {
-            setTradeResultMsg(`Auto-trade OK · contract ${res.trade.contract_id} · stake ${res.trade.stake}`);
-          } else {
-            setTradeResultMsg(`Auto-trade failed: ${res.trade.error || 'unknown'}`);
+  const isFatalAnalyzeReason = (reason: string) => {
+    const r = (reason || '').toLowerCase();
+    if (!r) return false;
+    if (r.includes('cooldown')) return false; // keep waiting
+    if (r.includes('train first') || r.includes('no compatible trained')) return true;
+    if (r.includes('confirm contract settings')) return true;
+    if (r.includes('max signals') || r.includes('daily cap') || r.includes('per day')) return true;
+    if (r.includes('need more ticks')) return true;
+    return false;
+  };
+
+  const analyzeGenerate = async (mode: 'standard' | 'force_model_candles' = 'standard') => {
+    // One click → keep checking until signal, fatal stop, or user Stop
+    watchStopRef.current = false;
+    setAnalyzeBusy(true);
+    setAnalyzeWatching(true);
+    setWatchMode(mode);
+    setAnalyzeMsg('');
+    setAnalyzeOk(false);
+    setAnalysisRows([]);
+    setTradeResultMsg('');
+
+    const label = mode === 'force_model_candles' ? 'Force' : 'Analyze';
+    const body =
+      mode === 'force_model_candles'
+        ? { mode: 'force_model_candles', min_probability: forceMinP }
+        : { mode: 'standard' };
+
+    let attempt = 0;
+    try {
+      while (!watchStopRef.current) {
+        attempt += 1;
+        setAnalyzeMsg(`Watching (${label})… check #${attempt} — waiting for setup, then signal` +
+          (mode === 'force_model_candles' ? ' / trade.' : '.'));
+
+        try {
+          const res = await api<{
+            ok: boolean;
+            reason?: string;
+            signal?: SigData & { calibrated_probability?: number; direction?: string; signal_id?: string };
+            analysis?: typeof analysisRows;
+            trade?: { ok?: boolean; skipped?: boolean; contract_id?: number|string; error?: string; stake?: number; reason?: string };
+          }>('/signals/analyze-generate', { method: 'POST', body: JSON.stringify(body) });
+
+          if (watchStopRef.current) break;
+          setAnalysisRows(res.analysis || []);
+
+          if (res.ok && res.signal) {
+            const s = res.signal;
+            const p = ((s.calibrated_probability ?? s.probability ?? 0) * 100).toFixed(1);
+            setAnalyzeOk(true);
+            setAnalyzeMsg(
+              `${label} signal: ${s.direction?.toUpperCase()} · ${p}% · ${s.signal_id} (after ${attempt} check${attempt > 1 ? 's' : ''})`
+            );
+            if (res.trade && !res.trade.skipped) {
+              if (res.trade.ok) {
+                setTradeResultMsg(`Auto-trade OK · contract ${res.trade.contract_id} · stake ${res.trade.stake}`);
+              } else {
+                setTradeResultMsg(`Auto-trade failed: ${res.trade.error || 'unknown'}`);
+              }
+            }
+            await load();
+            break;
           }
+
+          const reason = res.reason || 'No setup yet.';
+          setAnalyzeOk(false);
+          setAnalyzeMsg(`Watching (${label})… #${attempt}: ${reason}`);
+          if (isFatalAnalyzeReason(reason)) break;
+        } catch (e: any) {
+          if (watchStopRef.current) break;
+          setAnalyzeOk(false);
+          setAnalyzeMsg(`Watching (${label})… #${attempt} error: ${e.message || 'failed'} — retrying…`);
         }
-        await load();
-      } else {
-        setAnalyzeOk(false);
-        setAnalyzeMsg(res.reason || 'No high-confidence setup right now.');
+
+        // Wait before next check (abortable)
+        await new Promise<void>(resolve => {
+          const t = setTimeout(resolve, WATCH_POLL_MS);
+          const iv = setInterval(() => {
+            if (watchStopRef.current) {
+              clearTimeout(t);
+              clearInterval(iv);
+              resolve();
+            }
+          }, 200);
+          setTimeout(() => clearInterval(iv), WATCH_POLL_MS + 50);
+        });
       }
-    } catch (e: any) {
-      setAnalyzeOk(false);
-      setAnalyzeMsg(e.message || 'Analyze failed');
     } finally {
+      setAnalyzeWatching(false);
+      setWatchMode(null);
       setAnalyzeBusy(false);
     }
   };
@@ -673,22 +738,29 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
             className="btn btn-primary"
             onClick={() => analyzeGenerate('standard')}
             disabled={analyzeBusy || !models?.trained}
-            title="Require touch confluence plus high model confidence before creating a signal"
+            title="Keeps checking until full gates pass, then creates signal (and auto-trade if enabled)"
           >
-            {analyzeBusy ? <Loader2 size={14} className="spin"/> : <Zap size={14}/>}
-            Analyze & Signal
+            {watchMode === 'standard' ? <Loader2 size={14} className="spin"/> : <Zap size={14}/>}
+            {watchMode === 'standard' ? 'Watching Analyze…' : 'Analyze & Signal'}
           </button>
           <button
             id="btn-force-signal"
             className="btn btn-ghost"
             onClick={() => analyzeGenerate('force_model_candles')}
             disabled={analyzeBusy || !models?.trained}
-            title={`Model + candles only; min p=${(forceMinP * 100).toFixed(0)}%. Skips confluence/EV/edge.`}
+            title={`Keeps checking until candle confirm + p≥${(forceMinP * 100).toFixed(0)}%, then signal/trade`}
           >
-            {analyzeBusy ? <Loader2 size={14} className="spin"/> : <Zap size={14}/>}
-            Force ({(forceMinP * 100).toFixed(0)}% + candles)
+            {watchMode === 'force_model_candles' ? <Loader2 size={14} className="spin"/> : <Zap size={14}/>}
+            {watchMode === 'force_model_candles'
+              ? 'Watching Force…'
+              : `Force (${(forceMinP * 100).toFixed(0)}% + candles)`}
           </button>
-          <button id="btn-refresh-signals" className="btn btn-ghost" onClick={load}>
+          {analyzeWatching && (
+            <button id="btn-stop-analyze-watch" className="btn btn-ghost" onClick={stopAnalyzeWatch}>
+              <XCircle size={14}/> Stop
+            </button>
+          )}
+          <button id="btn-refresh-signals" className="btn btn-ghost" onClick={load} disabled={analyzeWatching}>
             {loading ? <Loader2 size={14} className="spin"/> : <RefreshCw size={14}/>} Refresh
           </button>
         </div>
@@ -871,8 +943,8 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
             <p className="text-xs text-dim mt-3">
               Auto alerts need <span className="text-cyan">Edge OK</span> + tick confluence + candle confirm (1m/5m) + EV gates.
               <span className="text-amber"> Analyze & Signal</span> uses the same gates with a confidence floor (default ≥95%).
-              <span className="text-amber"> Force</span> uses model probability + candles only (min from Setup).
-              Signal-only by default; auto-trade only when enabled in Setup. Max 3/day Asia/Colombo.
+              <span className="text-amber"> Analyze / Force</span> keep watching (~1s) until gates pass, then signal
+              (and auto-trade if enabled). Use Stop to cancel. Max 3/day Asia/Colombo.
             </p>
           )}
         </div>
@@ -2292,7 +2364,7 @@ function SetupView({ online }: { online: boolean }) {
               <option value="0.9">90%</option>
               <option value="0.95">95%</option>
             </select>
-            <div className="form-hint">Dashboard Force button uses this floor (candles still required).</div>
+            <div className="form-hint">Force watch: that direction needs candle confirm + this min p.</div>
           </div>
           <div className="form-group">
             <label className="form-label">Currency</label>
