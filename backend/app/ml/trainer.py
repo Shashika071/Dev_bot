@@ -260,6 +260,8 @@ class TrainingOrchestrator:
         )
 
         gap_seconds = int(settings.train_gap_seconds)
+        min_cal = int(settings.train_min_calibration_samples)
+        min_test = int(settings.train_edge_min_selected)
         try:
             split = chronological_split(
                 features_df=features_matrix,
@@ -268,6 +270,8 @@ class TrainingOrchestrator:
                 outcome_window_seconds=self.duration_seconds,
                 gap_seconds=gap_seconds,
                 feature_columns=feature_cols,
+                min_cal_samples=min_cal,
+                min_test_samples=min_test,
             )
         except ValueError as e:
             return {"error": f"Dataset split failed: {e}"}
@@ -283,12 +287,16 @@ class TrainingOrchestrator:
             feature_columns=feature_cols,
         )
 
-        min_cal = int(settings.train_min_calibration_samples)
         if len(split.X_cal) < min_cal:
+            # Rough days needed at current non-overlapping spacing
+            need_n = max(effective_n + 1, int(min_cal / 0.15) + 40)
+            need_h = (need_n * max(self.duration_seconds, 1)) / 3600.0
             return {
                 "error": (
                     f"Insufficient calibration samples after purging: {len(split.X_cal)} "
-                    f"< {min_cal}. Collect more live ticks, then retrain."
+                    f"< {min_cal} (total usable samples={effective_n}). "
+                    f"Need roughly ~{need_h:.0f}h more continuous coverage, or lower "
+                    f"TRAIN_MIN_CALIBRATION_SAMPLES in .env.prod and recreate backend."
                 )
             }
 

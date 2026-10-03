@@ -75,16 +75,22 @@ def chronological_split(
     features_df: pd.DataFrame,
     labels: pd.Series,
     times: pd.Series,
-    train_frac: float = 0.60,
+    train_frac: float = 0.55,
     val_frac: float = 0.15,
-    cal_frac: float = 0.10,
+    cal_frac: float = 0.15,
     test_frac: float = 0.15,
     outcome_window_seconds: int = 540,
     gap_seconds: int = 600,
     feature_columns: list[str] = None,
+    min_cal_samples: int = 0,
+    min_test_samples: int = 0,
 ) -> DatasetSplit:
     """
     Split data chronologically with purging and gap enforcement at every boundary.
+
+    When min_cal_samples / min_test_samples are set, slice sizes are grown
+    (from the end) so short ~1-day datasets still leave usable cal/test blocks
+    after boundary purging.
     """
     assert abs(train_frac + val_frac + cal_frac + test_frac - 1.0) < 0.01
 
@@ -97,12 +103,29 @@ def chronological_split(
     labels_sorted = labels.iloc[sort_idx].reset_index(drop=True)
     times_sorted = times.iloc[sort_idx].reset_index(drop=True)
 
-    train_end = int(n * train_frac)
-    val_end = int(n * (train_frac + val_frac))
-    cal_end = int(n * (train_frac + val_frac + cal_frac))
+    # Purge typically drops ~2 samples at each boundary for 540s contracts + 600s gap
+    purge_buffer = max(
+        2, int(np.ceil((outcome_window_seconds + gap_seconds) / max(outcome_window_seconds, 1)))
+    )
+    test_n = max(int(n * test_frac), int(min_test_samples or 0))
+    cal_n = max(
+        int(n * cal_frac),
+        int(min_cal_samples + purge_buffer) if min_cal_samples else 0,
+    )
+    val_n = max(int(n * val_frac), 10)
+    train_n = n - test_n - cal_n - val_n
+    if train_n < max(40, int(n * 0.35)):
+        # Not enough room — fall back to pure fractions
+        train_end = int(n * train_frac)
+        val_end = int(n * (train_frac + val_frac))
+        cal_end = int(n * (train_frac + val_frac + cal_frac))
+    else:
+        train_end = train_n
+        val_end = train_n + val_n
+        cal_end = train_n + val_n + cal_n
 
     # Ensure each segment has a next-boundary timestamp
-    if train_end >= n or val_end >= n or cal_end > n:
+    if train_end >= n or val_end >= n or cal_end > n or train_end < 1:
         raise ValueError("Dataset too small for requested split fractions")
 
     X_all = features_sorted[feature_columns] if feature_columns else features_sorted

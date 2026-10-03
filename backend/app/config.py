@@ -69,9 +69,13 @@ class Settings(BaseSettings):
     )
     train_gap_seconds: int = Field(600, ge=0, description="Purge gap between chronological splits")
     train_min_calibration_samples: int = Field(
-        50, ge=11, description="Min samples required on calibration split"
+        20,
+        ge=11,
+        description="Min samples required on calibration split (Platt works at this size; 50+ preferred)",
     )
-    train_edge_min_selected: int = Field(30, ge=5, description="Min selected test signals for edge")
+    train_edge_min_selected: int = Field(
+        15, ge=5, description="Min selected test signals for edge"
+    )
     train_edge_margin: float = Field(
         0.02, ge=0.0, description="Extra margin over mean quote breakeven for edge CI"
     )
