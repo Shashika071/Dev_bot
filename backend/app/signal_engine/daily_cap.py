@@ -33,8 +33,17 @@ class DailyCapManager:
         cooldown_seconds: int = None,
         timezone_name: str = None,
     ):
-        self.max_per_day = max_per_day or settings.max_signals_per_day
-        self.cooldown_seconds = cooldown_seconds or settings.signal_cooldown_seconds
+        from app.ops_prefs import load_ops_prefs
+
+        prefs = load_ops_prefs()
+        self.max_per_day = (
+            int(prefs["max_signals_per_day"]) if max_per_day is None else int(max_per_day)
+        )
+        self.cooldown_seconds = (
+            int(prefs["signal_cooldown_seconds"])
+            if cooldown_seconds is None
+            else int(cooldown_seconds)
+        )
         self.tz = pytz.timezone(timezone_name or settings.app_timezone)
 
     def get_today_date(self) -> str:

@@ -56,11 +56,19 @@ class StrategyRegistry:
         current_price: float,
         barrier_distance: float,
     ) -> list[StrategySignal]:
-        """
-        Run all strategies and collect candidate signals.
-        Returns list of signals from strategies that triggered.
-        """
+        """Run all strategies; refresh confluence thresholds from UI ops prefs."""
         import structlog
+
+        try:
+            from app.ops_prefs import load_ops_prefs
+
+            prefs = load_ops_prefs()
+            conf = self._strategies.get("touch_confluence")
+            if conf is not None and hasattr(conf, "params"):
+                conf.params["min_score"] = float(prefs["confluence_min_score"])
+                conf.params["min_direction_gap"] = float(prefs["confluence_min_gap"])
+        except Exception:
+            pass
 
         log = structlog.get_logger(__name__)
         candidates = []

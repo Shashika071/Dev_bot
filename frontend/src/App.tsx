@@ -1580,6 +1580,37 @@ function TrainView() {
 }
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
+type OpsPrefs = {
+  max_signals_per_day: number;
+  signal_cooldown_seconds: number;
+  manual_min_confidence: number;
+  manual_min_margin_over_breakeven: number;
+  min_ev_margin: number;
+  min_calibration_samples: number;
+  require_touch_confluence: boolean;
+  confluence_min_score: number;
+  confluence_min_gap: number;
+  auto_pause_enabled: boolean;
+  auto_pause_min_resolved: number;
+  auto_pause_ci_margin: number;
+  guide?: Record<string, string>;
+};
+
+const DEFAULT_OPS: OpsPrefs = {
+  max_signals_per_day: 3,
+  signal_cooldown_seconds: 540,
+  manual_min_confidence: 0.95,
+  manual_min_margin_over_breakeven: 0.03,
+  min_ev_margin: 0.02,
+  min_calibration_samples: 50,
+  require_touch_confluence: true,
+  confluence_min_score: 5,
+  confluence_min_gap: 1.5,
+  auto_pause_enabled: true,
+  auto_pause_min_resolved: 20,
+  auto_pause_ci_margin: 0,
+};
+
 function SetupView({ online }: { online: boolean }) {
   const [sym, setSym]       = useState('R_100');
   const [dur, setDur]       = useState('9');
@@ -1591,6 +1622,50 @@ function SetupView({ online }: { online: boolean }) {
   const [saveMsg, setSM]    = useState('');
   const [saveOk, setSok]    = useState(false);
   const [chkMsg, setCM]     = useState('');
+  const [ops, setOps]       = useState<OpsPrefs>(DEFAULT_OPS);
+  const [opsGuide, setOpsGuide] = useState<Record<string, string>>({});
+  const [opsSaving, setOpsSaving] = useState(false);
+  const [opsMsg, setOpsMsg] = useState('');
+  const [opsOk, setOpsOk]   = useState(false);
+
+  useEffect(() => {
+    api<OpsPrefs & { guide?: Record<string, string> }>('/setup/ops-prefs')
+      .then(r => {
+        setOps({
+          max_signals_per_day: r.max_signals_per_day,
+          signal_cooldown_seconds: r.signal_cooldown_seconds,
+          manual_min_confidence: r.manual_min_confidence,
+          manual_min_margin_over_breakeven: r.manual_min_margin_over_breakeven,
+          min_ev_margin: r.min_ev_margin,
+          min_calibration_samples: r.min_calibration_samples,
+          require_touch_confluence: r.require_touch_confluence,
+          confluence_min_score: r.confluence_min_score,
+          confluence_min_gap: r.confluence_min_gap,
+          auto_pause_enabled: r.auto_pause_enabled,
+          auto_pause_min_resolved: r.auto_pause_min_resolved,
+          auto_pause_ci_margin: r.auto_pause_ci_margin,
+        });
+        if (r.guide) setOpsGuide(r.guide);
+      })
+      .catch(() => {});
+  }, []);
+
+  const setOpsField = <K extends keyof OpsPrefs>(key: K, value: OpsPrefs[K]) => {
+    setOps(prev => ({ ...prev, [key]: value }));
+  };
+
+  const saveOps = async () => {
+    setOpsSaving(true); setOpsMsg('');
+    try {
+      await api('/setup/ops-prefs', { method: 'PUT', body: JSON.stringify(ops) });
+      setOpsOk(true);
+      setOpsMsg('✓ Bot gates saved. No .env / VPS edit needed — takes effect on the next signal check.');
+    } catch (e: any) {
+      setOpsOk(false);
+      setOpsMsg(`✗ ${e.message}`);
+    }
+    setOpsSaving(false);
+  };
 
   const checkApi = async () => {
     setChk(true); setCM('');
@@ -1626,11 +1701,23 @@ function SetupView({ online }: { online: boolean }) {
   };
 
   return (
-    <div style={{maxWidth: 680}}>
+    <div style={{maxWidth: 760}}>
       <div className="glass page-header" style={{marginBottom:'1.5rem'}}>
         <div>
           <h1 className="page-title">Configuration</h1>
-          <p className="page-subtitle">Set the trading instrument and contract parameters for the signal engine.</p>
+          <p className="page-subtitle">
+            Contract setup + day-to-day bot gates. After deploy, change gates here — not in .env.prod.
+          </p>
+        </div>
+      </div>
+
+      <div className="alert alert-info" style={{ marginBottom: '1.25rem' }}>
+        <Info size={14}/>
+        <div>
+          <strong>What stays in .env (deploy only):</strong> DB password, SECRET_KEY, URLs, HTTPS port, CORS.
+          <br/>
+          <strong>What you change in UI:</strong> signals/day, cooldown, Analyze 95% gate, EV, confluence, auto-pause,
+          and Train strictness (on Train tab).
         </div>
       </div>
 
@@ -1733,6 +1820,110 @@ function SetupView({ online }: { online: boolean }) {
             Start Docker containers first — backend is offline.
           </p>
         )}
+      </div>
+
+      <div className="glass" style={{ marginTop: '1.25rem' }}>
+        <div className="section-header">
+          <h3 className="section-title"><ShieldCheck size={16}/>Bot gates (replaces .env day-to-day knobs)</h3>
+        </div>
+        <p className="text-xs text-dim mb-3">
+          These used to live only in <span className="font-mono">.env.prod</span>. Now the UI owns them after deploy.
+          Lower confidence / EV / confluence = more signals (looser). Higher = stricter / fewer signals.
+        </p>
+
+        <div className="grid-2">
+          <div className="form-group">
+            <label className="form-label">Max signals / day</label>
+            <input type="number" className="form-input" min={0} max={10} value={ops.max_signals_per_day}
+              onChange={e => setOpsField('max_signals_per_day', Number(e.target.value))}/>
+            <div className="form-hint">{opsGuide.max_signals_per_day || 'Default 3 (Asia/Colombo day).'}</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Cooldown cooldown (seconds)</label>
+            <input type="number" className="form-input" min={0} max={7200} value={ops.signal_cooldown_seconds}
+              onChange={e => setOpsField('signal_cooldown_seconds', Number(e.target.value))}/>
+            <div className="form-hint">{opsGuide.signal_cooldown_seconds || 'Default 540 = 9 minutes.'}</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Analyze min confidence</label>
+            <input type="number" step="0.01" min={0.5} max={0.99} className="form-input" value={ops.manual_min_confidence}
+              onChange={e => setOpsField('manual_min_confidence', Number(e.target.value))}/>
+            <div className="form-hint">{opsGuide.manual_min_confidence || '0.95 = need 95% calibrated probability.'}</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Analyze margin over breakeven</label>
+            <input type="number" step="0.01" min={0} max={0.5} className="form-input" value={ops.manual_min_margin_over_breakeven}
+              onChange={e => setOpsField('manual_min_margin_over_breakeven', Number(e.target.value))}/>
+            <div className="form-hint">{opsGuide.manual_min_margin_over_breakeven || 'Extra edge vs quote breakeven for Analyze.'}</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Live EV margin</label>
+            <input type="number" step="0.01" min={0} max={0.5} className="form-input" value={ops.min_ev_margin}
+              onChange={e => setOpsField('min_ev_margin', Number(e.target.value))}/>
+            <div className="form-hint">{opsGuide.min_ev_margin || 'Auto-alert EV gate.'}</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Live calibration samples</label>
+            <input type="number" min={5} max={200} className="form-input" value={ops.min_calibration_samples}
+              onChange={e => setOpsField('min_calibration_samples', Number(e.target.value))}/>
+            <div className="form-hint">{opsGuide.min_calibration_samples || 'Nearby cal samples needed for live EV.'}</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Confluence min score</label>
+            <input type="number" step="0.1" min={0} max={50} className="form-input" value={ops.confluence_min_score}
+              onChange={e => setOpsField('confluence_min_score', Number(e.target.value))}/>
+            <div className="form-hint">{opsGuide.confluence_min_score || 'Higher = harder for confluence to fire.'}</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Confluence min gap</label>
+            <input type="number" step="0.1" min={0} max={20} className="form-input" value={ops.confluence_min_gap}
+              onChange={e => setOpsField('confluence_min_gap', Number(e.target.value))}/>
+            <div className="form-hint">{opsGuide.confluence_min_gap || 'Gap between upper vs lower scores.'}</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Auto-pause min resolved</label>
+            <input type="number" min={5} max={200} className="form-input" value={ops.auto_pause_min_resolved}
+              onChange={e => setOpsField('auto_pause_min_resolved', Number(e.target.value))}/>
+            <div className="form-hint">{opsGuide.auto_pause_min_resolved || 'Resolved live signals before pause can fire.'}</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Auto-pause CI margin</label>
+            <input type="number" step="0.01" min={-0.1} max={0.1} className="form-input" value={ops.auto_pause_ci_margin}
+              onChange={e => setOpsField('auto_pause_ci_margin', Number(e.target.value))}/>
+            <div className="form-hint">{opsGuide.auto_pause_ci_margin || 'Usually 0.0.'}</div>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-4 mb-3" style={{ flexWrap: 'wrap' }}>
+          <label className="text-sm flex items-center gap-2" style={{ cursor: 'pointer' }}>
+            <input type="checkbox" checked={ops.require_touch_confluence}
+              onChange={e => setOpsField('require_touch_confluence', e.target.checked)}/>
+            Require touch confluence
+          </label>
+          <label className="text-sm flex items-center gap-2" style={{ cursor: 'pointer' }}>
+            <input type="checkbox" checked={ops.auto_pause_enabled}
+              onChange={e => setOpsField('auto_pause_enabled', e.target.checked)}/>
+            Auto-pause on live underperformance
+          </label>
+        </div>
+
+        {opsMsg && (
+          <div className={`alert ${opsOk ? 'alert-success' : 'alert-error'}`}>
+            {opsOk ? <CheckCircle size={14}/> : <XCircle size={14}/>}
+            {opsMsg}
+          </div>
+        )}
+
+        <button
+          id="btn-save-ops"
+          className="btn btn-primary w-full"
+          style={{ justifyContent: 'center' }}
+          onClick={saveOps}
+          disabled={opsSaving || !online}
+        >
+          {opsSaving ? <Loader2 size={14} className="spin"/> : <ShieldCheck size={14}/>}
+          {opsSaving ? 'Saving gates…' : 'Save bot gates'}
+        </button>
       </div>
     </div>
   );

@@ -81,7 +81,10 @@ async def maybe_auto_pause_alerts(session: AsyncSession) -> Optional[dict]:
     If enough resolved validated signals exist and Wilson CI lower falls below
     mean quote breakeven (+ margin), pause alerts on confirmed settings.
     """
-    if not settings.auto_pause_enabled:
+    from app.ops_prefs import load_ops_prefs
+
+    prefs = load_ops_prefs()
+    if not prefs["auto_pause_enabled"]:
         return None
 
     conf = await get_latest_confirmed_settings(session)
@@ -92,7 +95,7 @@ async def maybe_auto_pause_alerts(session: AsyncSession) -> Optional[dict]:
         session, days=7, symbol=conf.symbol, validated_only=True
     )
     n = int(perf.get("resolved") or 0)
-    if n < settings.auto_pause_min_resolved:
+    if n < int(prefs["auto_pause_min_resolved"]):
         return {"action": "none", "reason": "insufficient_resolved", "performance": perf}
 
     mean_be = perf.get("mean_breakeven")
@@ -100,7 +103,7 @@ async def maybe_auto_pause_alerts(session: AsyncSession) -> Optional[dict]:
     if mean_be is None or ci_lo is None:
         return {"action": "none", "reason": "missing_metrics", "performance": perf}
 
-    threshold = float(mean_be) + float(settings.auto_pause_ci_margin)
+    threshold = float(mean_be) + float(prefs["auto_pause_ci_margin"])
     if float(ci_lo) >= threshold:
         # Recover from pause if previously paused for drift
         if getattr(conf, "alerts_paused", False) and (

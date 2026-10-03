@@ -5,6 +5,7 @@ Provides contract discovery and requires explicit confirmation before alerts act
 
 import asyncio
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import Any
@@ -13,8 +14,85 @@ from app.database import get_db
 from app.models.settings import ContractSettings
 from app.deriv.client import DerivWSClient
 from app.collector.discovery import ContractDiscovery
+from app.ops_prefs import load_ops_prefs, save_ops_prefs
 
 router = APIRouter(prefix="/setup", tags=["setup"])
+
+
+class OpsPrefsBody(BaseModel):
+    max_signals_per_day: int = Field(3, ge=0, le=10)
+    signal_cooldown_seconds: int = Field(540, ge=0, le=7200)
+    manual_min_confidence: float = Field(0.95, ge=0.5, le=0.99)
+    manual_min_margin_over_breakeven: float = Field(0.03, ge=0.0, le=0.5)
+    min_ev_margin: float = Field(0.02, ge=0.0, le=0.5)
+    min_calibration_samples: int = Field(50, ge=5, le=200)
+    require_touch_confluence: bool = True
+    confluence_min_score: float = Field(5.0, ge=0.0, le=50.0)
+    confluence_min_gap: float = Field(1.5, ge=0.0, le=20.0)
+    auto_pause_enabled: bool = True
+    auto_pause_min_resolved: int = Field(20, ge=5, le=200)
+    auto_pause_ci_margin: float = Field(0.0, ge=-0.1, le=0.1)
+
+
+@router.get("/ops-prefs")
+async def get_ops_prefs() -> dict:
+    """Day-to-day bot gates owned by the UI (.env is default only)."""
+    prefs = load_ops_prefs()
+    return {
+        **prefs,
+        "env_is_default_only": True,
+        "ui_owned": True,
+        "never_edit_in_env": [
+            "max_signals_per_day",
+            "signal_cooldown_seconds",
+            "manual_min_confidence",
+            "manual_min_margin_over_breakeven",
+            "min_ev_margin",
+            "min_calibration_samples",
+            "require_touch_confluence",
+            "confluence_min_score",
+            "confluence_min_gap",
+            "auto_pause_enabled",
+            "auto_pause_min_resolved",
+            "auto_pause_ci_margin",
+        ],
+        "stay_in_env": [
+            "POSTGRES_*",
+            "DATABASE_URL",
+            "SECRET_KEY",
+            "INTERNAL_API_SECRET",
+            "VITE_*",
+            "CORS_ORIGINS",
+            "DERIV_HTTPS_PORT",
+            "CERTBOT_EMAIL",
+        ],
+        "guide": {
+            "max_signals_per_day": "Max validated signals per Asia/Colombo day (3 = default).",
+            "signal_cooldown_seconds": "Min seconds between signals (540 = 9 minutes).",
+            "manual_min_confidence": "Analyze & Signal needs this calibrated touch probability (0.95 = 95%).",
+            "manual_min_margin_over_breakeven": "Analyze also needs this much above quote breakeven.",
+            "min_ev_margin": "Live EV gate margin over breakeven for auto alerts.",
+            "min_calibration_samples": "Live EV needs this many nearby calibration samples.",
+            "require_touch_confluence": "If on, only touch_confluence strategy can alert.",
+            "confluence_min_score": "Minimum confluence score to fire.",
+            "confluence_min_gap": "Min score gap between upper vs lower confluence.",
+            "auto_pause_enabled": "Pause alerts if live results look worse than breakeven.",
+            "auto_pause_min_resolved": "How many resolved live signals before auto-pause can fire.",
+            "auto_pause_ci_margin": "Extra margin vs mean breakeven for the pause rule.",
+        },
+    }
+
+
+@router.put("/ops-prefs")
+async def put_ops_prefs(body: OpsPrefsBody) -> dict:
+    """Save bot gates from UI — no VPS/.env edit needed after deploy."""
+    saved = save_ops_prefs(body.model_dump())
+    return {
+        **saved,
+        "status": "saved",
+        "env_is_default_only": True,
+        "message": "Ops prefs saved. Live worker/backend pick them up on the next check (no recreate needed).",
+    }
 
 # Global Deriv client for API discovery requests
 _deriv_client = DerivWSClient()

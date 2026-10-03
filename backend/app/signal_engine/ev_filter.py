@@ -43,11 +43,14 @@ class EVFilter:
         min_samples_in_range: int | None = None,
         require_demonstrated_edge: bool = True,
     ):
+        from app.ops_prefs import load_ops_prefs
+
+        prefs = load_ops_prefs()
         self.min_ev_margin = (
-            float(settings.min_ev_margin) if min_ev_margin is None else float(min_ev_margin)
+            float(prefs["min_ev_margin"]) if min_ev_margin is None else float(min_ev_margin)
         )
         self.min_samples_in_range = (
-            int(settings.min_calibration_samples)
+            int(prefs["min_calibration_samples"])
             if min_samples_in_range is None
             else int(min_samples_in_range)
         )

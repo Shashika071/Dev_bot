@@ -139,7 +139,10 @@ class SignalGenerator:
 
         # Collect passing candidates, then pick best EV
         passing: list[dict] = []
-        require_confluence = bool(settings.require_touch_confluence) and not force_no_edge
+        from app.ops_prefs import load_ops_prefs
+
+        ops = load_ops_prefs()
+        require_confluence = bool(ops["require_touch_confluence"]) and not force_no_edge
 
         for direction in dirs:
             feat_df = None
@@ -247,12 +250,12 @@ class SignalGenerator:
             conf_floor = (
                 float(min_confidence)
                 if min_confidence is not None
-                else float(settings.manual_min_confidence)
+                else float(ops["manual_min_confidence"])
             )
             margin_floor = (
                 float(min_margin_over_breakeven)
                 if min_margin_over_breakeven is not None
-                else float(settings.manual_min_margin_over_breakeven)
+                else float(ops["manual_min_margin_over_breakeven"])
             )
 
             for candidate in candidates:
@@ -280,7 +283,7 @@ class SignalGenerator:
                     # without requiring demonstrated edge (research Analyze).
                     research_filter = EVFilter(
                         min_ev_margin=margin_floor,
-                        min_samples_in_range=settings.min_calibration_samples,
+                        min_samples_in_range=int(ops["min_calibration_samples"]),
                         require_demonstrated_edge=False,
                     )
                     ev_result = research_filter.evaluate(

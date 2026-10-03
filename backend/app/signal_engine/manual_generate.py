@@ -216,8 +216,11 @@ async def generate_manual_signal(
     if not quotes_by_direction:
         return {"ok": False, "reason": "Could not fetch live contract quotes from Deriv.", "analysis": []}
 
-    min_conf = float(settings.manual_min_confidence)
-    min_margin = float(settings.manual_min_margin_over_breakeven)
+    from app.ops_prefs import load_ops_prefs
+
+    ops = load_ops_prefs()
+    min_conf = float(ops["manual_min_confidence"])
+    min_margin = float(ops["manual_min_margin_over_breakeven"])
     analysis: list[dict] = []
 
     for direction in dirs:
