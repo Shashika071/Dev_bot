@@ -412,7 +412,8 @@ class DerivTradeClient:
         currency: str = "USD",
         basis: str = "stake",
     ) -> dict:
-        # New options WS often wants underlying_symbol; keep symbol for legacy
+        # New PAT options WS: underlying_symbol only (symbol is rejected).
+        # Legacy v3 authorize WS: symbol only.
         msg: dict[str, Any] = {
             "proposal": 1,
             "amount": float(amount),
@@ -425,7 +426,6 @@ class DerivTradeClient:
         }
         if self._use_pat:
             msg["underlying_symbol"] = symbol
-            msg["symbol"] = symbol
         else:
             msg["symbol"] = symbol
         data = await self.send(msg)
