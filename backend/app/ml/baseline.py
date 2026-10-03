@@ -97,7 +97,9 @@ class LogisticRegressionBaseline:
         """Predict touch probability."""
         if not self._is_fitted:
             raise RuntimeError("Model not fitted")
-        X_clean = X.replace([np.inf, -np.inf], np.nan).fillna(0)
+        from app.features.pipeline import align_features_to_model
+
+        X_clean = align_features_to_model(X, self._feature_names)
         return self.pipeline.predict_proba(X_clean)[:, 1]
 
     def save(self, path: str):

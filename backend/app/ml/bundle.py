@@ -107,11 +107,19 @@ class ModelPipelineBundle:
         features: pd.DataFrame,
         sequences: Optional[np.ndarray] = None,
     ) -> dict[str, float]:
+        from app.features.pipeline import align_features_to_model
+
+        # Prefer per-model feature lists; fall back to training metadata columns.
+        meta_cols = list(self.metadata.get("feature_columns") or [])
+        aligned = align_features_to_model(features, meta_cols) if meta_cols else features
+
         out: dict[str, float] = {"baseline": self.baseline_rate}
         if self.xgboost is not None:
-            out["xgboost"] = float(self.xgboost.predict_proba(features)[0])
+            out["xgboost"] = float(self.xgboost.predict_proba(aligned)[0])
         if self.catboost is not None:
-            out["catboost"] = float(self.catboost.predict_proba(features)[0])
+            if not self.catboost._feature_names and meta_cols:
+                self.catboost._feature_names = list(meta_cols)
+            out["catboost"] = float(self.catboost.predict_proba(aligned)[0])
         if self.lstm is not None and sequences is not None and len(sequences):
             out["lstm"] = float(self.lstm.predict_proba(sequences)[0])
         return out

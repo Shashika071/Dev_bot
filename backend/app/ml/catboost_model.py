@@ -98,7 +98,9 @@ class CatBoostTouchModel:
         """Predict touch probability (uncalibrated)."""
         if not self._is_fitted:
             raise RuntimeError("Model not fitted")
-        X_clean = X.replace([np.inf, -np.inf], np.nan)
+        from app.features.pipeline import align_features_to_model
+
+        X_clean = align_features_to_model(X, self._feature_names or None)
         return self.model.predict_proba(X_clean)[:, 1]
 
     def feature_importance(self) -> pd.DataFrame:

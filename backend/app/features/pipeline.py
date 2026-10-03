@@ -229,6 +229,28 @@ def select_feature_matrix(features_df: pd.DataFrame) -> pd.DataFrame:
     return out[cols]
 
 
+def align_features_to_model(
+    X: pd.DataFrame,
+    feature_names: list[str] | None,
+) -> pd.DataFrame:
+    """
+    Align a live feature frame to the exact columns a model was fit on.
+
+    Training may drop zero-variance columns; live `select_feature_matrix` returns
+    the full set. Extra columns trigger sklearn "unseen at fit time" errors.
+    """
+    if X is None or X.empty:
+        return X
+    clean = X.replace([np.inf, -np.inf], np.nan)
+    if not feature_names:
+        return clean.fillna(0)
+    out = clean.copy()
+    for c in feature_names:
+        if c not in out.columns:
+            out[c] = 0.0
+    return out.loc[:, list(feature_names)].fillna(0)
+
+
 def validate_no_future_leakage(
     feature_epochs: list[int],
     entry_epochs: list[int],

@@ -96,7 +96,9 @@ class XGBoostTouchModel:
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         if not self._is_fitted:
             raise RuntimeError("Model not fitted")
-        X_clean = X.replace([np.inf, -np.inf], np.nan).fillna(0)
+        from app.features.pipeline import align_features_to_model
+
+        X_clean = align_features_to_model(X, self._feature_names)
         X_scaled = self.scaler.transform(X_clean)
         return self.model.predict_proba(X_scaled)[:, 1]
 
