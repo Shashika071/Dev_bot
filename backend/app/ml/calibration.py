@@ -152,11 +152,13 @@ class ProbabilityCalibrator:
         }
 
     def save(self, path: str):
-        if not self._is_fitted or self._calibrator is None:
+        if not self._is_fitted:
             raise RuntimeError("Refusing to save unfitted calibrator")
+        # Identity (single-class cal split) keeps _calibrator=None — still savable.
         payload = {
-            "method": self.method,
-            "calibrator": self._calibrator,
+            "method": self.method or self._chosen_method or "identity",
+            "chosen_method": getattr(self, "_chosen_method", self.method),
+            "calibrator": self._calibrator,  # may be None for identity
             "raw_probs": self._raw_probs,
             "true_labels": self._true_labels,
             "calibrated_probs": self._calibrated_probs,
@@ -164,6 +166,7 @@ class ProbabilityCalibrator:
         }
         with open(path, "wb") as f:
             pickle.dump(payload, f)
+        logger.info("calibrator_saved", path=path, method=payload["method"])
 
     def load(self, path: str):
         with open(path, "rb") as f:
@@ -183,7 +186,8 @@ class ProbabilityCalibrator:
             raise RuntimeError(f"Calibrator file is not fitted: {path}")
 
         self.method = payload.get("method", "isotonic")
-        self._calibrator = payload["calibrator"]
+        self._chosen_method = payload.get("chosen_method") or self.method
+        self._calibrator = payload.get("calibrator")  # None OK for identity
         self._raw_probs = payload.get("raw_probs")
         self._true_labels = payload.get("true_labels")
         self._calibrated_probs = payload.get("calibrated_probs")
