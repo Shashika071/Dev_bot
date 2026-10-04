@@ -540,7 +540,6 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
   const [analyzeMsg, setAnalyzeMsg] = useState('');
   const [analyzeOk, setAnalyzeOk] = useState(false);
   const [forceMinP, setForceMinP] = useState(0.80);
-  const [crossEnabled, setCrossEnabled] = useState(false);
   const [crossMinP, setCrossMinP] = useState(0.80);
   const [modelBarrier, setModelBarrier] = useState(0.9);
   const [tradeResultMsg, setTradeResultMsg] = useState('');
@@ -591,13 +590,11 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
   useEffect(() => {
     api<{
       force_min_probability?: number;
-      cross_barrier_enabled?: boolean;
       cross_barrier_min_probability?: number;
       model_barrier_distance?: number;
     }>('/setup/trade-prefs')
       .then(r => {
         if (r.force_min_probability != null) setForceMinP(Number(r.force_min_probability));
-        setCrossEnabled(!!r.cross_barrier_enabled);
         if (r.cross_barrier_min_probability != null) {
           setCrossMinP(Number(r.cross_barrier_min_probability));
         }
@@ -607,6 +604,13 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
       })
       .catch(() => {});
   }, []);
+  useEffect(() => {
+    // Prefer trained model barrier for Cross button label when it differs from Setup
+    const b = (models?.models || [])
+      .map(m => Number(m.barrier_distance))
+      .find(v => Number.isFinite(v) && v > 0);
+    if (b != null) setModelBarrier(b);
+  }, [models]);
   useEffect(() => {
     loadChart();
     const id = setInterval(loadChart, tf === 'tick' ? 2500 : 5000);
@@ -797,20 +801,18 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
               ? 'Watching Force…'
               : `Force (${(forceMinP * 100).toFixed(0)}% + candles)`}
           </button>
-          {crossEnabled && (
-            <button
-              id="btn-cross-barrier-signal"
-              className="btn btn-ghost"
-              onClick={() => analyzeGenerate('cross_barrier')}
-              disabled={analyzeBusy || !models?.trained}
-              title={`Score model barrier ${modelBarrier} at p≥${(crossMinP * 100).toFixed(0)}%, then trade Setup barrier`}
-            >
-              {watchMode === 'cross_barrier' ? <Loader2 size={14} className="spin"/> : <Zap size={14}/>}
-              {watchMode === 'cross_barrier'
-                ? 'Watching Cross…'
-                : `Cross ${modelBarrier}→Setup (${(crossMinP * 100).toFixed(0)}%)`}
-            </button>
-          )}
+          <button
+            id="btn-cross-barrier-signal"
+            className="btn btn-ghost"
+            onClick={() => analyzeGenerate('cross_barrier')}
+            disabled={analyzeBusy || !models?.trained}
+            title={`Train/score barrier ${modelBarrier} at p≥${(crossMinP * 100).toFixed(0)}%, then trade Setup barrier (different margin)`}
+          >
+            {watchMode === 'cross_barrier' ? <Loader2 size={14} className="spin"/> : <Zap size={14}/>}
+            {watchMode === 'cross_barrier'
+              ? 'Watching Cross…'
+              : `Cross ${modelBarrier}→Setup (${(crossMinP * 100).toFixed(0)}%)`}
+          </button>
           {analyzeWatching && (
             <button id="btn-stop-analyze-watch" className="btn btn-ghost" onClick={stopAnalyzeWatch}>
               <XCircle size={14}/> Stop
@@ -2535,15 +2537,6 @@ function SetupView({ online }: { online: boolean }) {
             model hits step confidence, buy the Setup barrier (e.g. 0.09). Not the same as Edge.
           </div>
         </div>
-
-        <label className="text-sm flex items-center gap-2 mb-3" style={{ cursor: 'pointer' }}>
-          <input
-            type="checkbox"
-            checked={trade.cross_barrier_enabled}
-            onChange={e => setTrade(prev => ({ ...prev, cross_barrier_enabled: e.target.checked }))}
-          />
-          Show Cross-barrier button on Dashboard
-        </label>
 
         <div className="grid-2">
           <div className="form-group">

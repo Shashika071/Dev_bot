@@ -93,7 +93,9 @@ class AnalyzeWatchService:
             return False
         if "cooldown" in r:
             return False
-        if "train first" in r or "no compatible trained" in r:
+        if "train first" in r or "no compatible trained" in r or "use cross-barrier" in r:
+            return True
+        if "no trained model for model barrier" in r:
             return True
         if "confirm contract settings" in r:
             return True

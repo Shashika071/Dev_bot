@@ -71,6 +71,40 @@ def _metadata_compatible(meta: dict, conf, *, barrier_distance: Optional[float] 
     return True
 
 
+def _symbol_duration_ok(meta: dict, conf) -> bool:
+    if not meta:
+        return False
+    if meta.get("symbol") and meta["symbol"] != conf.symbol:
+        return False
+    if int(meta.get("duration_seconds", -1)) != int(conf.duration_seconds):
+        return False
+    return True
+
+
+def _latest_model_barrier(dirs: list[str], conf) -> Optional[float]:
+    """Barrier distance from latest model that matches symbol+duration (any barrier)."""
+    for direction in dirs:
+        meta = _load_latest_metadata(direction)
+        if meta and _symbol_duration_ok(meta, conf):
+            try:
+                return float(meta.get("barrier_distance"))
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _mismatch_hint(dirs: list[str], conf, trade_barrier: float) -> str:
+    found = _latest_model_barrier(dirs, conf)
+    if found is None:
+        return " Train a model for this symbol/duration first."
+    if abs(found - trade_barrier) > 1e-9:
+        return (
+            f" Latest model is barrier {found:g}, Setup trades {trade_barrier:g}. "
+            f"Use Cross-barrier (score {found:g} → trade Setup), not Force/Analyze."
+        )
+    return " Model files may be incomplete — retrain."
+
+
 def _predict_direction(pack: dict, feat_df: pd.DataFrame, seq) -> dict:
     feature_row = select_feature_matrix(feat_df.iloc[[-1]])
     if seq is not None and getattr(seq, "ndim", 0) == 2:
@@ -134,21 +168,29 @@ async def generate_manual_signal(
         return {"ok": False, "reason": "Confirm contract settings in Setup first.", "analysis": []}
 
     trade_barrier = float(barrier_magnitude(conf.barrier_input))
+    dirs = configured_directions(conf.barrier_direction)
+
     if cross_barrier:
-        model_barrier = float(trade.get("model_barrier_distance", 0.9))
+        pref_barrier = float(trade.get("model_barrier_distance", 0.9))
+        latest_barrier = _latest_model_barrier(dirs, conf)
+        # Prefer prefs when they differ from Setup; else auto-use latest trained barrier.
+        if abs(pref_barrier - trade_barrier) > 1e-9:
+            model_barrier = pref_barrier
+        elif latest_barrier is not None and abs(latest_barrier - trade_barrier) > 1e-9:
+            model_barrier = float(latest_barrier)
+        else:
+            model_barrier = pref_barrier
         if abs(model_barrier - trade_barrier) < 1e-9:
             return {
                 "ok": False,
                 "reason": (
-                    "Cross-barrier needs a different model barrier than Setup. "
-                    f"Both are {trade_barrier:g}. Train at e.g. 0.9 and keep Setup at 0.09."
+                    "Cross-barrier needs train barrier ≠ Setup trade barrier. "
+                    f"Both are {trade_barrier:g}. Train at e.g. 0.9, keep Setup at 0.09."
                 ),
                 "analysis": [],
             }
     else:
         model_barrier = trade_barrier
-
-    dirs = configured_directions(conf.barrier_direction)
     strategies = StrategyRegistry()
     strategies.register_defaults()
     generator = SignalGenerator(
@@ -189,10 +231,18 @@ async def generate_manual_signal(
                     f"No trained model for model barrier {model_barrier:g} "
                     f"(symbol {conf.symbol}, duration {conf.duration_seconds}s). "
                     f"Train at {model_barrier:g} first; Setup trade barrier stays {trade_barrier:g}."
+                    f"{_mismatch_hint(dirs, conf, trade_barrier)}"
                 ),
                 "analysis": [],
             }
-        return {"ok": False, "reason": "No compatible trained model found. Train first.", "analysis": []}
+        return {
+            "ok": False,
+            "reason": (
+                f"No compatible trained model for Setup barrier {trade_barrier:g}."
+                f"{_mismatch_hint(dirs, conf, trade_barrier)}"
+            ),
+            "analysis": [],
+        }
 
     result = await session.execute(
         select(Tick)
