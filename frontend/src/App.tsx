@@ -3,7 +3,7 @@ import {
   Activity, ShieldCheck, Zap, AlertTriangle, Settings,
   RefreshCw, BarChart2, Brain, CheckCircle, XCircle,
   Loader2, Wifi, WifiOff, Clock, Database, TrendingUp,
-  ChevronRight, Info, Signal, Cpu, Volume2
+  ChevronRight, Info, Signal, Cpu, Volume2, Trash2
 } from 'lucide-react';
 import {
   ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid,
@@ -523,6 +523,7 @@ interface ModelInfo {
   duration_seconds?: number;
   is_latest?: boolean;
   loadable?: boolean;
+  meta_path?: string;
   metrics?: { auc_roc?: number };
 }
 interface ModelsResponse {
@@ -579,6 +580,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
   const [dashAccount, setDashAccount] = useState<TradeAccountInfo | null>(null);
   const [dashAccountLoading, setDashAccountLoading] = useState(false);
   const [dashTokenConfigured, setDashTokenConfigured] = useState(false);
+  const [deletingModel, setDeletingModel] = useState<string | null>(null);
   const [analysisRows, setAnalysisRows] = useState<Array<{
     direction: string; ok?: boolean; calibrated_probability?: number;
     breakeven_probability?: number; margin_over_breakeven?: number;
@@ -759,6 +761,30 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
         )
   );
 
+  const deleteTrainedModel = async (m: ModelInfo) => {
+    const tag = m.version_tag;
+    if (!tag) return;
+    const label = `${(m.direction || '').toUpperCase()} barrier ${m.barrier_distance}`;
+    if (!window.confirm(`Delete trained model ${label} (${tag})? This cannot be undone.`)) {
+      return;
+    }
+    setDeletingModel(tag);
+    try {
+      await api(`/train/models/${encodeURIComponent(tag)}`, { method: 'DELETE' });
+      const refreshed = await api<ModelsResponse>('/train/models');
+      setModels(refreshed);
+      const barriers = (refreshed.barriers || []).map(String);
+      if (!barriers.includes(pickModelBarrier)) {
+        const fallback = barriers[0] || setupBarrier || '0.09';
+        setPickModelBarrier(fallback);
+        if (pickerMode !== 'cross_barrier') setPickTradeBarrier(fallback);
+      }
+    } catch (e: any) {
+      setAnalyzeMsg(e.message || 'Failed to delete model');
+    }
+    setDeletingModel(null);
+  };
+
   const openWatchPicker = (mode: WatchMode) => {
     setPickerMode(mode);
     const firstModel = trainedBarriers[0] || '0.09';
@@ -882,6 +908,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
       {pickerOpen && (
         <div className="picker-overlay" onClick={() => setPickerOpen(false)}>
           <div className="picker-modal glass" onClick={e => e.stopPropagation()}>
+            <div className="picker-modal-body">
             <h3>{pickerTitle}</h3>
             <p className="picker-sub">{pickerHelp}</p>
             <div className="form-group">
@@ -893,30 +920,44 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
                 {(models?.models || []).map(m => {
                   const b = String(m.barrier_distance ?? '');
                   const selected = Math.abs(Number(b) - Number(pickModelBarrier)) < 1e-9;
+                  const busy = deletingModel === m.version_tag;
                   return (
-                    <button
+                    <div
                       key={`${m.direction}-${m.barrier_distance}-${m.version_tag}`}
-                      type="button"
                       className={`picker-model-row ${selected ? 'active' : ''}`}
-                      disabled={m.loadable === false}
-                      onClick={() => {
-                        setPickModelBarrier(b);
-                        if (pickerMode !== 'cross_barrier') setPickTradeBarrier(b);
-                      }}
                     >
-                      <span className="font-mono">
-                        <strong>{(m.direction || '').toUpperCase()}</strong>
-                        {' · barrier '}{b}
-                        {m.duration_seconds != null ? ` · ${m.duration_seconds}s` : ''}
-                      </span>
-                      <span className="text-dim">
-                        {m.selected_pipeline || 'model'}
-                        {m.metrics?.auc_roc != null ? ` · AUC ${m.metrics.auc_roc.toFixed(3)}` : ''}
-                        {m.is_latest ? ' · latest' : ''}
-                        {m.loadable === false ? ' · missing files' : ''}
-                        {m.has_demonstrated_edge ? ' · Edge' : ' · No edge'}
-                      </span>
-                    </button>
+                      <button
+                        type="button"
+                        className="picker-model-pick"
+                        disabled={m.loadable === false || busy}
+                        onClick={() => {
+                          setPickModelBarrier(b);
+                          if (pickerMode !== 'cross_barrier') setPickTradeBarrier(b);
+                        }}
+                      >
+                        <span className="font-mono">
+                          <strong>{(m.direction || '').toUpperCase()}</strong>
+                          {' · barrier '}{b}
+                          {m.duration_seconds != null ? ` · ${m.duration_seconds}s` : ''}
+                        </span>
+                        <span className="text-dim">
+                          {m.selected_pipeline || 'model'}
+                          {m.metrics?.auc_roc != null ? ` · AUC ${m.metrics.auc_roc.toFixed(3)}` : ''}
+                          {m.is_latest ? ' · latest' : ''}
+                          {m.loadable === false ? ' · missing files' : ''}
+                          {m.has_demonstrated_edge ? ' · Edge' : ' · No edge'}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-ghost picker-model-del"
+                        title="Delete this trained model"
+                        disabled={!m.version_tag || busy}
+                        onClick={() => deleteTrainedModel(m)}
+                      >
+                        {busy ? <Loader2 size={14} className="spin"/> : <Trash2 size={14}/>}
+                      </button>
+                    </div>
                   );
                 })}
               </div>
@@ -971,6 +1012,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
                 </select>
               </div>
             )}
+            </div>
             <div className="picker-actions">
               <button type="button" className="btn btn-ghost" onClick={() => setPickerOpen(false)}>Cancel</button>
               <button type="button" className="btn btn-primary" onClick={startWatchWithPicks}>

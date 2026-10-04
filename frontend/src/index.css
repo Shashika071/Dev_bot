@@ -745,19 +745,28 @@ select {
   padding: 1rem;
 }
 .picker-modal {
-  width: min(440px, 100%);
-  padding: 1.25rem 1.35rem;
+  width: min(480px, 100%);
+  max-height: min(86vh, 720px);
+  display: flex;
+  flex-direction: column;
+  padding: 1.1rem 1.25rem 0.9rem;
   border-radius: 12px;
   background: var(--bg-card, #121820);
   border: 1px solid var(--border);
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+}
+.picker-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 0.15rem;
 }
 .picker-modal h3 {
   margin: 0 0 0.35rem;
   font-size: 1.05rem;
 }
 .picker-modal .picker-sub {
-  margin: 0 0 1rem;
+  margin: 0 0 0.85rem;
   font-size: 0.8rem;
   color: var(--text-secondary);
   line-height: 1.4;
@@ -766,41 +775,60 @@ select {
   display: flex;
   gap: 0.6rem;
   justify-content: flex-end;
-  margin-top: 1.1rem;
+  flex: 0 0 auto;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
 }
 .picker-model-list {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
-  max-height: 160px;
+  max-height: 220px;
   overflow-y: auto;
   margin-bottom: 0.35rem;
 }
 .picker-model-row {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0.15rem;
+  align-items: stretch;
+  gap: 0.35rem;
   width: 100%;
-  text-align: left;
-  padding: 0.45rem 0.6rem;
+  padding: 0.2rem 0.2rem 0.2rem 0.45rem;
   border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--bg-inset, rgba(255,255,255,0.03));
-  color: inherit;
-  cursor: pointer;
   font-size: 0.78rem;
 }
-.picker-model-row:hover:not(:disabled) {
+.picker-model-pick {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  padding: 0.3rem 0.2rem;
+}
+.picker-model-row:hover {
   border-color: var(--cyan, #00d4ff);
 }
 .picker-model-row.active {
   border-color: var(--cyan, #00d4ff);
   box-shadow: 0 0 0 1px rgba(0, 212, 255, 0.25);
 }
-.picker-model-row:disabled {
+.picker-model-pick:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+.picker-model-del {
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 0.35rem 0.45rem !important;
+  color: var(--red, #ff5c7a) !important;
 }
 
 /* ── Signal row ──────────────────────────────────────── */

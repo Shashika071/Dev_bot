@@ -113,7 +113,12 @@ async def training_status() -> dict:
     return _training_state
 
 
-def _model_row_from_meta(meta: dict, *, is_latest: bool = False) -> dict:
+def _model_row_from_meta(
+    meta: dict,
+    *,
+    is_latest: bool = False,
+    meta_path: str | None = None,
+) -> dict:
     cal = meta.get("calibrator_path")
     paths = meta.get("paths") or {}
     loadable = bool(cal and os.path.exists(cal))
@@ -131,11 +136,47 @@ def _model_row_from_meta(meta: dict, *, is_latest: bool = False) -> dict:
         "metrics": meta.get("metrics") or {},
         "is_latest": is_latest,
         "loadable": loadable,
+        "meta_path": meta_path,
         "paths_present": {
             k: bool(v and os.path.exists(v))
             for k, v in paths.items()
         },
     }
+
+
+def _safe_unlink(path: str | None) -> bool:
+    if not path or not isinstance(path, str):
+        return False
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _retarget_latest(direction: str, model_dir: str) -> None:
+    """Point latest_{direction}.json at newest remaining meta, or remove it."""
+    import glob
+    import json
+
+    latest_path = os.path.join(model_dir, f"latest_{direction}.json")
+    metas = []
+    for path in glob.glob(os.path.join(model_dir, f"meta_{direction}_*.json")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                meta = json.load(f)
+            metas.append((str(meta.get("created_at") or ""), path, meta))
+        except Exception:
+            continue
+    if not metas:
+        _safe_unlink(latest_path)
+        return
+    metas.sort(key=lambda x: x[0], reverse=True)
+    _, _, meta = metas[0]
+    with open(latest_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2, default=str)
 
 
 @router.get("/models")
@@ -180,7 +221,9 @@ async def list_trained_models() -> dict:
             int(meta.get("duration_seconds") or 0),
         )
         tag = str(meta.get("version_tag") or "")
-        row = _model_row_from_meta(meta, is_latest=tag in latest_tags)
+        row = _model_row_from_meta(
+            meta, is_latest=tag in latest_tags, meta_path=path
+        )
         prev = best.get(key)
         if prev is None or str(row.get("created_at") or "") >= str(prev.get("created_at") or ""):
             best[key] = row
@@ -193,7 +236,9 @@ async def list_trained_models() -> dict:
                     meta = json.load(f)
             except Exception:
                 continue
-            models_fallback = _model_row_from_meta(meta, is_latest=True)
+            models_fallback = _model_row_from_meta(
+                meta, is_latest=True, meta_path=path
+            )
             key = (
                 str(models_fallback.get("direction") or ""),
                 round(float(models_fallback.get("barrier_distance") or 0), 6),
@@ -224,6 +269,82 @@ async def list_trained_models() -> dict:
         "barriers": barriers,
         "min_ticks_to_train": 1000,
         "recommended_ticks": 5000,
+    }
+
+
+@router.delete("/models/{version_tag}")
+async def delete_trained_model(version_tag: str) -> dict:
+    """
+    Delete one trained model version (artefacts + meta).
+    If it was latest_{direction}, retarget latest to the next newest meta.
+    """
+    import glob
+    import json
+    from fastapi import HTTPException
+    from app.config import settings
+
+    tag = str(version_tag or "").strip()
+    if not tag or "/" in tag or "\\" in tag or ".." in tag:
+        raise HTTPException(status_code=400, detail="Invalid version_tag")
+
+    model_dir = settings.model_dir
+    meta_path = None
+    meta = None
+    for path in glob.glob(os.path.join(model_dir, "meta_*.json")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                candidate = json.load(f)
+            if str(candidate.get("version_tag") or "") == tag:
+                meta_path = path
+                meta = candidate
+                break
+        except Exception:
+            continue
+
+    if meta is None:
+        # Allow deleting a latest-only entry
+        for path in glob.glob(os.path.join(model_dir, "latest_*.json")):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    candidate = json.load(f)
+                if str(candidate.get("version_tag") or "") == tag:
+                    meta_path = path
+                    meta = candidate
+                    break
+            except Exception:
+                continue
+
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"Model {tag} not found")
+
+    removed: list[str] = []
+    paths = meta.get("paths") or {}
+    for p in list(paths.values()) + [
+        meta.get("model_path"),
+        meta.get("calibrator_path"),
+        meta_path,
+    ]:
+        if _safe_unlink(p):
+            removed.append(str(p))
+
+    # Matching report file if present
+    direction = str(meta.get("direction") or "")
+    ts = str(meta.get("timestamp") or "")
+    if direction and ts:
+        report = os.path.join(model_dir, f"report_{direction}_{ts}.json")
+        if _safe_unlink(report):
+            removed.append(report)
+
+    if direction:
+        _retarget_latest(direction, model_dir)
+
+    return {
+        "ok": True,
+        "deleted": tag,
+        "direction": direction,
+        "barrier_distance": meta.get("barrier_distance"),
+        "removed_files": len(removed),
+        "message": f"Deleted model {tag}",
     }
 
 
