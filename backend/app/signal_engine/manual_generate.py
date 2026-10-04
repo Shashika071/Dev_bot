@@ -93,6 +93,58 @@ def _latest_model_barrier(dirs: list[str], conf) -> Optional[float]:
     return None
 
 
+def _has_loadable_model(dirs: list[str], conf, barrier_distance: float) -> bool:
+    for direction in dirs:
+        meta = _load_latest_metadata(direction)
+        if not meta or not _metadata_compatible(meta, conf, barrier_distance=barrier_distance):
+            continue
+        cal_path = meta.get("calibrator_path")
+        if cal_path and os.path.exists(cal_path):
+            return True
+    return False
+
+
+def _resolve_cross_model_barrier(
+    dirs: list[str],
+    conf,
+    *,
+    trade_barrier: float,
+    pref_barrier: float,
+) -> tuple[Optional[float], str]:
+    """
+    Pick a trained barrier ≠ Setup. Prefer prefs only when that model exists;
+    otherwise use latest trained barrier (e.g. prefs 0.9 but latest is 0.09).
+    """
+    latest = _latest_model_barrier(dirs, conf)
+    ordered: list[float] = []
+    for b in (pref_barrier, latest):
+        if b is None:
+            continue
+        bf = float(b)
+        if abs(bf - trade_barrier) < 1e-9:
+            continue
+        if not any(abs(bf - x) < 1e-9 for x in ordered):
+            ordered.append(bf)
+    for bf in ordered:
+        if _has_loadable_model(dirs, conf, bf):
+            return bf, ""
+    if latest is not None and abs(float(latest) - trade_barrier) < 1e-9:
+        return None, (
+            "Cross-barrier needs train barrier ≠ Setup. "
+            f"Latest model and Setup are both {trade_barrier:g}. "
+            "Train at a different barrier (e.g. 0.9) or change Setup trade barrier."
+        )
+    if latest is None:
+        return None, (
+            f"No trained model for {conf.symbol} / {conf.duration_seconds}s. Train first."
+        )
+    return None, (
+        f"No loadable model for Cross (tried prefs {pref_barrier:g}"
+        f"{f', latest {float(latest):g}' if latest is not None else ''}). "
+        f"Setup trades {trade_barrier:g}."
+    )
+
+
 def _mismatch_hint(dirs: list[str], conf, trade_barrier: float) -> str:
     found = _latest_model_barrier(dirs, conf)
     if found is None:
@@ -142,13 +194,15 @@ async def generate_manual_signal(
     mode: str = "standard",
     min_probability: Optional[float] = None,
     client: Optional[DerivWSClient] = None,
+    trade_barrier: Optional[float] = None,
+    model_barrier: Optional[float] = None,
 ) -> dict[str, Any]:
     """
     Analyze live market with trained models.
     mode=standard: confluence + candles + p + margin (Analyze & Signal).
     mode=force_model_candles: candles + calibrated p only (skip confluence/EV/edge).
-    mode=cross_barrier: score model_barrier models/features; trade Setup barrier;
-      gate on step confidence (+ candles when enabled in trade prefs).
+    mode=cross_barrier: score model_barrier; trade trade_barrier; step confidence.
+    Optional trade_barrier / model_barrier come from the Dashboard picker popup.
     Always returns per-direction analysis for the UI.
     """
     mode_norm = str(mode or "standard").strip().lower()
@@ -167,30 +221,70 @@ async def generate_manual_signal(
     if not conf:
         return {"ok": False, "reason": "Confirm contract settings in Setup first.", "analysis": []}
 
-    trade_barrier = float(barrier_magnitude(conf.barrier_input))
+    setup_barrier = float(barrier_magnitude(conf.barrier_input))
     dirs = configured_directions(conf.barrier_direction)
 
+    # Picker overrides (Dashboard popup); else Setup / prefs / auto-resolve.
+    trade_barrier_f = (
+        float(trade_barrier) if trade_barrier is not None else setup_barrier
+    )
+    if trade_barrier_f <= 0:
+        return {"ok": False, "reason": "Trade barrier must be > 0.", "analysis": []}
+
     if cross_barrier:
-        pref_barrier = float(trade.get("model_barrier_distance", 0.9))
-        latest_barrier = _latest_model_barrier(dirs, conf)
-        # Prefer prefs when they differ from Setup; else auto-use latest trained barrier.
-        if abs(pref_barrier - trade_barrier) > 1e-9:
-            model_barrier = pref_barrier
-        elif latest_barrier is not None and abs(latest_barrier - trade_barrier) > 1e-9:
-            model_barrier = float(latest_barrier)
+        if model_barrier is not None:
+            model_barrier_f = float(model_barrier)
+            if abs(model_barrier_f - trade_barrier_f) < 1e-9:
+                return {
+                    "ok": False,
+                    "reason": (
+                        "Cross-barrier needs different barriers: "
+                        f"train/score {model_barrier_f:g} vs trade {trade_barrier_f:g}."
+                    ),
+                    "analysis": [],
+                }
+            if not _has_loadable_model(dirs, conf, model_barrier_f):
+                return {
+                    "ok": False,
+                    "reason": (
+                        f"No trained model at barrier {model_barrier_f:g} "
+                        f"for {conf.symbol} / {conf.duration_seconds}s. "
+                        "Pick another trained model in the popup."
+                    ),
+                    "analysis": [],
+                }
         else:
-            model_barrier = pref_barrier
-        if abs(model_barrier - trade_barrier) < 1e-9:
+            pref_barrier = float(trade.get("model_barrier_distance", 0.9))
+            model_barrier_f, cross_err = _resolve_cross_model_barrier(
+                dirs,
+                conf,
+                trade_barrier=trade_barrier_f,
+                pref_barrier=pref_barrier,
+            )
+            if model_barrier_f is None:
+                return {
+                    "ok": False,
+                    "reason": cross_err or "Cross-barrier: no model.",
+                    "analysis": [],
+                }
+    else:
+        # Analyze / Force: same-barrier — model must match trade (picker or Setup).
+        model_barrier_f = (
+            float(model_barrier) if model_barrier is not None else trade_barrier_f
+        )
+        if abs(model_barrier_f - trade_barrier_f) > 1e-9:
             return {
                 "ok": False,
                 "reason": (
-                    "Cross-barrier needs train barrier ≠ Setup trade barrier. "
-                    f"Both are {trade_barrier:g}. Train at e.g. 0.9, keep Setup at 0.09."
+                    "Analyze/Force need the same train and trade barrier. "
+                    f"Got model {model_barrier_f:g} vs trade {trade_barrier_f:g}. "
+                    "Use Cross-barrier when they differ."
                 ),
                 "analysis": [],
             }
-    else:
-        model_barrier = trade_barrier
+
+    trade_barrier = trade_barrier_f
+    model_barrier = model_barrier_f
     strategies = StrategyRegistry()
     strategies.register_defaults()
     generator = SignalGenerator(
@@ -296,7 +390,7 @@ async def generate_manual_signal(
     quotes_by_direction: dict[str, dict] = {}
     try:
         for direction in dirs:
-            signed = barrier_for_direction(conf.barrier_input, direction)
+            signed = barrier_for_direction(str(trade_barrier), direction)
             qc = QuoteCollector(
                 client=client,
                 symbol=conf.symbol,

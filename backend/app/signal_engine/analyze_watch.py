@@ -36,6 +36,8 @@ def _default_state() -> dict[str, Any]:
         "want_running": False,
         "mode": "standard",
         "min_probability": None,
+        "trade_barrier": None,
+        "model_barrier": None,
         "attempt": 0,
         "started_at": None,
         "updated_at": None,
@@ -110,6 +112,8 @@ class AnalyzeWatchService:
         *,
         mode: str = "standard",
         min_probability: Optional[float] = None,
+        trade_barrier: Optional[float] = None,
+        model_barrier: Optional[float] = None,
     ) -> dict[str, Any]:
         mode = str(mode or "standard").strip().lower()
         if mode not in ("standard", "force_model_candles", "cross_barrier"):
@@ -118,6 +122,8 @@ class AnalyzeWatchService:
             "force_model_candles": "Force",
             "cross_barrier": "Cross-barrier",
         }.get(mode, "Analyze")
+        tb = float(trade_barrier) if trade_barrier is not None else None
+        mb = float(model_barrier) if model_barrier is not None else None
 
         async with self._lock:
             if self._task and not self._task.done():
@@ -134,20 +140,33 @@ class AnalyzeWatchService:
 
             self._stop = asyncio.Event()
             now = time.time()
+            pick_bit = ""
+            if mb is not None and tb is not None:
+                pick_bit = f" model@{mb:g}→trade@{tb:g}"
+            elif tb is not None:
+                pick_bit = f" trade@{tb:g}"
             self._state = {
                 **_default_state(),
                 "running": True,
                 "want_running": True,
                 "mode": mode,
                 "min_probability": min_probability,
+                "trade_barrier": tb,
+                "model_barrier": mb,
                 "attempt": 0,
                 "started_at": now,
                 "updated_at": now,
-                "message": f"Watching ({mode_label})…",
+                "message": f"Watching ({mode_label}){pick_bit}…",
             }
             self._save_disk()
             self._task = asyncio.create_task(self._loop(), name="analyze-watch")
-            logger.info("analyze_watch_started", mode=mode, min_probability=min_probability)
+            logger.info(
+                "analyze_watch_started",
+                mode=mode,
+                min_probability=min_probability,
+                trade_barrier=tb,
+                model_barrier=mb,
+            )
             return self.status()
 
     async def stop(self, reason: str = "stopped_by_user") -> dict[str, Any]:
@@ -187,13 +206,20 @@ class AnalyzeWatchService:
             if isinstance(saved, dict) and saved.get("want_running"):
                 mode = saved.get("mode") or "standard"
                 min_p = saved.get("min_probability")
-                await self.start(mode=mode, min_probability=min_p)
+                await self.start(
+                    mode=mode,
+                    min_probability=min_p,
+                    trade_barrier=saved.get("trade_barrier"),
+                    model_barrier=saved.get("model_barrier"),
+                )
         except Exception as e:
             logger.warning("analyze_watch_resume_failed", error=str(e))
 
     async def _loop(self) -> None:
         mode = self._state.get("mode") or "standard"
         min_probability = self._state.get("min_probability")
+        trade_barrier = self._state.get("trade_barrier")
+        model_barrier = self._state.get("model_barrier")
         label = {
             "force_model_candles": "Force",
             "cross_barrier": "Cross-barrier",
@@ -205,7 +231,10 @@ class AnalyzeWatchService:
             while not self._stop.is_set():
                 self._state["attempt"] = int(self._state.get("attempt") or 0) + 1
                 attempt = self._state["attempt"]
-                self._state["message"] = f"Watching ({label})… check #{attempt}"
+                pick_bit = ""
+                if model_barrier is not None and trade_barrier is not None:
+                    pick_bit = f" {float(model_barrier):g}→{float(trade_barrier):g}"
+                self._state["message"] = f"Watching ({label}){pick_bit}… check #{attempt}"
                 self._state["updated_at"] = time.time()
                 self._save_disk()
 
@@ -216,6 +245,12 @@ class AnalyzeWatchService:
                             mode=mode,
                             min_probability=(
                                 float(min_probability) if min_probability is not None else None
+                            ),
+                            trade_barrier=(
+                                float(trade_barrier) if trade_barrier is not None else None
+                            ),
+                            model_barrier=(
+                                float(model_barrier) if model_barrier is not None else None
                             ),
                         )
                         if result.get("ok") and result.get("signal"):

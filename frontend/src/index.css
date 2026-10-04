@@ -718,6 +718,42 @@ select {
   text-overflow: ellipsis;
 }
 
+/* Dashboard Analyze/Force/Cross picker */
+.picker-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+.picker-modal {
+  width: min(440px, 100%);
+  padding: 1.25rem 1.35rem;
+  border-radius: 12px;
+  background: var(--bg-card, #121820);
+  border: 1px solid var(--border);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+}
+.picker-modal h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1.05rem;
+}
+.picker-modal .picker-sub {
+  margin: 0 0 1rem;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+.picker-actions {
+  display: flex;
+  gap: 0.6rem;
+  justify-content: flex-end;
+  margin-top: 1.1rem;
+}
+
 /* ── Signal row ──────────────────────────────────────── */
 .signal-row {
   display: flex;

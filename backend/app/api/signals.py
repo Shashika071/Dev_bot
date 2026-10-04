@@ -178,11 +178,15 @@ async def generate_signal(
         mode = "standard"
     min_p = body.get("min_probability")
     min_probability = float(min_p) if min_p is not None else None
+    tb = body.get("trade_barrier")
+    mb = body.get("model_barrier")
     result = await generate_manual_signal(
         db,
         force_no_edge=force,
         mode=mode,
         min_probability=min_probability,
+        trade_barrier=float(tb) if tb is not None else None,
+        model_barrier=float(mb) if mb is not None else None,
     )
     if result.get("ok") and result.get("signal"):
         try:
@@ -212,7 +216,14 @@ async def start_analyze_watch(payload: dict | None = None) -> dict:
         mode = "standard"
     min_p = body.get("min_probability")
     min_probability = float(min_p) if min_p is not None else None
-    return await analyze_watch.start(mode=mode, min_probability=min_probability)
+    tb = body.get("trade_barrier")
+    mb = body.get("model_barrier")
+    return await analyze_watch.start(
+        mode=mode,
+        min_probability=min_probability,
+        trade_barrier=float(tb) if tb is not None else None,
+        model_barrier=float(mb) if mb is not None else None,
+    )
 
 
 @router.post("/watch/stop")

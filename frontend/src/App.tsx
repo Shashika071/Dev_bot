@@ -541,8 +541,14 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
   const [analyzeOk, setAnalyzeOk] = useState(false);
   const [forceMinP, setForceMinP] = useState(0.80);
   const [crossMinP, setCrossMinP] = useState(0.80);
-  const [modelBarrier, setModelBarrier] = useState(0.9);
   const [tradeResultMsg, setTradeResultMsg] = useState('');
+  type WatchMode = 'standard' | 'force_model_candles' | 'cross_barrier';
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerMode, setPickerMode] = useState<WatchMode>('standard');
+  const [pickModelBarrier, setPickModelBarrier] = useState('0.09');
+  const [pickTradeBarrier, setPickTradeBarrier] = useState('0.09');
+  const [pickMinP, setPickMinP] = useState(0.80);
+  const [setupBarrier, setSetupBarrier] = useState('0.09');
   const [analysisRows, setAnalysisRows] = useState<Array<{
     direction: string; ok?: boolean; calibrated_probability?: number;
     breakeven_probability?: number; margin_over_breakeven?: number;
@@ -591,26 +597,21 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
     api<{
       force_min_probability?: number;
       cross_barrier_min_probability?: number;
-      model_barrier_distance?: number;
     }>('/setup/trade-prefs')
       .then(r => {
         if (r.force_min_probability != null) setForceMinP(Number(r.force_min_probability));
         if (r.cross_barrier_min_probability != null) {
           setCrossMinP(Number(r.cross_barrier_min_probability));
         }
-        if (r.model_barrier_distance != null) {
-          setModelBarrier(Number(r.model_barrier_distance));
-        }
+      })
+      .catch(() => {});
+    api<{ barrier_input?: string }>('/setup/current')
+      .then(r => {
+        const mag = String(r.barrier_input || '0.09').replace(/^[+-]/, '');
+        if (mag) setSetupBarrier(mag);
       })
       .catch(() => {});
   }, []);
-  useEffect(() => {
-    // Prefer trained model barrier for Cross button label when it differs from Setup
-    const b = (models?.models || [])
-      .map(m => Number(m.barrier_distance))
-      .find(v => Number.isFinite(v) && v > 0);
-    if (b != null) setModelBarrier(b);
-  }, [models]);
   useEffect(() => {
     loadChart();
     const id = setInterval(loadChart, tf === 'tick' ? 2500 : 5000);
@@ -696,10 +697,55 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
     }
   };
 
-  const analyzeGenerate = async (
-    mode: 'standard' | 'force_model_candles' | 'cross_barrier' = 'standard',
-  ) => {
-    // Server-side watch — survives tab close / re-login
+  const trainedBarriers = Array.from(
+    new Set(
+      (models?.models || [])
+        .map(m => Number(m.barrier_distance))
+        .filter(v => Number.isFinite(v) && v > 0)
+        .map(v => String(v)),
+    ),
+  );
+
+  const openWatchPicker = (mode: WatchMode) => {
+    setPickerMode(mode);
+    const firstModel = trainedBarriers[0] || '0.09';
+    if (mode === 'cross_barrier') {
+      // Prefer a train barrier different from Setup trade target
+      const score =
+        trainedBarriers.find(b => Math.abs(Number(b) - Number(setupBarrier)) > 1e-9)
+        || firstModel;
+      setPickModelBarrier(score);
+      setPickTradeBarrier(setupBarrier || '0.09');
+      setPickMinP(crossMinP);
+    } else {
+      // Analyze / Force: same barrier for train + trade
+      const same =
+        trainedBarriers.find(b => Math.abs(Number(b) - Number(setupBarrier)) < 1e-9)
+        || firstModel;
+      setPickModelBarrier(same);
+      setPickTradeBarrier(same);
+      setPickMinP(forceMinP);
+    }
+    setPickerOpen(true);
+  };
+
+  const startWatchWithPicks = async () => {
+    const mode = pickerMode;
+    const mb = Number(pickModelBarrier);
+    const tb = Number(pickTradeBarrier);
+    if (!Number.isFinite(mb) || mb <= 0 || !Number.isFinite(tb) || tb <= 0) {
+      setAnalyzeMsg('Pick valid train model barrier and trade barrier.');
+      return;
+    }
+    if (mode === 'cross_barrier' && Math.abs(mb - tb) < 1e-9) {
+      setAnalyzeMsg('Cross needs different barriers (e.g. train 0.9, trade 0.09).');
+      return;
+    }
+    if (mode !== 'cross_barrier' && Math.abs(mb - tb) > 1e-9) {
+      setAnalyzeMsg('Analyze/Force need the same train and trade barrier. Use Cross when they differ.');
+      return;
+    }
+    setPickerOpen(false);
     setAnalyzeBusy(true);
     setAnalyzeWatching(true);
     setWatchMode(mode);
@@ -708,12 +754,14 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
     setAnalysisRows([]);
     setTradeResultMsg('');
     try {
-      const body =
-        mode === 'force_model_candles'
-          ? { mode: 'force_model_candles', min_probability: forceMinP }
-          : mode === 'cross_barrier'
-            ? { mode: 'cross_barrier', min_probability: crossMinP }
-            : { mode: 'standard' };
+      const body: Record<string, unknown> = {
+        mode,
+        model_barrier: mb,
+        trade_barrier: tb,
+      };
+      if (mode === 'force_model_candles' || mode === 'cross_barrier') {
+        body.min_probability = pickMinP;
+      }
       const st = await api<WatchStatus>('/signals/watch/start', {
         method: 'POST',
         body: JSON.stringify(body),
@@ -765,8 +813,84 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
     { id: '15m', label: '15m' },
   ];
 
+  const pickerTitle =
+    pickerMode === 'force_model_candles'
+      ? 'Force — pick model & barrier'
+      : pickerMode === 'cross_barrier'
+        ? 'Cross-barrier — train vs trade'
+        : 'Analyze — pick model & barrier';
+  const pickerHelp =
+    pickerMode === 'cross_barrier'
+      ? 'Score the trained model barrier (e.g. 0.9). When confidence clears, buy the trade barrier (e.g. 0.09).'
+      : 'Train model and trade barrier must match (same margin). Use Cross-barrier when they differ.';
+
   return (
     <>
+      {pickerOpen && (
+        <div className="picker-overlay" onClick={() => setPickerOpen(false)}>
+          <div className="picker-modal glass" onClick={e => e.stopPropagation()}>
+            <h3>{pickerTitle}</h3>
+            <p className="picker-sub">{pickerHelp}</p>
+            <div className="form-group">
+              <label className="form-label">Trained model barrier</label>
+              <select
+                className="form-select"
+                value={pickModelBarrier}
+                onChange={e => {
+                  const v = e.target.value;
+                  setPickModelBarrier(v);
+                  if (pickerMode !== 'cross_barrier') setPickTradeBarrier(v);
+                }}
+              >
+                {trainedBarriers.length === 0 && <option value={pickModelBarrier}>{pickModelBarrier}</option>}
+                {trainedBarriers.map(b => (
+                  <option key={b} value={b}>{b}</option>
+                ))}
+              </select>
+              <div className="form-hint">From saved models (Train tab).</div>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Trade barrier (buy this)</label>
+              <input
+                className="form-input"
+                type="number"
+                step="0.01"
+                min={0.01}
+                value={pickTradeBarrier}
+                onChange={e => setPickTradeBarrier(e.target.value)}
+                disabled={pickerMode !== 'cross_barrier'}
+              />
+              <div className="form-hint">
+                {pickerMode === 'cross_barrier'
+                  ? `Setup default ${setupBarrier}. Change if you want a different buy barrier.`
+                  : 'Locked to model barrier for Analyze/Force.'}
+              </div>
+            </div>
+            {(pickerMode === 'force_model_candles' || pickerMode === 'cross_barrier') && (
+              <div className="form-group">
+                <label className="form-label">Min confidence</label>
+                <select
+                  className="form-select"
+                  value={String(pickMinP)}
+                  onChange={e => setPickMinP(Number(e.target.value))}
+                >
+                  <option value="0.8">80%</option>
+                  <option value="0.85">85%</option>
+                  <option value="0.9">90%</option>
+                  <option value="0.95">95%</option>
+                </select>
+              </div>
+            )}
+            <div className="picker-actions">
+              <button type="button" className="btn btn-ghost" onClick={() => setPickerOpen(false)}>Cancel</button>
+              <button type="button" className="btn btn-primary" onClick={startWatchWithPicks}>
+                Start watch
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="glass page-header">
         <div>
@@ -782,9 +906,9 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
           <button
             id="btn-analyze-signal"
             className="btn btn-primary"
-            onClick={() => analyzeGenerate('standard')}
+            onClick={() => openWatchPicker('standard')}
             disabled={analyzeBusy || !models?.trained}
-            title="Keeps checking until full gates pass, then creates signal (and auto-trade if enabled)"
+            title="Pick trained model + trade barrier, then watch until full gates pass"
           >
             {watchMode === 'standard' ? <Loader2 size={14} className="spin"/> : <Zap size={14}/>}
             {watchMode === 'standard' ? 'Watching Analyze…' : 'Analyze & Signal'}
@@ -792,9 +916,9 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
           <button
             id="btn-force-signal"
             className="btn btn-ghost"
-            onClick={() => analyzeGenerate('force_model_candles')}
+            onClick={() => openWatchPicker('force_model_candles')}
             disabled={analyzeBusy || !models?.trained}
-            title={`Keeps checking until candle confirm + p≥${(forceMinP * 100).toFixed(0)}%, then signal/trade`}
+            title="Pick model + barrier, then watch until candles + min p"
           >
             {watchMode === 'force_model_candles' ? <Loader2 size={14} className="spin"/> : <Zap size={14}/>}
             {watchMode === 'force_model_candles'
@@ -804,14 +928,12 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
           <button
             id="btn-cross-barrier-signal"
             className="btn btn-ghost"
-            onClick={() => analyzeGenerate('cross_barrier')}
+            onClick={() => openWatchPicker('cross_barrier')}
             disabled={analyzeBusy || !models?.trained}
-            title={`Train/score barrier ${modelBarrier} at p≥${(crossMinP * 100).toFixed(0)}%, then trade Setup barrier (different margin)`}
+            title="Pick train model barrier and different trade barrier (e.g. 0.9 → 0.09)"
           >
             {watchMode === 'cross_barrier' ? <Loader2 size={14} className="spin"/> : <Zap size={14}/>}
-            {watchMode === 'cross_barrier'
-              ? 'Watching Cross…'
-              : `Cross ${modelBarrier}→Setup (${(crossMinP * 100).toFixed(0)}%)`}
+            {watchMode === 'cross_barrier' ? 'Watching Cross…' : 'Cross-barrier'}
           </button>
           {analyzeWatching && (
             <button id="btn-stop-analyze-watch" className="btn btn-ghost" onClick={stopAnalyzeWatch}>

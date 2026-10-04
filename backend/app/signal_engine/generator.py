@@ -459,10 +459,8 @@ class SignalGenerator:
 
         day_date = self.daily_cap.get_today_date()
         day_sequence = await self.daily_cap.get_next_sequence(session)
-        signed_barrier = barrier_for_direction(
-            conf_settings.barrier_input if conf_settings else str(barrier_distance),
-            direction,
-        )
+        # Use the requested trade magnitude (may differ from Setup when Cross / picker).
+        signed_barrier = barrier_for_direction(str(barrier_distance), direction)
 
         comps = best.get("component_probs") or {}
         comp_txt = ", ".join(f"{k}={v:.3f}" for k, v in comps.items())
