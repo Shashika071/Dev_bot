@@ -113,47 +113,115 @@ async def training_status() -> dict:
     return _training_state
 
 
+def _model_row_from_meta(meta: dict, *, is_latest: bool = False) -> dict:
+    cal = meta.get("calibrator_path")
+    paths = meta.get("paths") or {}
+    loadable = bool(cal and os.path.exists(cal))
+    return {
+        "direction": meta.get("direction"),
+        "selected_pipeline": meta.get("selected_pipeline"),
+        "has_demonstrated_edge": bool(meta.get("has_demonstrated_edge", False)),
+        "edge_description": meta.get("edge_description"),
+        "version_tag": meta.get("version_tag"),
+        "symbol": meta.get("symbol"),
+        "barrier_distance": meta.get("barrier_distance"),
+        "barrier_unit": meta.get("barrier_unit"),
+        "duration_seconds": meta.get("duration_seconds"),
+        "created_at": meta.get("created_at"),
+        "metrics": meta.get("metrics") or {},
+        "is_latest": is_latest,
+        "loadable": loadable,
+        "paths_present": {
+            k: bool(v and os.path.exists(v))
+            for k, v in paths.items()
+        },
+    }
+
+
 @router.get("/models")
 async def list_trained_models() -> dict:
     """
-    Return saved per-direction model metadata for the dashboard.
-    Reads latest_{direction}.json artefacts from MODEL_DIR.
+    List saved models for the dashboard picker.
+    Includes every distinct (direction, barrier) from meta_*.json (not only latest_*),
+    so Cross can still pick an older 0.9 train after a newer 0.09 overwrite of latest_*.
     """
     import glob
     import json
     from app.config import settings
 
     model_dir = settings.model_dir
-    models = []
-    for path in sorted(glob.glob(os.path.join(model_dir, "latest_*.json"))):
+    latest_tags: set[str] = set()
+    for path in glob.glob(os.path.join(model_dir, "latest_*.json")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                meta = json.load(f)
+            tag = meta.get("version_tag")
+            if tag:
+                latest_tags.add(str(tag))
+        except Exception:
+            continue
+
+    # Keep newest meta per (direction, barrier, symbol, duration)
+    best: dict[tuple, dict] = {}
+    for path in sorted(glob.glob(os.path.join(model_dir, "meta_*.json"))):
         try:
             with open(path, encoding="utf-8") as f:
                 meta = json.load(f)
         except Exception:
             continue
-        models.append(
-            {
-                "direction": meta.get("direction"),
-                "selected_pipeline": meta.get("selected_pipeline"),
-                "has_demonstrated_edge": bool(meta.get("has_demonstrated_edge", False)),
-                "edge_description": meta.get("edge_description"),
-                "version_tag": meta.get("version_tag"),
-                "symbol": meta.get("symbol"),
-                "barrier_distance": meta.get("barrier_distance"),
-                "barrier_unit": meta.get("barrier_unit"),
-                "duration_seconds": meta.get("duration_seconds"),
-                "created_at": meta.get("created_at"),
-                "metrics": meta.get("metrics") or {},
-                "paths_present": {
-                    k: bool(v and os.path.exists(v))
-                    for k, v in (meta.get("paths") or {}).items()
-                },
-            }
+        try:
+            barrier = float(meta.get("barrier_distance"))
+        except (TypeError, ValueError):
+            continue
+        key = (
+            str(meta.get("direction") or ""),
+            round(barrier, 6),
+            str(meta.get("symbol") or ""),
+            int(meta.get("duration_seconds") or 0),
         )
+        tag = str(meta.get("version_tag") or "")
+        row = _model_row_from_meta(meta, is_latest=tag in latest_tags)
+        prev = best.get(key)
+        if prev is None or str(row.get("created_at") or "") >= str(prev.get("created_at") or ""):
+            best[key] = row
+
+    # Fallback: latest_* only (older deploys / missing meta files)
+    if not best:
+        for path in sorted(glob.glob(os.path.join(model_dir, "latest_*.json"))):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    meta = json.load(f)
+            except Exception:
+                continue
+            models_fallback = _model_row_from_meta(meta, is_latest=True)
+            key = (
+                str(models_fallback.get("direction") or ""),
+                round(float(models_fallback.get("barrier_distance") or 0), 6),
+                str(models_fallback.get("symbol") or ""),
+                int(models_fallback.get("duration_seconds") or 0),
+            )
+            best[key] = models_fallback
+
+    models = sorted(
+        best.values(),
+        key=lambda m: (
+            str(m.get("symbol") or ""),
+            float(m.get("barrier_distance") or 0),
+            str(m.get("direction") or ""),
+        ),
+    )
+    barriers = sorted(
+        {
+            round(float(m["barrier_distance"]), 6)
+            for m in models
+            if m.get("barrier_distance") is not None and m.get("loadable")
+        }
+    )
 
     return {
         "trained": len(models) > 0,
         "models": models,
+        "barriers": barriers,
         "min_ticks_to_train": 1000,
         "recommended_ticks": 5000,
     }

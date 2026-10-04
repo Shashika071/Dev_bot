@@ -520,9 +520,36 @@ interface ModelInfo {
   version_tag?: string;
   symbol?: string;
   barrier_distance?: number;
+  duration_seconds?: number;
+  is_latest?: boolean;
+  loadable?: boolean;
   metrics?: { auc_roc?: number };
 }
-interface ModelsResponse { trained: boolean; models: ModelInfo[]; min_ticks_to_train: number; recommended_ticks: number; }
+interface ModelsResponse {
+  trained: boolean;
+  models: ModelInfo[];
+  barriers?: number[];
+  min_ticks_to_train: number;
+  recommended_ticks: number;
+}
+
+type TradeAccountInfo = {
+  ok?: boolean;
+  error?: string;
+  loginid?: string;
+  currency?: string;
+  balance?: number;
+  is_virtual?: boolean;
+  account_type?: string;
+  email?: string;
+  fullname?: string;
+  today_profit?: number;
+  recent_profit?: number;
+  recent_trades?: number;
+  recent_wins?: number;
+  recent_losses?: number;
+  token_configured?: boolean;
+};
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
 function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
@@ -549,6 +576,9 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
   const [pickTradeBarrier, setPickTradeBarrier] = useState('0.09');
   const [pickMinP, setPickMinP] = useState(0.80);
   const [setupBarrier, setSetupBarrier] = useState('0.09');
+  const [dashAccount, setDashAccount] = useState<TradeAccountInfo | null>(null);
+  const [dashAccountLoading, setDashAccountLoading] = useState(false);
+  const [dashTokenConfigured, setDashTokenConfigured] = useState(false);
   const [analysisRows, setAnalysisRows] = useState<Array<{
     direction: string; ok?: boolean; calibrated_probability?: number;
     breakeven_probability?: number; margin_over_breakeven?: number;
@@ -592,17 +622,34 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
     } catch { /* keep last chart */ }
   }, [apiStatus?.symbol, tf]);
 
+  const loadDashAccount = useCallback(async (refresh = true) => {
+    setDashAccountLoading(true);
+    try {
+      const a = await api<TradeAccountInfo>(
+        `/setup/trade-account?refresh=${refresh ? 'true' : 'false'}`,
+      );
+      setDashAccount(a);
+      setDashTokenConfigured(!!a.token_configured || !!a.ok);
+    } catch {
+      setDashAccount(null);
+    }
+    setDashAccountLoading(false);
+  }, []);
+
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
     api<{
       force_min_probability?: number;
       cross_barrier_min_probability?: number;
+      token_configured?: boolean;
     }>('/setup/trade-prefs')
       .then(r => {
         if (r.force_min_probability != null) setForceMinP(Number(r.force_min_probability));
         if (r.cross_barrier_min_probability != null) {
           setCrossMinP(Number(r.cross_barrier_min_probability));
         }
+        setDashTokenConfigured(!!r.token_configured);
+        if (r.token_configured) loadDashAccount(true);
       })
       .catch(() => {});
     api<{ barrier_input?: string }>('/setup/current')
@@ -611,7 +658,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
         if (mag) setSetupBarrier(mag);
       })
       .catch(() => {});
-  }, []);
+  }, [loadDashAccount]);
   useEffect(() => {
     loadChart();
     const id = setInterval(loadChart, tf === 'tick' ? 2500 : 5000);
@@ -649,6 +696,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
           `Auto-trade OK · contract ${st.trade.contract_id} · stake ${st.trade.stake}` +
           (st.signals_this_session != null ? ` · session signals ${st.signals_this_session}` : '')
         );
+        loadDashAccount(true);
       } else if (st.trade.error) {
         setTradeResultMsg(`Auto-trade failed: ${st.trade.error}`);
       }
@@ -673,7 +721,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
         await load();
       }
     }
-  }, [load]);
+  }, [load, loadDashAccount]);
 
   const pollWatchStatus = useCallback(() => {
     if (watchPollRef.current) clearInterval(watchPollRef.current);
@@ -697,13 +745,18 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
     }
   };
 
-  const trainedBarriers = Array.from(
-    new Set(
-      (models?.models || [])
-        .map(m => Number(m.barrier_distance))
-        .filter(v => Number.isFinite(v) && v > 0)
-        .map(v => String(v)),
-    ),
+  const trainedBarriers = (
+    models?.barriers?.length
+      ? models.barriers.map(String)
+      : Array.from(
+          new Set(
+            (models?.models || [])
+              .filter(m => m.loadable !== false)
+              .map(m => Number(m.barrier_distance))
+              .filter(v => Number.isFinite(v) && v > 0)
+              .map(v => String(v)),
+          ),
+        )
   );
 
   const openWatchPicker = (mode: WatchMode) => {
@@ -832,7 +885,44 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
             <h3>{pickerTitle}</h3>
             <p className="picker-sub">{pickerHelp}</p>
             <div className="form-group">
-              <label className="form-label">Trained model barrier</label>
+              <label className="form-label">Already trained models</label>
+              <div className="picker-model-list">
+                {(models?.models || []).length === 0 && (
+                  <div className="text-xs text-dim">No saved models yet — train first.</div>
+                )}
+                {(models?.models || []).map(m => {
+                  const b = String(m.barrier_distance ?? '');
+                  const selected = Math.abs(Number(b) - Number(pickModelBarrier)) < 1e-9;
+                  return (
+                    <button
+                      key={`${m.direction}-${m.barrier_distance}-${m.version_tag}`}
+                      type="button"
+                      className={`picker-model-row ${selected ? 'active' : ''}`}
+                      disabled={m.loadable === false}
+                      onClick={() => {
+                        setPickModelBarrier(b);
+                        if (pickerMode !== 'cross_barrier') setPickTradeBarrier(b);
+                      }}
+                    >
+                      <span className="font-mono">
+                        <strong>{(m.direction || '').toUpperCase()}</strong>
+                        {' · barrier '}{b}
+                        {m.duration_seconds != null ? ` · ${m.duration_seconds}s` : ''}
+                      </span>
+                      <span className="text-dim">
+                        {m.selected_pipeline || 'model'}
+                        {m.metrics?.auc_roc != null ? ` · AUC ${m.metrics.auc_roc.toFixed(3)}` : ''}
+                        {m.is_latest ? ' · latest' : ''}
+                        {m.loadable === false ? ' · missing files' : ''}
+                        {m.has_demonstrated_edge ? ' · Edge' : ' · No edge'}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Train / score barrier</label>
               <select
                 className="form-select"
                 value={pickModelBarrier}
@@ -844,10 +934,10 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
               >
                 {trainedBarriers.length === 0 && <option value={pickModelBarrier}>{pickModelBarrier}</option>}
                 {trainedBarriers.map(b => (
-                  <option key={b} value={b}>{b}</option>
+                  <option key={b} value={b}>barrier {b}</option>
                 ))}
               </select>
-              <div className="form-hint">From saved models (Train tab).</div>
+              <div className="form-hint">All barriers still on disk (not only the last train).</div>
             </div>
             <div className="form-group">
               <label className="form-label">Trade barrier (buy this)</label>
@@ -943,6 +1033,69 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
           <button id="btn-refresh-signals" className="btn btn-ghost" onClick={load} disabled={analyzeWatching}>
             {loading ? <Loader2 size={14} className="spin"/> : <RefreshCw size={14}/>} Refresh
           </button>
+        </div>
+      </div>
+
+      <div className="glass dash-account-bar">
+        <div className="dash-account-main">
+          <Database size={14} style={{ flexShrink: 0, marginTop: 2 }}/>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div className="flex items-center gap-2" style={{ flexWrap: 'wrap', marginBottom: 4 }}>
+              <strong className="text-sm">Trade account</strong>
+              {dashAccountLoading && <Loader2 size={12} className="spin"/>}
+              <button
+                type="button"
+                className="btn btn-ghost"
+                style={{ padding: '2px 8px', fontSize: 12 }}
+                onClick={() => loadDashAccount(true)}
+                disabled={dashAccountLoading}
+              >
+                Refresh
+              </button>
+            </div>
+            {!dashTokenConfigured && (
+              <div className="text-xs text-dim">
+                No trade token — set it in Setup to show balance / P&L here.
+              </div>
+            )}
+            {dashTokenConfigured && dashAccount?.ok && (
+              <div className="font-mono text-xs dash-account-grid">
+                <span>
+                  {dashAccount.account_type === 'demo'
+                    ? <span className="badge badge-amber">DEMO</span>
+                    : <span className="badge badge-green">REAL</span>}
+                  {' '}{dashAccount.loginid}
+                  {dashAccount.fullname ? ` · ${dashAccount.fullname}` : ''}
+                </span>
+                <span>
+                  Balance{' '}
+                  <strong className="text-primary">
+                    {(dashAccount.balance ?? 0).toFixed(2)} {dashAccount.currency || ''}
+                  </strong>
+                </span>
+                <span>
+                  Today{' '}
+                  <strong style={{ color: (dashAccount.today_profit ?? 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                    {(dashAccount.today_profit ?? 0) >= 0 ? '+' : ''}
+                    {(dashAccount.today_profit ?? 0).toFixed(2)}
+                  </strong>
+                  {' · '}Recent{' '}
+                  <strong style={{ color: (dashAccount.recent_profit ?? 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                    {(dashAccount.recent_profit ?? 0) >= 0 ? '+' : ''}
+                    {(dashAccount.recent_profit ?? 0).toFixed(2)}
+                  </strong>
+                  {' · '}W{dashAccount.recent_wins ?? 0}/L{dashAccount.recent_losses ?? 0}
+                </span>
+              </div>
+            )}
+            {dashTokenConfigured && !dashAccount?.ok && (
+              <div className="text-xs text-dim">
+                {dashAccount?.error
+                  ? `Could not load account: ${dashAccount.error}`
+                  : 'Loading account…'}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -1095,15 +1248,24 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
               </p>
             </>
           )}
+          {models?.trained && (
+            <p className="text-xs text-dim mb-2 font-mono">
+              Barriers on disk: {(models.barriers || []).join(', ') || '—'}
+            </p>
+          )}
           {models?.trained && models.models.map(m => (
-            <div key={`${m.direction}-${m.version_tag}`} className="model-row">
+            <div key={`${m.direction}-${m.barrier_distance}-${m.version_tag}`} className="model-row">
               <div>
                 <div className="text-sm font-medium">
-                  {(m.direction || '').toUpperCase()} · {m.selected_pipeline || 'pipeline'}
+                  {(m.direction || '').toUpperCase()} · barrier {m.barrier_distance}
+                  {m.is_latest ? <span className="badge badge-dim" style={{marginLeft:8}}>latest</span> : null}
                 </div>
                 <div className="text-xs text-dim mt-1 font-mono">
-                  {m.symbol} barrier={m.barrier_distance} · AUC {(m.metrics?.auc_roc ?? 0).toFixed(3)}
+                  {m.symbol} · {m.selected_pipeline || 'pipeline'}
+                  {m.duration_seconds != null ? ` · ${m.duration_seconds}s` : ''}
+                  {' · '}AUC {(m.metrics?.auc_roc ?? 0).toFixed(3)}
                   {m.version_tag ? ` · ${m.version_tag}` : ''}
+                  {m.loadable === false ? ' · files missing' : ''}
                 </div>
               </div>
               {m.has_demonstrated_edge
@@ -2580,18 +2742,15 @@ function SetupView({ online }: { online: boolean }) {
 
       <div className="glass" style={{ marginTop: '1.25rem' }}>
         <div className="section-header">
-          <h3 className="section-title"><AlertTriangle size={16}/>Auto-trade (optional)</h3>
+          <h3 className="section-title"><AlertTriangle size={16}/>Auto-trade</h3>
           {trade.token_configured
             ? <span className="badge badge-green">Token {trade.token_mask || 'set'}</span>
             : <span className="badge badge-dim">No token</span>}
         </div>
-        <div className="alert alert-warning" style={{ marginBottom: '1rem' }}>
-          <AlertTriangle size={14}/>
-          <div>
-            Enabling auto-trade can place <strong>real or demo</strong> One-Touch buys after Analyze / Force.
-            Use a token with trade scope. Stake is taken from the field below — not from quote display price.
-          </div>
-        </div>
+        <p className="text-xs text-dim mb-3">
+          Optional buy after Dashboard signals. Balance / P&amp;L live on the Dashboard.
+          Barriers &amp; confidence are picked there when you start Analyze / Force / Cross.
+        </p>
 
         <label className="text-sm flex items-center gap-2 mb-3" style={{ cursor: 'pointer' }}>
           <input
@@ -2599,7 +2758,7 @@ function SetupView({ online }: { online: boolean }) {
             checked={trade.auto_trade_enabled}
             onChange={e => setTrade(prev => ({ ...prev, auto_trade_enabled: e.target.checked }))}
           />
-          Enable auto-trade after Analyze / Force signal
+          Enable auto-trade (demo or real)
         </label>
 
         <div className="grid-2">
@@ -2613,21 +2772,6 @@ function SetupView({ online }: { online: boolean }) {
               value={trade.trade_stake}
               onChange={e => setTrade(prev => ({ ...prev, trade_stake: Number(e.target.value) }))}
             />
-            <div className="form-hint">Amount sent in proposal/buy (account currency).</div>
-          </div>
-          <div className="form-group">
-            <label className="form-label">Force min probability</label>
-            <select
-              className="form-select"
-              value={String(trade.force_min_probability)}
-              onChange={e => setTrade(prev => ({ ...prev, force_min_probability: Number(e.target.value) }))}
-            >
-              <option value="0.8">80%</option>
-              <option value="0.85">85%</option>
-              <option value="0.9">90%</option>
-              <option value="0.95">95%</option>
-            </select>
-            <div className="form-hint">Force watch: that direction needs candle confirm + this min p.</div>
           </div>
           <div className="form-group">
             <label className="form-label">Currency</label>
@@ -2639,181 +2783,28 @@ function SetupView({ online }: { online: boolean }) {
             />
           </div>
           <div className="form-group">
-            <label className="form-label">Custom force min (0.50–0.99)</label>
+            <label className="form-label">Deriv App ID</label>
             <input
-              type="number"
-              step="0.01"
-              min={0.5}
-              max={0.99}
+              type="text"
               className="form-input"
-              value={trade.force_min_probability}
-              onChange={e => setTrade(prev => ({ ...prev, force_min_probability: Number(e.target.value) }))}
-            />
-          </div>
-        </div>
-
-        <div className="alert alert-info" style={{ marginBottom: '1rem', marginTop: '0.5rem' }}>
-          <AlertTriangle size={14}/>
-          <div>
-            <strong>Cross-barrier filter</strong> — train/score a far barrier (e.g. 0.9). When that
-            model hits step confidence, buy the Setup barrier (e.g. 0.09). Not the same as Edge.
-          </div>
-        </div>
-
-        <div className="grid-2">
-          <div className="form-group">
-            <label className="form-label">Model barrier (train/score)</label>
-            <input
-              type="number"
-              step="0.01"
-              min={0.01}
-              className="form-input"
-              value={trade.model_barrier_distance}
-              onChange={e => setTrade(prev => ({ ...prev, model_barrier_distance: Number(e.target.value) }))}
-            />
-            <div className="form-hint">Must match a trained model (e.g. 0.9). Setup barrier is what you trade.</div>
-          </div>
-          <div className="form-group">
-            <label className="form-label">Step confidence</label>
-            <select
-              className="form-select"
-              value={String(trade.cross_barrier_min_probability)}
-              onChange={e => setTrade(prev => ({
-                ...prev,
-                cross_barrier_min_probability: Number(e.target.value),
-              }))}
-            >
-              <option value="0.8">80%</option>
-              <option value="0.85">85%</option>
-              <option value="0.9">90%</option>
-              <option value="0.95">95%</option>
-            </select>
-            <div className="form-hint">Model@{trade.model_barrier_distance} must reach this before trading Setup.</div>
-          </div>
-          <div className="form-group">
-            <label className="form-label">Custom step confidence (0.50–0.99)</label>
-            <input
-              type="number"
-              step="0.01"
-              min={0.5}
-              max={0.99}
-              className="form-input"
-              value={trade.cross_barrier_min_probability}
-              onChange={e => setTrade(prev => ({
-                ...prev,
-                cross_barrier_min_probability: Number(e.target.value),
-              }))}
+              placeholder="PAT app id"
+              value={trade.deriv_app_id}
+              onChange={e => setTrade(prev => ({ ...prev, deriv_app_id: e.target.value.trim() }))}
+              autoComplete="off"
             />
           </div>
           <div className="form-group">
-            <label className="text-sm flex items-center gap-2" style={{ cursor: 'pointer', marginTop: '1.5rem' }}>
-              <input
-                type="checkbox"
-                checked={trade.cross_barrier_require_candles}
-                onChange={e => setTrade(prev => ({
-                  ...prev,
-                  cross_barrier_require_candles: e.target.checked,
-                }))}
-              />
-              Also require candle confirm
-            </label>
+            <label className="form-label">API token (trade scope)</label>
+            <input
+              type="password"
+              className="form-input"
+              placeholder={trade.token_configured ? `Configured ${trade.token_mask || ''}` : 'Paste pat_…'}
+              value={tradeToken}
+              onChange={e => setTradeToken(e.target.value)}
+              autoComplete="off"
+            />
           </div>
         </div>
-
-        <div className="form-group">
-          <label className="form-label">Deriv App ID (from Apps dashboard)</label>
-          <input
-            type="text"
-            className="form-input"
-            placeholder="e.g. 34zF9oNWha3e4D1ZD2k9w"
-            value={trade.deriv_app_id}
-            onChange={e => setTrade(prev => ({ ...prev, deriv_app_id: e.target.value.trim() }))}
-            autoComplete="off"
-          />
-          <div className="form-hint">Must match the PAT app. Save trade prefs after changing.</div>
-        </div>
-
-        <div className="form-group">
-          <label className="form-label">Deriv API token (PAT — trade scope)</label>
-          <input
-            type="password"
-            className="form-input"
-            placeholder={trade.token_configured ? `Configured ${trade.token_mask || ''}` : 'Paste pat_… token — never shown again'}
-            value={tradeToken}
-            onChange={e => setTradeToken(e.target.value)}
-            autoComplete="off"
-          />
-          <div className="form-hint">Stored encrypted on the server. UI only shows last-4 mask.</div>
-        </div>
-
-        {trade.token_configured && (
-          <div className="alert alert-info" style={{ marginBottom: '1rem' }}>
-            <Database size={14}/>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div className="flex items-center gap-2" style={{ flexWrap: 'wrap', marginBottom: 6 }}>
-                <strong>Linked account</strong>
-                {accountLoading && <Loader2 size={12} className="spin"/>}
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  style={{ padding: '2px 8px', fontSize: 12 }}
-                  onClick={() => loadTradeAccount(true)}
-                  disabled={accountLoading || !online}
-                >
-                  Refresh
-                </button>
-              </div>
-              {tradeAccount?.ok ? (
-                <div className="font-mono text-xs" style={{ display: 'grid', gap: 4 }}>
-                  <div>
-                    {tradeAccount.account_type === 'demo'
-                      ? <span className="badge badge-amber">DEMO</span>
-                      : <span className="badge badge-green">REAL</span>}
-                    {' '}{tradeAccount.loginid}
-                    {tradeAccount.fullname ? ` · ${tradeAccount.fullname}` : ''}
-                  </div>
-                  <div>
-                    Balance:{' '}
-                    <strong className="text-primary">
-                      {(tradeAccount.balance ?? 0).toFixed(2)} {tradeAccount.currency || ''}
-                    </strong>
-                  </div>
-                  <div>
-                    Today P/L:{' '}
-                    <strong style={{ color: (tradeAccount.today_profit ?? 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                      {(tradeAccount.today_profit ?? 0) >= 0 ? '+' : ''}
-                      {(tradeAccount.today_profit ?? 0).toFixed(2)} {tradeAccount.currency || ''}
-                    </strong>
-                    {' · '}Recent P/L:{' '}
-                    <strong style={{ color: (tradeAccount.recent_profit ?? 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                      {(tradeAccount.recent_profit ?? 0) >= 0 ? '+' : ''}
-                      {(tradeAccount.recent_profit ?? 0).toFixed(2)}
-                    </strong>
-                    {' · '}trades {tradeAccount.recent_trades ?? 0}
-                    {' '}(W{tradeAccount.recent_wins ?? 0}/L{tradeAccount.recent_losses ?? 0})
-                  </div>
-                  {tradeAccount.email && <div className="text-dim">{tradeAccount.email}</div>}
-                </div>
-              ) : (
-                <div className="text-xs">
-                  {tradeAccount?.error
-                    ? (
-                      <>
-                        Could not load account: {tradeAccount.error}
-                        {(tradeAccount.error.includes('520') || tradeAccount.error.includes('WebSocket')) && (
-                          <div className="text-dim mt-1">
-                            Tip: HTTP 520 is Deriv’s edge (temporary). Click Refresh, or set DERIV_APP_ID in .env.prod
-                            to your app id from developers.deriv.com, then rebuild backend.
-                          </div>
-                        )}
-                      </>
-                    )
-                    : 'Save a valid trade-scope token to see balance and profit.'}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
 
         {tradeMsg && (
           <div className={`alert ${tradeOk ? 'alert-success' : 'alert-error'}`}>
@@ -2830,7 +2821,7 @@ function SetupView({ online }: { online: boolean }) {
             disabled={tradeSaving || !online}
           >
             {tradeSaving ? <Loader2 size={14} className="spin"/> : <ShieldCheck size={14}/>}
-            Save trade prefs
+            Save
           </button>
           <button
             id="btn-save-trade-token"

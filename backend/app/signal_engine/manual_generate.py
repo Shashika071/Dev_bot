@@ -54,6 +54,34 @@ def _load_latest_metadata(direction: str) -> Optional[dict]:
         return json.load(f)
 
 
+def _load_metadata_for_barrier(direction: str, barrier_distance: float) -> Optional[dict]:
+    """Newest loadable meta for direction+barrier (falls back to latest if it matches)."""
+    model_dir = settings.model_dir
+    want = float(barrier_distance)
+    candidates: list[tuple[str, dict]] = []
+    for path in glob.glob(os.path.join(model_dir, f"meta_{direction}_*.json")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                meta = json.load(f)
+            if abs(float(meta.get("barrier_distance", -1)) - want) > 1e-9:
+                continue
+            cal = meta.get("calibrator_path")
+            if not cal or not os.path.exists(cal):
+                continue
+            candidates.append((str(meta.get("created_at") or path), meta))
+        except Exception:
+            continue
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return candidates[0][1]
+    latest = _load_latest_metadata(direction)
+    if latest and abs(float(latest.get("barrier_distance", -1)) - want) <= 1e-9:
+        cal = latest.get("calibrator_path")
+        if cal and os.path.exists(cal):
+            return latest
+    return None
+
+
 def _metadata_compatible(meta: dict, conf, *, barrier_distance: Optional[float] = None) -> bool:
     if not meta:
         return False
@@ -95,11 +123,8 @@ def _latest_model_barrier(dirs: list[str], conf) -> Optional[float]:
 
 def _has_loadable_model(dirs: list[str], conf, barrier_distance: float) -> bool:
     for direction in dirs:
-        meta = _load_latest_metadata(direction)
-        if not meta or not _metadata_compatible(meta, conf, barrier_distance=barrier_distance):
-            continue
-        cal_path = meta.get("calibrator_path")
-        if cal_path and os.path.exists(cal_path):
+        meta = _load_metadata_for_barrier(direction, barrier_distance)
+        if meta and _metadata_compatible(meta, conf, barrier_distance=barrier_distance):
             return True
     return False
 
@@ -296,11 +321,8 @@ async def generate_manual_signal(
 
     loaded = 0
     for direction in dirs:
-        meta = _load_latest_metadata(direction)
+        meta = _load_metadata_for_barrier(direction, float(model_barrier))
         if not meta or not _metadata_compatible(meta, conf, barrier_distance=model_barrier):
-            continue
-        cal_path = meta.get("calibrator_path")
-        if not cal_path or not os.path.exists(cal_path):
             continue
         try:
             bundle = ModelPipelineBundle.load(meta)
