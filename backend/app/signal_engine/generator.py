@@ -107,12 +107,14 @@ class SignalGenerator:
         force_model_candles: bool = False,
         min_confidence: Optional[float] = None,
         min_margin_over_breakeven: Optional[float] = None,
+        require_candle_confirm: Optional[bool] = None,
     ) -> Optional[dict]:
         """
         confidence_override: allow signals without demonstrated edge, but only when
         calibrated probability clears min_confidence and margin over quote breakeven.
         force_model_candles: model calibrated p + candle confirm only (skip confluence/EV/edge).
         force_no_edge: legacy blind bypass (avoid for UI; tests only).
+        require_candle_confirm: override candle gate (None = default Force/ops behavior).
         """
         # Manual research analysis may run while auto-alerts are paused.
         ok, reason = await self.check_prerequisites(
@@ -171,10 +173,14 @@ class SignalGenerator:
             # Extra confirmation: 1m/5m candle structure must agree with direction
             candle_result = None
             candle_blocked = False
-            # Force model+candles always requires candles; standard respects ops toggle
-            require_candle = force_model_candles or (
-                bool(ops.get("require_candle_confirm", True)) and not force_no_edge
-            )
+            # Force model+candles always requires candles unless explicitly overridden
+            # (cross-barrier can score far barrier with step-p only).
+            if require_candle_confirm is not None:
+                require_candle = bool(require_candle_confirm)
+            else:
+                require_candle = force_model_candles or (
+                    bool(ops.get("require_candle_confirm", True)) and not force_no_edge
+                )
             if require_candle:
                 from app.strategies.candle_confirm import (
                     evaluate_candle_confirm,

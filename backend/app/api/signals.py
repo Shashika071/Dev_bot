@@ -165,15 +165,16 @@ async def generate_signal(
 ) -> dict:
     """
     Analyze live ticks/quotes with trained models, then emit a signal only if
-    gates pass. Modes:
+    gates pass.     Modes:
       - standard (default): confluence + candles + p + margin
       - force_model_candles: candles + min calibrated p only
+      - cross_barrier: score model_barrier; trade Setup barrier; step confidence
     Daily cap / cooldown still apply. Optional auto-trade if enabled in Setup.
     """
     body = payload or {}
     force = bool(body.get("force_no_edge", False))
     mode = str(body.get("mode") or "standard").strip().lower()
-    if mode not in ("standard", "force_model_candles"):
+    if mode not in ("standard", "force_model_candles", "cross_barrier"):
         mode = "standard"
     min_p = body.get("min_probability")
     min_probability = float(min_p) if min_p is not None else None
@@ -207,6 +208,8 @@ async def start_analyze_watch(payload: dict | None = None) -> dict:
     """Start continuous server-side watch until signal (or Stop / fatal)."""
     body = payload or {}
     mode = str(body.get("mode") or "standard").strip().lower()
+    if mode not in ("standard", "force_model_candles", "cross_barrier"):
+        mode = "standard"
     min_p = body.get("min_probability")
     min_probability = float(min_p) if min_p is not None else None
     return await analyze_watch.start(mode=mode, min_probability=min_probability)

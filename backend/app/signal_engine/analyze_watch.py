@@ -110,8 +110,12 @@ class AnalyzeWatchService:
         min_probability: Optional[float] = None,
     ) -> dict[str, Any]:
         mode = str(mode or "standard").strip().lower()
-        if mode not in ("standard", "force_model_candles"):
+        if mode not in ("standard", "force_model_candles", "cross_barrier"):
             mode = "standard"
+        mode_label = {
+            "force_model_candles": "Force",
+            "cross_barrier": "Cross-barrier",
+        }.get(mode, "Analyze")
 
         async with self._lock:
             if self._task and not self._task.done():
@@ -137,7 +141,7 @@ class AnalyzeWatchService:
                 "attempt": 0,
                 "started_at": now,
                 "updated_at": now,
-                "message": f"Watching ({'Force' if mode == 'force_model_candles' else 'Analyze'})…",
+                "message": f"Watching ({mode_label})…",
             }
             self._save_disk()
             self._task = asyncio.create_task(self._loop(), name="analyze-watch")
@@ -188,7 +192,10 @@ class AnalyzeWatchService:
     async def _loop(self) -> None:
         mode = self._state.get("mode") or "standard"
         min_probability = self._state.get("min_probability")
-        label = "Force" if mode == "force_model_candles" else "Analyze"
+        label = {
+            "force_model_candles": "Force",
+            "cross_barrier": "Cross-barrier",
+        }.get(mode, "Analyze")
         self._state["want_running"] = True
         self._save_disk()
 

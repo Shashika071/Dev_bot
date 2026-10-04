@@ -536,10 +536,13 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
   const [err, setErr]       = useState('');
   const [analyzeBusy, setAnalyzeBusy] = useState(false);
   const [analyzeWatching, setAnalyzeWatching] = useState(false);
-  const [watchMode, setWatchMode] = useState<'standard' | 'force_model_candles' | null>(null);
+  const [watchMode, setWatchMode] = useState<'standard' | 'force_model_candles' | 'cross_barrier' | null>(null);
   const [analyzeMsg, setAnalyzeMsg] = useState('');
   const [analyzeOk, setAnalyzeOk] = useState(false);
   const [forceMinP, setForceMinP] = useState(0.80);
+  const [crossEnabled, setCrossEnabled] = useState(false);
+  const [crossMinP, setCrossMinP] = useState(0.80);
+  const [modelBarrier, setModelBarrier] = useState(0.9);
   const [tradeResultMsg, setTradeResultMsg] = useState('');
   const [analysisRows, setAnalysisRows] = useState<Array<{
     direction: string; ok?: boolean; calibrated_probability?: number;
@@ -586,9 +589,21 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
-    api<{ force_min_probability?: number }>('/setup/trade-prefs')
+    api<{
+      force_min_probability?: number;
+      cross_barrier_enabled?: boolean;
+      cross_barrier_min_probability?: number;
+      model_barrier_distance?: number;
+    }>('/setup/trade-prefs')
       .then(r => {
         if (r.force_min_probability != null) setForceMinP(Number(r.force_min_probability));
+        setCrossEnabled(!!r.cross_barrier_enabled);
+        if (r.cross_barrier_min_probability != null) {
+          setCrossMinP(Number(r.cross_barrier_min_probability));
+        }
+        if (r.model_barrier_distance != null) {
+          setModelBarrier(Number(r.model_barrier_distance));
+        }
       })
       .catch(() => {});
   }, []);
@@ -613,8 +628,13 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
   };
 
   const applyWatchStatus = useCallback(async (st: WatchStatus, { reloadOnSignal = true } = {}) => {
-    const mode = (st.mode === 'force_model_candles' ? 'force_model_candles' : 'standard') as
-      'standard' | 'force_model_candles';
+    const mode = (
+      st.mode === 'force_model_candles'
+        ? 'force_model_candles'
+        : st.mode === 'cross_barrier'
+          ? 'cross_barrier'
+          : 'standard'
+    ) as 'standard' | 'force_model_candles' | 'cross_barrier';
     setAnalyzeMsg(st.message || st.reason || '');
     setAnalyzeOk(!!st.ok);
     setAnalysisRows(st.analysis || []);
@@ -672,7 +692,9 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
     }
   };
 
-  const analyzeGenerate = async (mode: 'standard' | 'force_model_candles' = 'standard') => {
+  const analyzeGenerate = async (
+    mode: 'standard' | 'force_model_candles' | 'cross_barrier' = 'standard',
+  ) => {
     // Server-side watch — survives tab close / re-login
     setAnalyzeBusy(true);
     setAnalyzeWatching(true);
@@ -685,7 +707,9 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
       const body =
         mode === 'force_model_candles'
           ? { mode: 'force_model_candles', min_probability: forceMinP }
-          : { mode: 'standard' };
+          : mode === 'cross_barrier'
+            ? { mode: 'cross_barrier', min_probability: crossMinP }
+            : { mode: 'standard' };
       const st = await api<WatchStatus>('/signals/watch/start', {
         method: 'POST',
         body: JSON.stringify(body),
@@ -773,6 +797,20 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
               ? 'Watching Force…'
               : `Force (${(forceMinP * 100).toFixed(0)}% + candles)`}
           </button>
+          {crossEnabled && (
+            <button
+              id="btn-cross-barrier-signal"
+              className="btn btn-ghost"
+              onClick={() => analyzeGenerate('cross_barrier')}
+              disabled={analyzeBusy || !models?.trained}
+              title={`Score model barrier ${modelBarrier} at p≥${(crossMinP * 100).toFixed(0)}%, then trade Setup barrier`}
+            >
+              {watchMode === 'cross_barrier' ? <Loader2 size={14} className="spin"/> : <Zap size={14}/>}
+              {watchMode === 'cross_barrier'
+                ? 'Watching Cross…'
+                : `Cross ${modelBarrier}→Setup (${(crossMinP * 100).toFixed(0)}%)`}
+            </button>
+          )}
           {analyzeWatching && (
             <button id="btn-stop-analyze-watch" className="btn btn-ghost" onClick={stopAnalyzeWatch}>
               <XCircle size={14}/> Stop
@@ -1907,6 +1945,10 @@ type TradePrefs = {
   force_min_probability: number;
   trade_currency: string;
   deriv_app_id: string;
+  cross_barrier_enabled: boolean;
+  model_barrier_distance: number;
+  cross_barrier_min_probability: number;
+  cross_barrier_require_candles: boolean;
   token_configured?: boolean;
   token_mask?: string | null;
 };
@@ -1935,6 +1977,10 @@ const DEFAULT_TRADE: TradePrefs = {
   force_min_probability: 0.8,
   trade_currency: 'USD',
   deriv_app_id: '',
+  cross_barrier_enabled: false,
+  model_barrier_distance: 0.9,
+  cross_barrier_min_probability: 0.8,
+  cross_barrier_require_candles: true,
   token_configured: false,
   token_mask: null,
 };
@@ -2008,6 +2054,10 @@ function SetupView({ online }: { online: boolean }) {
           force_min_probability: Number(r.force_min_probability ?? 0.8),
           trade_currency: r.trade_currency || 'USD',
           deriv_app_id: r.deriv_app_id || '',
+          cross_barrier_enabled: !!r.cross_barrier_enabled,
+          model_barrier_distance: Number(r.model_barrier_distance ?? 0.9),
+          cross_barrier_min_probability: Number(r.cross_barrier_min_probability ?? 0.8),
+          cross_barrier_require_candles: r.cross_barrier_require_candles !== false,
           token_configured: !!r.token_configured,
           token_mask: r.token_mask ?? null,
         });
@@ -2044,6 +2094,10 @@ function SetupView({ online }: { online: boolean }) {
           force_min_probability: trade.force_min_probability,
           trade_currency: trade.trade_currency,
           deriv_app_id: trade.deriv_app_id,
+          cross_barrier_enabled: trade.cross_barrier_enabled,
+          model_barrier_distance: trade.model_barrier_distance,
+          cross_barrier_min_probability: trade.cross_barrier_min_probability,
+          cross_barrier_require_candles: trade.cross_barrier_require_candles,
         }),
       });
       setTrade(prev => ({
@@ -2053,6 +2107,12 @@ function SetupView({ online }: { online: boolean }) {
         force_min_probability: Number(r.force_min_probability ?? prev.force_min_probability),
         trade_currency: r.trade_currency || prev.trade_currency,
         deriv_app_id: r.deriv_app_id || prev.deriv_app_id,
+        cross_barrier_enabled: !!r.cross_barrier_enabled,
+        model_barrier_distance: Number(r.model_barrier_distance ?? prev.model_barrier_distance),
+        cross_barrier_min_probability: Number(
+          r.cross_barrier_min_probability ?? prev.cross_barrier_min_probability,
+        ),
+        cross_barrier_require_candles: r.cross_barrier_require_candles !== false,
         token_configured: r.token_configured ?? prev.token_configured,
         token_mask: r.token_mask ?? prev.token_mask,
       }));
@@ -2465,6 +2525,83 @@ function SetupView({ online }: { online: boolean }) {
               value={trade.force_min_probability}
               onChange={e => setTrade(prev => ({ ...prev, force_min_probability: Number(e.target.value) }))}
             />
+          </div>
+        </div>
+
+        <div className="alert alert-info" style={{ marginBottom: '1rem', marginTop: '0.5rem' }}>
+          <AlertTriangle size={14}/>
+          <div>
+            <strong>Cross-barrier filter</strong> — train/score a far barrier (e.g. 0.9). When that
+            model hits step confidence, buy the Setup barrier (e.g. 0.09). Not the same as Edge.
+          </div>
+        </div>
+
+        <label className="text-sm flex items-center gap-2 mb-3" style={{ cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={trade.cross_barrier_enabled}
+            onChange={e => setTrade(prev => ({ ...prev, cross_barrier_enabled: e.target.checked }))}
+          />
+          Show Cross-barrier button on Dashboard
+        </label>
+
+        <div className="grid-2">
+          <div className="form-group">
+            <label className="form-label">Model barrier (train/score)</label>
+            <input
+              type="number"
+              step="0.01"
+              min={0.01}
+              className="form-input"
+              value={trade.model_barrier_distance}
+              onChange={e => setTrade(prev => ({ ...prev, model_barrier_distance: Number(e.target.value) }))}
+            />
+            <div className="form-hint">Must match a trained model (e.g. 0.9). Setup barrier is what you trade.</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Step confidence</label>
+            <select
+              className="form-select"
+              value={String(trade.cross_barrier_min_probability)}
+              onChange={e => setTrade(prev => ({
+                ...prev,
+                cross_barrier_min_probability: Number(e.target.value),
+              }))}
+            >
+              <option value="0.8">80%</option>
+              <option value="0.85">85%</option>
+              <option value="0.9">90%</option>
+              <option value="0.95">95%</option>
+            </select>
+            <div className="form-hint">Model@{trade.model_barrier_distance} must reach this before trading Setup.</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Custom step confidence (0.50–0.99)</label>
+            <input
+              type="number"
+              step="0.01"
+              min={0.5}
+              max={0.99}
+              className="form-input"
+              value={trade.cross_barrier_min_probability}
+              onChange={e => setTrade(prev => ({
+                ...prev,
+                cross_barrier_min_probability: Number(e.target.value),
+              }))}
+            />
+          </div>
+          <div className="form-group">
+            <label className="text-sm flex items-center gap-2" style={{ cursor: 'pointer', marginTop: '1.5rem' }}>
+              <input
+                type="checkbox"
+                checked={trade.cross_barrier_require_candles}
+                onChange={e => setTrade(prev => ({
+                  ...prev,
+                  cross_barrier_require_candles: e.target.checked,
+                }))}
+              />
+              Also require candle confirm
+            </label>
           </div>
         </div>
 

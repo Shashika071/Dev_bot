@@ -54,12 +54,17 @@ def _load_latest_metadata(direction: str) -> Optional[dict]:
         return json.load(f)
 
 
-def _metadata_compatible(meta: dict, conf) -> bool:
+def _metadata_compatible(meta: dict, conf, *, barrier_distance: Optional[float] = None) -> bool:
     if not meta:
         return False
     if meta.get("symbol") and meta["symbol"] != conf.symbol:
         return False
-    if abs(float(meta.get("barrier_distance", -1)) - float(barrier_magnitude(conf.barrier_input))) > 1e-9:
+    want = float(
+        barrier_distance
+        if barrier_distance is not None
+        else barrier_magnitude(conf.barrier_input)
+    )
+    if abs(float(meta.get("barrier_distance", -1)) - want) > 1e-9:
         return False
     if int(meta.get("duration_seconds", -1)) != int(conf.duration_seconds):
         return False
@@ -108,12 +113,40 @@ async def generate_manual_signal(
     Analyze live market with trained models.
     mode=standard: confluence + candles + p + margin (Analyze & Signal).
     mode=force_model_candles: candles + calibrated p only (skip confluence/EV/edge).
+    mode=cross_barrier: score model_barrier models/features; trade Setup barrier;
+      gate on step confidence (+ candles when enabled in trade prefs).
     Always returns per-direction analysis for the UI.
     """
-    force_model_candles = str(mode or "standard").strip().lower() == "force_model_candles"
+    mode_norm = str(mode or "standard").strip().lower()
+    force_model_candles = mode_norm == "force_model_candles"
+    cross_barrier = mode_norm == "cross_barrier"
+    # Cross-barrier reuses Force gates (skip confluence/EV/edge) after scoring far barrier.
+    use_force_gates = force_model_candles or cross_barrier
+
+    from app.ops_prefs import load_ops_prefs
+    from app.trade_prefs import load_trade_prefs
+
+    ops = load_ops_prefs()
+    trade = load_trade_prefs()
+
     conf = await get_latest_confirmed_settings(session)
     if not conf:
         return {"ok": False, "reason": "Confirm contract settings in Setup first.", "analysis": []}
+
+    trade_barrier = float(barrier_magnitude(conf.barrier_input))
+    if cross_barrier:
+        model_barrier = float(trade.get("model_barrier_distance", 0.9))
+        if abs(model_barrier - trade_barrier) < 1e-9:
+            return {
+                "ok": False,
+                "reason": (
+                    "Cross-barrier needs a different model barrier than Setup. "
+                    f"Both are {trade_barrier:g}. Train at e.g. 0.9 and keep Setup at 0.09."
+                ),
+                "analysis": [],
+            }
+    else:
+        model_barrier = trade_barrier
 
     dirs = configured_directions(conf.barrier_direction)
     strategies = StrategyRegistry()
@@ -128,7 +161,7 @@ async def generate_manual_signal(
     loaded = 0
     for direction in dirs:
         meta = _load_latest_metadata(direction)
-        if not meta or not _metadata_compatible(meta, conf):
+        if not meta or not _metadata_compatible(meta, conf, barrier_distance=model_barrier):
             continue
         cal_path = meta.get("calibrator_path")
         if not cal_path or not os.path.exists(cal_path):
@@ -149,6 +182,16 @@ async def generate_manual_signal(
             logger.error("manual_model_load_failed", direction=direction, error=str(e))
 
     if loaded == 0:
+        if cross_barrier:
+            return {
+                "ok": False,
+                "reason": (
+                    f"No trained model for model barrier {model_barrier:g} "
+                    f"(symbol {conf.symbol}, duration {conf.duration_seconds}s). "
+                    f"Train at {model_barrier:g} first; Setup trade barrier stays {trade_barrier:g}."
+                ),
+                "analysis": [],
+            }
         return {"ok": False, "reason": "No compatible trained model found. Train first.", "analysis": []}
 
     result = await session.execute(
@@ -168,7 +211,9 @@ async def generate_manual_signal(
     df = pd.DataFrame(
         [{"epoch": t.epoch, "tick_time": t.tick_time, "quote": t.quote} for t in reversed(ticks)]
     )
-    barrier_dist = float(barrier_magnitude(conf.barrier_input))
+    # Features / model score use model_barrier; quotes + signal use Setup (trade) barrier.
+    feature_barrier = model_barrier
+    barrier_dist = trade_barrier
     current_price = float(df.iloc[-1]["quote"])
     last_tick_age = time.time() - float(df.iloc[-1]["epoch"])
 
@@ -178,13 +223,13 @@ async def generate_manual_signal(
     for direction in dirs:
         features_by_direction[direction] = build_features(
             df,
-            barrier_distance=barrier_dist,
+            barrier_distance=feature_barrier,
             barrier_direction=direction,
         )
         sequences_by_direction[direction] = build_price_sequence(
             df,
             entry_epoch=entry_epoch,
-            barrier_distance=barrier_dist,
+            barrier_distance=feature_barrier,
             barrier_direction=direction,
             duration_seconds=int(conf.duration_seconds),
             seq_len=settings.lstm_seq_len,
@@ -220,12 +265,15 @@ async def generate_manual_signal(
     if not quotes_by_direction:
         return {"ok": False, "reason": "Could not fetch live contract quotes from Deriv.", "analysis": []}
 
-    from app.ops_prefs import load_ops_prefs
-    from app.trade_prefs import load_trade_prefs
-
-    ops = load_ops_prefs()
-    trade = load_trade_prefs()
-    if force_model_candles:
+    require_candles_cross = bool(trade.get("cross_barrier_require_candles", True))
+    if cross_barrier:
+        min_conf = (
+            float(min_probability)
+            if min_probability is not None
+            else float(trade.get("cross_barrier_min_probability", 0.80))
+        )
+        min_margin = 0.0
+    elif force_model_candles:
         min_conf = (
             float(min_probability)
             if min_probability is not None
@@ -240,6 +288,9 @@ async def generate_manual_signal(
         )
         min_margin = float(ops["manual_min_margin_over_breakeven"])
     analysis: list[dict] = []
+    mode_label = (
+        "cross_barrier" if cross_barrier else ("force_model_candles" if force_model_candles else "standard")
+    )
 
     for direction in dirs:
         pack = generator._models.get(direction)
@@ -265,7 +316,7 @@ async def generate_manual_signal(
         margin = cal - breakeven
         confluence_strategy = generator.strategies.get_strategy("touch_confluence")
         confluence = (
-            confluence_strategy.evaluate(feat_df, current_price, barrier_dist)
+            confluence_strategy.evaluate(feat_df, current_price, feature_barrier)
             if confluence_strategy is not None
             else None
         )
@@ -273,9 +324,12 @@ async def generate_manual_signal(
 
         from app.strategies.candle_confirm import evaluate_candle_confirm
 
-        require_candle = force_model_candles or (
-            bool(ops.get("require_candle_confirm", True)) and not force_no_edge
-        )
+        if cross_barrier:
+            require_candle = require_candles_cross
+        else:
+            require_candle = force_model_candles or (
+                bool(ops.get("require_candle_confirm", True)) and not force_no_edge
+            )
         candle = evaluate_candle_confirm(
             df,
             direction,
@@ -284,7 +338,7 @@ async def generate_manual_signal(
         )
         candle_met = bool(candle.confirmed) if require_candle else True
 
-        if force_model_candles:
+        if use_force_gates:
             meets = cal >= min_conf and candle_met
         else:
             meets = (
@@ -312,13 +366,17 @@ async def generate_manual_signal(
             "candle_confirm_score": candle.score,
             "candle_confirm_explanation": candle.explanation,
             "spot": current_price,
-            "mode": "force_model_candles" if force_model_candles else "standard",
+            "mode": mode_label,
+            "model_barrier": feature_barrier,
+            "trade_barrier": barrier_dist,
         })
 
     thresholds = {
         "min_confidence": min_conf,
         "min_margin_over_breakeven": min_margin,
-        "mode": "force_model_candles" if force_model_candles else "standard",
+        "mode": mode_label,
+        "model_barrier": feature_barrier,
+        "trade_barrier": barrier_dist,
     }
 
     can_issue, cap_reason = await DailyCapManager().can_issue_signal(session, conf.symbol)
@@ -342,12 +400,27 @@ async def generate_manual_signal(
         features_by_direction=features_by_direction,
         sequences_by_direction=sequences_by_direction,
         last_tick_age_seconds=last_tick_age,
-        force_no_edge=force_no_edge and not force_model_candles,
-        confidence_override=(not force_no_edge and not force_model_candles),
-        force_model_candles=force_model_candles,
+        force_no_edge=force_no_edge and not use_force_gates,
+        confidence_override=(not force_no_edge and not use_force_gates),
+        force_model_candles=use_force_gates,
         min_confidence=min_conf,
         min_margin_over_breakeven=min_margin,
+        require_candle_confirm=(
+            require_candles_cross if cross_barrier else (True if force_model_candles else None)
+        ),
     )
+
+    if signal_data and cross_barrier:
+        signal_data["cross_barrier"] = True
+        signal_data["model_barrier"] = feature_barrier
+        signal_data["trade_barrier"] = barrier_dist
+        expl = str(signal_data.get("explanation") or "")
+        prefix = (
+            f"CROSS-BARRIER filter: model@{feature_barrier:g} p≥{min_conf*100:.0f}% "
+            f"→ trade Setup barrier {barrier_dist:g}. "
+        )
+        if not expl.startswith("CROSS-BARRIER"):
+            signal_data["explanation"] = prefix + expl
 
     if not signal_data:
         best_line = ""
@@ -362,7 +435,14 @@ async def generate_manual_signal(
                 f"confluence={'yes' if best.get('confluence_met') else 'no'}, "
                 f"candles={'yes' if best.get('candle_confirm_met') else 'no'})."
             )
-        if force_model_candles:
+        if cross_barrier:
+            candle_bit = " + candle confirm" if require_candles_cross else ""
+            reason = (
+                f"Cross-barrier — no setup. Need model@{feature_barrier:g} "
+                f"p≥{min_conf*100:.0f}%{candle_bit}, then trade Setup {barrier_dist:g}."
+                f"{best_line}"
+            )
+        elif force_model_candles:
             reason = (
                 f"Force analyze — no setup. Need candle confirm and "
                 f"p≥{min_conf*100:.0f}% (skips confluence/EV/edge)."
@@ -390,8 +470,9 @@ async def generate_manual_signal(
         "analysis": analysis,
         "thresholds": thresholds,
         "current_price": current_price,
-        "force_no_edge": force_no_edge and not force_model_candles,
+        "force_no_edge": force_no_edge and not use_force_gates,
         "force_model_candles": force_model_candles,
-        "confidence_override": not force_no_edge and not force_model_candles,
-        "mode": "force_model_candles" if force_model_candles else "standard",
+        "cross_barrier": cross_barrier,
+        "confidence_override": not force_no_edge and not use_force_gates,
+        "mode": mode_label,
     }

@@ -120,6 +120,10 @@ class TradePrefsBody(BaseModel):
     force_min_probability: float = Field(0.80, ge=0.50, le=0.99)
     trade_currency: str = Field("USD", min_length=1, max_length=8)
     deriv_app_id: str = Field("", max_length=64)
+    cross_barrier_enabled: bool = False
+    model_barrier_distance: float = Field(0.9, ge=0.01, le=50.0)
+    cross_barrier_min_probability: float = Field(0.80, ge=0.50, le=0.99)
+    cross_barrier_require_candles: bool = True
 
 
 class TradeTokenBody(BaseModel):
@@ -142,6 +146,10 @@ async def get_trade_prefs() -> dict:
             "force_min_probability": "Force (model + candles) mode min calibrated probability (e.g. 0.8 = 80%).",
             "trade_currency": "Currency for proposal (usually USD).",
             "deriv_app_id": "App ID from developers.deriv.com → Apps (must match your PAT app).",
+            "cross_barrier_enabled": "Show Cross-barrier watch on Dashboard (score far model, trade Setup barrier).",
+            "model_barrier_distance": "Barrier the trained model used (e.g. 0.9). Features/score use this.",
+            "cross_barrier_min_probability": "Step confidence on the model barrier before trading Setup (e.g. 0.8 = 80%).",
+            "cross_barrier_require_candles": "When on, Cross-barrier also needs 1m/5m candle confirm on the trade direction.",
         },
     }
 
