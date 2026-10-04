@@ -733,27 +733,33 @@ select {
   gap: 0.35rem 1.1rem;
 }
 
-/* Dashboard Analyze/Force/Cross picker */
+/* Dashboard Analyze/Force/Cross picker — portaled to document.body */
 .picker-overlay {
   position: fixed;
-  inset: 0;
-  z-index: 80;
-  background: rgba(0, 0, 0, 0.55);
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.62);
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 1rem;
+  margin: 0;
 }
 .picker-modal {
-  width: min(480px, 100%);
+  width: min(480px, calc(100vw - 2rem));
   max-height: min(86vh, 720px);
   display: flex;
   flex-direction: column;
   padding: 1.1rem 1.25rem 0.9rem;
   border-radius: 12px;
-  background: var(--bg-card, #121820);
-  border: 1px solid var(--border);
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+  background: rgba(8, 18, 36, 0.98);
+  border: 1px solid var(--border-bright);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
 }
 .picker-modal-body {
   flex: 1 1 auto;
@@ -971,11 +977,12 @@ select {
 }
 
 /* ── Fade-in ─────────────────────────────────────────── */
+/* Avoid leaving transform on .app-shell — that traps position:fixed popups. */
 .fade-in { animation: fadeUp 0.4s ease both; }
 
 @keyframes fadeUp {
-  from { opacity: 0; transform: translateY(12px); }
-  to   { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
 
 /* ── Glow number ─────────────────────────────────────── */

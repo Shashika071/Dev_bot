@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Activity, ShieldCheck, Zap, AlertTriangle, Settings,
   RefreshCw, BarChart2, Brain, CheckCircle, XCircle,
@@ -905,9 +906,9 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
 
   return (
     <>
-      {pickerOpen && (
+      {pickerOpen && createPortal(
         <div className="picker-overlay" onClick={() => setPickerOpen(false)}>
-          <div className="picker-modal glass" onClick={e => e.stopPropagation()}>
+          <div className="picker-modal" onClick={e => e.stopPropagation()}>
             <div className="picker-modal-body">
             <h3>{pickerTitle}</h3>
             <p className="picker-sub">{pickerHelp}</p>
@@ -1020,7 +1021,8 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
       {/* Header */}
