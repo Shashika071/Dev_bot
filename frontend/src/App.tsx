@@ -2292,21 +2292,16 @@ function SetupView({ online }: { online: boolean }) {
   const [tradeSaving, setTradeSaving] = useState(false);
   const [tradeMsg, setTradeMsg] = useState('');
   const [tradeOk, setTradeOk] = useState(false);
-  const [tradeAccount, setTradeAccount] = useState<TradeAccount | null>(null);
-  const [accountLoading, setAccountLoading] = useState(false);
 
-  const loadTradeAccount = async (refresh = true) => {
-    setAccountLoading(true);
+  const syncTradeCurrency = async (refresh = true) => {
     try {
       const a = await api<TradeAccount>(`/setup/trade-account?refresh=${refresh ? 'true' : 'false'}`);
-      setTradeAccount(a);
       if (a.ok && a.currency) {
         setTrade(prev => ({ ...prev, trade_currency: a.currency || prev.trade_currency }));
       }
     } catch {
-      setTradeAccount(null);
+      /* Dashboard shows account details */
     }
-    setAccountLoading(false);
   };
 
   useEffect(() => {
@@ -2347,7 +2342,7 @@ function SetupView({ online }: { online: boolean }) {
           token_configured: !!r.token_configured,
           token_mask: r.token_mask ?? null,
         });
-        if (r.token_configured) loadTradeAccount(true);
+        if (r.token_configured) syncTradeCurrency(true);
       })
       .catch(() => {});
   }, []);
@@ -2428,13 +2423,12 @@ function SetupView({ online }: { online: boolean }) {
         token_mask: r.token_mask ?? null,
         trade_currency: r.account?.currency || prev.trade_currency,
       }));
-      if (r.account) setTradeAccount(r.account);
       setTradeToken('');
       setTradeOk(true);
       if (r.account?.ok) {
         setTradeMsg(
           `✓ Token saved · ${r.account.account_type?.toUpperCase()} ${r.account.loginid} · ` +
-          `balance ${r.account.balance} ${r.account.currency}`
+          `balance ${r.account.balance} ${r.account.currency} (also on Dashboard)`
         );
       } else {
         setTradeMsg(`✓ Token saved${r.account?.error ? ` · account lookup: ${r.account.error}` : ''}`);
@@ -2451,7 +2445,6 @@ function SetupView({ online }: { online: boolean }) {
     try {
       await api('/setup/trade-token', { method: 'DELETE' });
       setTrade(prev => ({ ...prev, token_configured: false, token_mask: null, auto_trade_enabled: false }));
-      setTradeAccount(null);
       setTradeOk(true);
       setTradeMsg('✓ Token cleared. Auto-trade should stay off until you set a new token.');
     } catch (e: any) {
