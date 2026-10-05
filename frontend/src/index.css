@@ -732,6 +732,13 @@ select {
   flex-wrap: wrap;
   gap: 0.35rem 1.1rem;
 }
+.tick-delete-box {
+  padding: 0.85rem 1rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+}
+.tick-delete-box .form-group { margin-bottom: 0.65rem; }
 .dash-trade-stats {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));

@@ -6,13 +6,14 @@ Fetches stored tick data from the database and runs the full training orchestrat
 import asyncio
 import json
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
 import structlog
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -21,6 +22,7 @@ from app.features.tick_loader import load_ticks_dataframe, tick_coverage_stats
 from app.ml.registry import save_and_activate_model_version
 from app.ml.trainer import TrainingOrchestrator
 from app.models.quote import Quote
+from app.models.tick import Tick
 from app.collector.http_history import download_and_store_ticks
 
 router = APIRouter(prefix="/train", tags=["training"])
@@ -202,8 +204,8 @@ async def list_trained_models() -> dict:
         except Exception:
             continue
 
-    # Keep newest meta per (direction, barrier, symbol, duration)
-    best: dict[tuple, dict] = {}
+    # Full history: every meta_* version (so old trains can be deleted too)
+    by_tag: dict[str, dict] = {}
     for path in sorted(glob.glob(os.path.join(model_dir, "meta_*.json"))):
         try:
             with open(path, encoding="utf-8") as f:
@@ -211,48 +213,39 @@ async def list_trained_models() -> dict:
         except Exception:
             continue
         try:
-            barrier = float(meta.get("barrier_distance"))
+            float(meta.get("barrier_distance"))
         except (TypeError, ValueError):
             continue
-        key = (
-            str(meta.get("direction") or ""),
-            round(barrier, 6),
-            str(meta.get("symbol") or ""),
-            int(meta.get("duration_seconds") or 0),
-        )
-        tag = str(meta.get("version_tag") or "")
+        tag = str(meta.get("version_tag") or path)
         row = _model_row_from_meta(
             meta, is_latest=tag in latest_tags, meta_path=path
         )
-        prev = best.get(key)
+        prev = by_tag.get(tag)
         if prev is None or str(row.get("created_at") or "") >= str(prev.get("created_at") or ""):
-            best[key] = row
+            by_tag[tag] = row
 
-    # Fallback: latest_* only (older deploys / missing meta files)
-    if not best:
-        for path in sorted(glob.glob(os.path.join(model_dir, "latest_*.json"))):
-            try:
-                with open(path, encoding="utf-8") as f:
-                    meta = json.load(f)
-            except Exception:
-                continue
-            models_fallback = _model_row_from_meta(
-                meta, is_latest=True, meta_path=path
-            )
-            key = (
-                str(models_fallback.get("direction") or ""),
-                round(float(models_fallback.get("barrier_distance") or 0), 6),
-                str(models_fallback.get("symbol") or ""),
-                int(models_fallback.get("duration_seconds") or 0),
-            )
-            best[key] = models_fallback
+    # Include latest_* if its tag isn't already listed (orphan latest pointer)
+    for path in sorted(glob.glob(os.path.join(model_dir, "latest_*.json"))):
+        try:
+            with open(path, encoding="utf-8") as f:
+                meta = json.load(f)
+        except Exception:
+            continue
+        tag = str(meta.get("version_tag") or "")
+        if not tag or tag in by_tag:
+            if tag and tag in by_tag:
+                by_tag[tag]["is_latest"] = True
+            continue
+        by_tag[tag] = _model_row_from_meta(meta, is_latest=True, meta_path=path)
 
     models = sorted(
-        best.values(),
+        by_tag.values(),
         key=lambda m: (
             str(m.get("symbol") or ""),
             float(m.get("barrier_distance") or 0),
             str(m.get("direction") or ""),
+            0 if m.get("is_latest") else 1,
+            str(m.get("created_at") or ""),
         ),
     )
     barriers = sorted(
@@ -275,8 +268,8 @@ async def list_trained_models() -> dict:
 @router.delete("/models/{version_tag}")
 async def delete_trained_model(version_tag: str) -> dict:
     """
-    Delete one trained model version (artefacts + meta).
-    If it was latest_{direction}, retarget latest to the next newest meta.
+    Delete one trained model version (artefacts + all meta/latest pointers).
+    Works for history rows and the current latest_* model.
     """
     import glob
     import json
@@ -288,52 +281,62 @@ async def delete_trained_model(version_tag: str) -> dict:
         raise HTTPException(status_code=400, detail="Invalid version_tag")
 
     model_dir = settings.model_dir
-    meta_path = None
-    meta = None
+    matches: list[tuple[str, dict]] = []
     for path in glob.glob(os.path.join(model_dir, "meta_*.json")):
         try:
             with open(path, encoding="utf-8") as f:
                 candidate = json.load(f)
             if str(candidate.get("version_tag") or "") == tag:
-                meta_path = path
-                meta = candidate
-                break
+                matches.append((path, candidate))
+        except Exception:
+            continue
+    for path in glob.glob(os.path.join(model_dir, "latest_*.json")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                candidate = json.load(f)
+            if str(candidate.get("version_tag") or "") == tag:
+                matches.append((path, candidate))
         except Exception:
             continue
 
-    if meta is None:
-        # Allow deleting a latest-only entry
-        for path in glob.glob(os.path.join(model_dir, "latest_*.json")):
-            try:
-                with open(path, encoding="utf-8") as f:
-                    candidate = json.load(f)
-                if str(candidate.get("version_tag") or "") == tag:
-                    meta_path = path
-                    meta = candidate
-                    break
-            except Exception:
-                continue
-
-    if meta is None:
+    if not matches:
         raise HTTPException(status_code=404, detail=f"Model {tag} not found")
 
+    meta = matches[0][1]
     removed: list[str] = []
-    paths = meta.get("paths") or {}
-    for p in list(paths.values()) + [
-        meta.get("model_path"),
-        meta.get("calibrator_path"),
-        meta_path,
-    ]:
+    # Collect artefact paths from every matching json (meta + latest copies)
+    artefact_paths: set[str] = set()
+    for _, m in matches:
+        for p in (m.get("paths") or {}).values():
+            if p:
+                artefact_paths.add(str(p))
+        for key in ("model_path", "calibrator_path"):
+            if m.get(key):
+                artefact_paths.add(str(m[key]))
+    for p in artefact_paths:
         if _safe_unlink(p):
-            removed.append(str(p))
+            removed.append(p)
 
-    # Matching report file if present
     direction = str(meta.get("direction") or "")
     ts = str(meta.get("timestamp") or "")
     if direction and ts:
         report = os.path.join(model_dir, f"report_{direction}_{ts}.json")
         if _safe_unlink(report):
             removed.append(report)
+
+    # Remove every meta_/latest_ file that still points at this version
+    for path, _ in matches:
+        if _safe_unlink(path):
+            removed.append(path)
+    # latest_* may still exist if we only matched meta first — wipe by tag again
+    for path in glob.glob(os.path.join(model_dir, "latest_*.json")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                candidate = json.load(f)
+            if str(candidate.get("version_tag") or "") == tag and _safe_unlink(path):
+                removed.append(path)
+        except Exception:
+            continue
 
     if direction:
         _retarget_latest(direction, model_dir)
@@ -348,10 +351,162 @@ async def delete_trained_model(version_tag: str) -> dict:
     }
 
 
+def _format_bytes(n: int) -> str:
+    """Human-readable size (B / KB / MB / GB)."""
+    size = float(max(0, int(n)))
+    for unit, div in (("GB", 1024**3), ("MB", 1024**2), ("KB", 1024)):
+        if size >= div:
+            val = size / div
+            return f"{val:.2f} {unit}" if val < 10 or unit == "GB" else f"{val:.1f} {unit}"
+    return f"{int(size)} B"
+
+
+async def _ticks_storage_bytes(db: AsyncSession) -> dict:
+    """Postgres on-disk size for ticks table + indexes (0 if unavailable)."""
+    from sqlalchemy import text
+
+    try:
+        result = await db.execute(
+            text(
+                "SELECT "
+                "pg_total_relation_size('ticks')::bigint AS total_bytes, "
+                "pg_relation_size('ticks')::bigint AS table_bytes, "
+                "pg_indexes_size('ticks')::bigint AS index_bytes"
+            )
+        )
+        row = result.mappings().first()
+        if not row:
+            return {
+                "storage_bytes": 0,
+                "storage_table_bytes": 0,
+                "storage_index_bytes": 0,
+                "storage_human": "0 B",
+            }
+        total = int(row["total_bytes"] or 0)
+        return {
+            "storage_bytes": total,
+            "storage_table_bytes": int(row["table_bytes"] or 0),
+            "storage_index_bytes": int(row["index_bytes"] or 0),
+            "storage_human": _format_bytes(total),
+        }
+    except Exception:
+        return {
+            "storage_bytes": None,
+            "storage_table_bytes": None,
+            "storage_index_bytes": None,
+            "storage_human": None,
+        }
+
+
+class TickDeleteBody(BaseModel):
+    """Delete ticks for a symbol in an inclusive calendar date range (UTC days)."""
+
+    symbol: str = Field("R_100", min_length=1, max_length=32)
+    from_date: str = Field(..., description="YYYY-MM-DD (UTC day start, inclusive)")
+    to_date: str = Field(..., description="YYYY-MM-DD (UTC day end, inclusive)")
+    dry_run: bool = Field(False, description="If true, only count matching ticks")
+
+
+def _parse_utc_day(value: str, *, end_of_day: bool = False) -> datetime:
+    raw = str(value or "").strip()[:10]
+    try:
+        day = datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid date '{value}' — use YYYY-MM-DD") from e
+    if end_of_day:
+        # Inclusive end: keep ticks until next day 00:00 exclusive
+        from datetime import timedelta
+
+        return day + timedelta(days=1)
+    return day
+
+
+@router.post("/ticks/delete")
+async def delete_ticks(body: TickDeleteBody, db: AsyncSession = Depends(get_db)) -> dict:
+    """
+    Delete stored ticks for a symbol between from_date and to_date (UTC calendar days).
+    Use dry_run=true first to see how many rows would be removed.
+    """
+    symbol = str(body.symbol or "R_100").strip()
+    start = _parse_utc_day(body.from_date, end_of_day=False)
+    end_exclusive = _parse_utc_day(body.to_date, end_of_day=True)
+    if end_exclusive <= start:
+        raise HTTPException(status_code=400, detail="to_date must be on or after from_date")
+
+    # Safety: refuse absurd ranges that look like typos ( > 366 days )
+    span_days = (end_exclusive - start).total_seconds() / 86400.0
+    if span_days > 366:
+        raise HTTPException(status_code=400, detail="Date range too large (max 366 days). Split the delete.")
+
+    count_q = await db.execute(
+        select(func.count())
+        .select_from(Tick)
+        .where(Tick.symbol == symbol)
+        .where(Tick.tick_time >= start)
+        .where(Tick.tick_time < end_exclusive)
+    )
+    match_count = int(count_q.scalar_one() or 0)
+
+    if body.dry_run:
+        return {
+            "ok": True,
+            "dry_run": True,
+            "symbol": symbol,
+            "from_date": body.from_date[:10],
+            "to_date": body.to_date[:10],
+            "match_count": match_count,
+            "deleted": 0,
+            "message": f"{match_count:,} ticks would be deleted for {symbol}.",
+        }
+
+    if match_count == 0:
+        storage = await _ticks_storage_bytes(db)
+        return {
+            "ok": True,
+            "dry_run": False,
+            "symbol": symbol,
+            "from_date": body.from_date[:10],
+            "to_date": body.to_date[:10],
+            "match_count": 0,
+            "deleted": 0,
+            "message": "No ticks in that range.",
+            **storage,
+        }
+
+    result = await db.execute(
+        delete(Tick)
+        .where(Tick.symbol == symbol)
+        .where(Tick.tick_time >= start)
+        .where(Tick.tick_time < end_exclusive)
+    )
+    await db.commit()
+    deleted = int(result.rowcount or 0)
+    storage = await _ticks_storage_bytes(db)
+    logger.info(
+        "ticks_deleted_by_range",
+        symbol=symbol,
+        from_date=body.from_date[:10],
+        to_date=body.to_date[:10],
+        deleted=deleted,
+    )
+    return {
+        "ok": True,
+        "dry_run": False,
+        "symbol": symbol,
+        "from_date": body.from_date[:10],
+        "to_date": body.to_date[:10],
+        "match_count": match_count,
+        "deleted": deleted,
+        "message": f"Deleted {deleted:,} ticks for {symbol} ({body.from_date[:10]} → {body.to_date[:10]} UTC).",
+        **storage,
+    }
+
+
 @router.get("/data-info")
 async def data_info(db: AsyncSession = Depends(get_db)) -> dict:
     """Check how many ticks are available in the database for training."""
     coverage = await tick_coverage_stats(db)
+    storage = await _ticks_storage_bytes(db)
     symbols_raw = coverage.get("symbols") or []
     if not symbols_raw:
         return {
@@ -361,6 +516,7 @@ async def data_info(db: AsyncSession = Depends(get_db)) -> dict:
                 "starts saving ticks, then return here to train."
             ),
             "symbols": [],
+            **storage,
         }
 
     # Non-overlapping sample spacing is clamped to ≥ contract duration in trainer.
@@ -407,6 +563,7 @@ async def data_info(db: AsyncSession = Depends(get_db)) -> dict:
     return {
         "has_data": total_ticks > 0,
         "total_ticks": total_ticks,
+        **storage,
         "min_needed": 1000,
         "min_labels_required": min_labels,
         "min_span_hours": round(min_span_seconds / 3600.0, 1),

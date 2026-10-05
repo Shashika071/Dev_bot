@@ -128,6 +128,10 @@ interface TrainResult {
 interface DataInfo {
   has_data: boolean;
   total_ticks?: number;
+  storage_bytes?: number | null;
+  storage_table_bytes?: number | null;
+  storage_index_bytes?: number | null;
+  storage_human?: string | null;
   ready?: boolean;
   message?: string;
   note?: string;
@@ -561,6 +565,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
   const [sigs, setSigs]     = useState<SigData[]>([]);
   const [models, setModels] = useState<ModelsResponse|null>(null);
   const [dbTicks, setDbTicks] = useState<number|null>(null);
+  const [dbStorage, setDbStorage] = useState<string | null>(null);
   const [chart, setChart]   = useState<ChartTicks|null>(null);
   const [candles, setCandles] = useState<ChartCandles|null>(null);
   const [tf, setTf]         = useState<ChartTf>('1m');
@@ -612,6 +617,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
       setSigs(s);
       setModels(m);
       setDbTicks(d.total_ticks ?? 0);
+      setDbStorage(d.storage_human || null);
       setPerf(p);
     } catch (e:any) { setErr(e.message); }
     finally { setLoad(false); }
@@ -787,11 +793,12 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
   const deleteTrainedModel = async (m: ModelInfo) => {
     const tag = m.version_tag;
     if (!tag) return;
-    const label = `${(m.direction || '').toUpperCase()} barrier ${m.barrier_distance}`;
-    if (!window.confirm(`Delete trained model ${label} (${tag})? This cannot be undone.`)) {
+    const label = `${(m.direction || '').toUpperCase()} barrier ${m.barrier_distance}${m.is_latest ? ' (latest)' : ''}`;
+    if (!window.confirm(`Delete trained model ${label}?\n${tag}\n\nThis removes files from disk and cannot be undone.`)) {
       return;
     }
     setDeletingModel(tag);
+    setErr('');
     try {
       await api(`/train/models/${encodeURIComponent(tag)}`, { method: 'DELETE' });
       const refreshed = await api<ModelsResponse>('/train/models');
@@ -803,6 +810,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
         if (pickerMode !== 'cross_barrier') setPickTradeBarrier(fallback);
       }
     } catch (e: any) {
+      setErr(e.message || 'Failed to delete model');
       setAnalyzeMsg(e.message || 'Failed to delete model');
     }
     setDeletingModel(null);
@@ -1054,7 +1062,8 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
           <p className="page-subtitle">
             {apiStatus?.symbol ? `Monitoring ${apiStatus.symbol}` : 'Waiting for confirmed settings'}
             &nbsp;·&nbsp;live {(apiStatus?.ticks_collected ?? 0).toLocaleString()}
-            &nbsp;·&nbsp;DB {(dbTicks ?? 0).toLocaleString()} ticks saved
+            &nbsp;·&nbsp;DB {(dbTicks ?? 0).toLocaleString()} ticks
+            {dbStorage ? ` · ${dbStorage}` : ''} saved
           </p>
         </div>
         <div className="flex gap-3 items-center">
@@ -1333,7 +1342,10 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
         <div className="stat-card cyan">
           <div className="stat-icon"><Database size={18} color="var(--cyan)"/></div>
           <div className="stat-value glow-text-cyan">{(dbTicks ?? apiStatus?.ticks_collected ?? 0).toLocaleString()}</div>
-          <div className="stat-label">Ticks in Database</div>
+          <div className="stat-label">
+            Ticks in Database
+            {dbStorage ? <span className="text-dim" style={{ display: 'block', fontSize: '0.75rem', marginTop: 2 }}>{dbStorage} on disk</span> : null}
+          </div>
         </div>
         <div className="stat-card green">
           <div className="stat-icon"><TrendingUp size={18} color="var(--green)"/></div>
@@ -1375,26 +1387,41 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
               Barriers on disk: {(models.barriers || []).join(', ') || '—'}
             </p>
           )}
-          {models?.trained && models.models.map(m => (
-            <div key={`${m.direction}-${m.barrier_distance}-${m.version_tag}`} className="model-row">
-              <div>
-                <div className="text-sm font-medium">
-                  {(m.direction || '').toUpperCase()} · barrier {m.barrier_distance}
-                  {m.is_latest ? <span className="badge badge-dim" style={{marginLeft:8}}>latest</span> : null}
+          {models?.trained && models.models.map(m => {
+            const busy = deletingModel === m.version_tag;
+            return (
+              <div key={`${m.direction}-${m.barrier_distance}-${m.version_tag}`} className="model-row">
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div className="text-sm font-medium">
+                    {(m.direction || '').toUpperCase()} · barrier {m.barrier_distance}
+                    {m.is_latest ? <span className="badge badge-dim" style={{marginLeft:8}}>latest</span> : null}
+                  </div>
+                  <div className="text-xs text-dim mt-1 font-mono">
+                    {m.symbol} · {m.selected_pipeline || 'pipeline'}
+                    {m.duration_seconds != null ? ` · ${m.duration_seconds}s` : ''}
+                    {' · '}AUC {(m.metrics?.auc_roc ?? 0).toFixed(3)}
+                    {m.version_tag ? ` · ${m.version_tag}` : ''}
+                    {m.loadable === false ? ' · files missing' : ''}
+                  </div>
                 </div>
-                <div className="text-xs text-dim mt-1 font-mono">
-                  {m.symbol} · {m.selected_pipeline || 'pipeline'}
-                  {m.duration_seconds != null ? ` · ${m.duration_seconds}s` : ''}
-                  {' · '}AUC {(m.metrics?.auc_roc ?? 0).toFixed(3)}
-                  {m.version_tag ? ` · ${m.version_tag}` : ''}
-                  {m.loadable === false ? ' · files missing' : ''}
+                <div className="flex items-center gap-2" style={{ flexShrink: 0, marginLeft: '0.75rem' }}>
+                  {m.has_demonstrated_edge
+                    ? <span className="badge badge-green">Edge OK</span>
+                    : <span className="badge badge-amber">No edge</span>}
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    style={{ padding: '4px 8px', color: 'var(--red)' }}
+                    title={m.is_latest ? 'Delete latest model' : 'Delete this model from history'}
+                    disabled={!m.version_tag || busy}
+                    onClick={() => deleteTrainedModel(m)}
+                  >
+                    {busy ? <Loader2 size={14} className="spin"/> : <Trash2 size={14}/>}
+                  </button>
                 </div>
               </div>
-              {m.has_demonstrated_edge
-                ? <span className="badge badge-green" style={{marginLeft:'1rem',flexShrink:0}}>Edge OK</span>
-                : <span className="badge badge-amber" style={{marginLeft:'1rem',flexShrink:0}}>No edge</span>}
-            </div>
-          ))}
+            );
+          })}
           {perf?.alerts_paused && (
             <div className="alert alert-warning mt-2">
               <AlertTriangle size={14}/>
@@ -1491,6 +1518,11 @@ function TrainView() {
   const [autoStrict, setAutoStrict] = useState(true);
   const [autoBusy, setAutoBusy] = useState(false);
   const [autoMsg, setAutoMsg] = useState('');
+  const [tickFrom, setTickFrom] = useState('');
+  const [tickTo, setTickTo] = useState('');
+  const [tickDelBusy, setTickDelBusy] = useState(false);
+  const [tickDelMsg, setTickDelMsg] = useState('');
+  const [tickDelOk, setTickDelOk] = useState(false);
   const prefsLoaded = useRef(false);
   const pollRef = useRef<ReturnType<typeof setInterval>|null>(null);
   const dlPollRef = useRef<ReturnType<typeof setInterval>|null>(null);
@@ -1513,6 +1545,9 @@ function TrainView() {
     try {
       const d = await api<DataInfo>('/train/data-info');
       setInfo(d);
+      const symRow = (d.symbols || []).find(s => s.symbol === symbol) || d.symbols?.[0];
+      if (symRow?.oldest && !tickFrom) setTickFrom(symRow.oldest.slice(0, 10));
+      if (symRow?.newest && !tickTo) setTickTo(symRow.newest.slice(0, 10));
       if (!prefsLoaded.current && d.train_prefs) {
         prefsLoaded.current = true;
         setMinCal(String(d.train_prefs.min_calibration_samples));
@@ -1884,6 +1919,134 @@ function TrainView() {
 
         {!loadingInfo && info?.has_data && (
           <>
+            {info.storage_human && (
+              <p className="text-xs text-dim font-mono mb-2">
+                Tick DB storage: <strong className="text-primary">{info.storage_human}</strong>
+                {' '}(table + indexes)
+                {info.total_ticks != null ? ` · ${info.total_ticks.toLocaleString()} ticks` : ''}
+              </p>
+            )}
+
+            <div className="tick-delete-box mb-3">
+              <div className="text-sm font-medium mb-2">Delete ticks by date range (UTC)</div>
+              <p className="text-xs text-dim mb-2">
+                Removes stored ticks for the selected symbol between the days you pick. Preview first, then delete.
+              </p>
+              <div className="grid-2">
+                <div className="form-group">
+                  <label className="form-label">From date</label>
+                  <input
+                    type="date"
+                    className="form-input"
+                    value={tickFrom}
+                    onChange={e => setTickFrom(e.target.value)}
+                  />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">To date</label>
+                  <input
+                    type="date"
+                    className="form-input"
+                    value={tickTo}
+                    onChange={e => setTickTo(e.target.value)}
+                  />
+                </div>
+              </div>
+              <div className="flex gap-2" style={{ flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  disabled={tickDelBusy || !tickFrom || !tickTo}
+                  onClick={async () => {
+                    setTickDelBusy(true); setTickDelMsg('');
+                    try {
+                      const r = await api<{
+                        match_count?: number; message?: string; storage_human?: string;
+                      }>('/train/ticks/delete', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                          symbol,
+                          from_date: tickFrom,
+                          to_date: tickTo,
+                          dry_run: true,
+                        }),
+                      });
+                      setTickDelOk(true);
+                      setTickDelMsg(r.message || `${r.match_count ?? 0} ticks match.`);
+                    } catch (e: any) {
+                      setTickDelOk(false);
+                      setTickDelMsg(e.message || 'Preview failed');
+                    }
+                    setTickDelBusy(false);
+                  }}
+                >
+                  {tickDelBusy ? <Loader2 size={14} className="spin"/> : <Database size={14}/>}
+                  Preview count
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ color: 'var(--red)' }}
+                  disabled={tickDelBusy || !tickFrom || !tickTo}
+                  onClick={async () => {
+                    if (!window.confirm(
+                      `Delete ticks for ${symbol} from ${tickFrom} to ${tickTo} (UTC)?\nThis cannot be undone.`,
+                    )) return;
+                    setTickDelBusy(true); setTickDelMsg('');
+                    try {
+                      const preview = await api<{ match_count?: number }>('/train/ticks/delete', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                          symbol,
+                          from_date: tickFrom,
+                          to_date: tickTo,
+                          dry_run: true,
+                        }),
+                      });
+                      const n = preview.match_count ?? 0;
+                      if (n === 0) {
+                        setTickDelOk(true);
+                        setTickDelMsg('No ticks in that range.');
+                        setTickDelBusy(false);
+                        return;
+                      }
+                      if (!window.confirm(`Confirm delete ${n.toLocaleString()} ticks?`)) {
+                        setTickDelBusy(false);
+                        return;
+                      }
+                      const r = await api<{
+                        deleted?: number; message?: string; storage_human?: string;
+                      }>('/train/ticks/delete', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                          symbol,
+                          from_date: tickFrom,
+                          to_date: tickTo,
+                          dry_run: false,
+                        }),
+                      });
+                      setTickDelOk(true);
+                      setTickDelMsg(r.message || `Deleted ${r.deleted ?? 0} ticks.`);
+                      await loadInfo(true);
+                    } catch (e: any) {
+                      setTickDelOk(false);
+                      setTickDelMsg(e.message || 'Delete failed');
+                    }
+                    setTickDelBusy(false);
+                  }}
+                >
+                  {tickDelBusy ? <Loader2 size={14} className="spin"/> : <Trash2 size={14}/>}
+                  Delete range
+                </button>
+              </div>
+              {tickDelMsg && (
+                <div className={`alert ${tickDelOk ? 'alert-success' : 'alert-error'}`} style={{ marginTop: '0.75rem' }}>
+                  {tickDelOk ? <CheckCircle size={14}/> : <XCircle size={14}/>}
+                  {tickDelMsg}
+                </div>
+              )}
+            </div>
+
             {(info.symbols ?? []).map(sym => {
               const sh = sym.span_hours ?? hoursBetween(sym.oldest, sym.newest) ?? 0;
               const el = sym.est_labels ?? Math.max(0, Math.floor(((sh * 3600) - 600 - durSec) / durSec));
