@@ -146,6 +146,54 @@ class DerivTradeClient:
             return await self._fetch_summary_pat()
         return await self._fetch_summary_legacy()
 
+    def _profit_stats_from_table(self, pt: dict) -> dict[str, Any]:
+        """Wins / losses / P&L from Deriv profit_table transactions."""
+        import datetime as _dt
+
+        today_profit = 0.0
+        today_wins = 0
+        today_losses = 0
+        total_profit = 0.0
+        trade_count = 0
+        wins = 0
+        losses = 0
+        transactions = pt.get("transactions") or []
+        today = _dt.datetime.now(_dt.timezone.utc).date()
+        for tx in transactions:
+            try:
+                profit = float(tx.get("profit") or 0)
+            except (TypeError, ValueError):
+                continue
+            total_profit += profit
+            trade_count += 1
+            if profit > 0:
+                wins += 1
+            elif profit < 0:
+                losses += 1
+            is_today = False
+            ts = tx.get("purchase_time") or tx.get("transaction_time")
+            if ts is not None:
+                try:
+                    d = _dt.datetime.fromtimestamp(float(ts), tz=_dt.timezone.utc).date()
+                    is_today = d == today
+                except Exception:
+                    is_today = False
+            if is_today:
+                today_profit += profit
+                if profit > 0:
+                    today_wins += 1
+                elif profit < 0:
+                    today_losses += 1
+        return {
+            "today_profit": round(today_profit, 2),
+            "today_wins": today_wins,
+            "today_losses": today_losses,
+            "recent_profit": round(total_profit, 2),
+            "recent_trades": trade_count,
+            "recent_wins": wins,
+            "recent_losses": losses,
+        }
+
     async def _fetch_summary_pat(self) -> dict[str, Any]:
         accounts = await self.list_accounts()
         chosen = self._pick_account(accounts)
@@ -159,15 +207,29 @@ class DerivTradeClient:
         currency = str(chosen.get("currency") or "USD")
         at = str(chosen.get("account_type") or chosen.get("group") or "").lower()
         is_virtual = "demo" in at or self._account_id.upper().startswith(("VRTC", "VRT", "DOT"))
-        # Enrich via OTP WS balance if REST balance missing
-        if balance <= 0:
-            try:
-                await self.connect_pat(self._account_id)
-                bal = await self.get_balance()
+
+        stats: dict[str, Any] = {
+            "today_profit": None,
+            "today_wins": None,
+            "today_losses": None,
+            "recent_profit": None,
+            "recent_trades": None,
+            "recent_wins": None,
+            "recent_losses": None,
+        }
+        try:
+            await self.connect_pat(self._account_id)
+            bal = await self.get_balance()
+            if bal.get("balance") is not None:
                 balance = float(bal.get("balance") or 0)
-                currency = str(bal.get("currency") or currency)
+            currency = str(bal.get("currency") or currency)
+            try:
+                pt = await self.get_profit_table(limit=100)
+                stats = self._profit_stats_from_table(pt)
             except Exception as e:
-                logger.warning("pat_balance_ws_failed", error=str(e))
+                logger.warning("pat_profit_table_failed", error=str(e))
+        except Exception as e:
+            logger.warning("pat_balance_ws_failed", error=str(e))
 
         return {
             "ok": True,
@@ -178,11 +240,7 @@ class DerivTradeClient:
             "account_type": "demo" if is_virtual else "real",
             "email": None,
             "fullname": None,
-            "today_profit": None,
-            "recent_profit": None,
-            "recent_trades": None,
-            "recent_wins": None,
-            "recent_losses": None,
+            **stats,
             "accounts": [
                 {
                     "account_id": a.get("account_id") or a.get("loginid"),
@@ -209,36 +267,18 @@ class DerivTradeClient:
             bal.get("balance") if bal.get("balance") is not None else auth.get("balance") or 0
         )
 
-        today_profit = 0.0
-        total_profit = 0.0
-        trade_count = 0
-        wins = 0
-        losses = 0
+        stats: dict[str, Any] = {
+            "today_profit": 0.0,
+            "today_wins": 0,
+            "today_losses": 0,
+            "recent_profit": 0.0,
+            "recent_trades": 0,
+            "recent_wins": 0,
+            "recent_losses": 0,
+        }
         try:
-            import datetime as _dt
-
             pt = await self.get_profit_table(limit=100)
-            transactions = pt.get("transactions") or []
-            today = _dt.datetime.now(_dt.timezone.utc).date()
-            for tx in transactions:
-                try:
-                    profit = float(tx.get("profit") or 0)
-                except (TypeError, ValueError):
-                    continue
-                total_profit += profit
-                trade_count += 1
-                if profit > 0:
-                    wins += 1
-                elif profit < 0:
-                    losses += 1
-                ts = tx.get("purchase_time") or tx.get("transaction_time")
-                if ts is not None:
-                    try:
-                        d = _dt.datetime.fromtimestamp(float(ts), tz=_dt.timezone.utc).date()
-                        if d == today:
-                            today_profit += profit
-                    except Exception:
-                        pass
+            stats = self._profit_stats_from_table(pt)
         except Exception as e:
             logger.warning("deriv_profit_table_failed", error=str(e))
 
@@ -251,11 +291,7 @@ class DerivTradeClient:
             "email": auth.get("email"),
             "fullname": auth.get("fullname"),
             "account_type": "demo" if auth.get("is_virtual") else "real",
-            "today_profit": round(today_profit, 2),
-            "recent_profit": round(total_profit, 2),
-            "recent_trades": trade_count,
-            "recent_wins": wins,
-            "recent_losses": losses,
+            **stats,
             "auth_mode": "legacy",
             "app_id": self.app_id,
         }

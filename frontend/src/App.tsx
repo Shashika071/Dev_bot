@@ -545,11 +545,13 @@ type TradeAccountInfo = {
   account_type?: string;
   email?: string;
   fullname?: string;
-  today_profit?: number;
-  recent_profit?: number;
-  recent_trades?: number;
-  recent_wins?: number;
-  recent_losses?: number;
+  today_profit?: number | null;
+  today_wins?: number | null;
+  today_losses?: number | null;
+  recent_profit?: number | null;
+  recent_trades?: number | null;
+  recent_wins?: number | null;
+  recent_losses?: number | null;
   token_configured?: boolean;
 };
 
@@ -581,6 +583,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
   const [dashAccount, setDashAccount] = useState<TradeAccountInfo | null>(null);
   const [dashAccountLoading, setDashAccountLoading] = useState(false);
   const [dashTokenConfigured, setDashTokenConfigured] = useState(false);
+  const [dashAutoTrade, setDashAutoTrade] = useState(false);
   const [deletingModel, setDeletingModel] = useState<string | null>(null);
   const [analysisRows, setAnalysisRows] = useState<Array<{
     direction: string; ok?: boolean; calibrated_probability?: number;
@@ -645,6 +648,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
       force_min_probability?: number;
       cross_barrier_min_probability?: number;
       token_configured?: boolean;
+      auto_trade_enabled?: boolean;
     }>('/setup/trade-prefs')
       .then(r => {
         if (r.force_min_probability != null) setForceMinP(Number(r.force_min_probability));
@@ -652,6 +656,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
           setCrossMinP(Number(r.cross_barrier_min_probability));
         }
         setDashTokenConfigured(!!r.token_configured);
+        setDashAutoTrade(!!r.auto_trade_enabled);
         if (r.token_configured) loadDashAccount(true);
       })
       .catch(() => {});
@@ -1086,6 +1091,9 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
           <div style={{ minWidth: 0, flex: 1 }}>
             <div className="flex items-center gap-2" style={{ flexWrap: 'wrap', marginBottom: 4 }}>
               <strong className="text-sm">Trade account</strong>
+              {dashAutoTrade
+                ? <span className="badge badge-green">Auto-trade ON</span>
+                : <span className="badge badge-dim">Auto-trade off</span>}
               {dashAccountLoading && <Loader2 size={12} className="spin"/>}
               <button
                 type="button"
@@ -1103,34 +1111,87 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
               </div>
             )}
             {dashTokenConfigured && dashAccount?.ok && (
-              <div className="font-mono text-xs dash-account-grid">
-                <span>
-                  {dashAccount.account_type === 'demo'
-                    ? <span className="badge badge-amber">DEMO</span>
-                    : <span className="badge badge-green">REAL</span>}
-                  {' '}{dashAccount.loginid}
-                  {dashAccount.fullname ? ` · ${dashAccount.fullname}` : ''}
-                </span>
-                <span>
-                  Balance{' '}
-                  <strong className="text-primary">
-                    {(dashAccount.balance ?? 0).toFixed(2)} {dashAccount.currency || ''}
-                  </strong>
-                </span>
-                <span>
-                  Today{' '}
-                  <strong style={{ color: (dashAccount.today_profit ?? 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                    {(dashAccount.today_profit ?? 0) >= 0 ? '+' : ''}
-                    {(dashAccount.today_profit ?? 0).toFixed(2)}
-                  </strong>
-                  {' · '}Recent{' '}
-                  <strong style={{ color: (dashAccount.recent_profit ?? 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                    {(dashAccount.recent_profit ?? 0) >= 0 ? '+' : ''}
-                    {(dashAccount.recent_profit ?? 0).toFixed(2)}
-                  </strong>
-                  {' · '}W{dashAccount.recent_wins ?? 0}/L{dashAccount.recent_losses ?? 0}
-                </span>
-              </div>
+              <>
+                <div className="font-mono text-xs dash-account-grid">
+                  <span>
+                    {dashAccount.account_type === 'demo'
+                      ? <span className="badge badge-amber">DEMO</span>
+                      : <span className="badge badge-green">REAL</span>}
+                    {' '}{dashAccount.loginid}
+                    {dashAccount.fullname ? ` · ${dashAccount.fullname}` : ''}
+                  </span>
+                  <span>
+                    Balance{' '}
+                    <strong className="text-primary">
+                      {(dashAccount.balance ?? 0).toFixed(2)} {dashAccount.currency || ''}
+                    </strong>
+                  </span>
+                </div>
+                {(dashAutoTrade || (dashAccount.recent_trades ?? 0) > 0) && (
+                  <div className="dash-trade-stats">
+                    <div className="dash-stat">
+                      <div className="dash-stat-label">Won</div>
+                      <div className="dash-stat-value text-green">
+                        {dashAccount.recent_wins ?? 0}
+                      </div>
+                      <div className="dash-stat-sub">
+                        today {dashAccount.today_wins ?? 0}
+                      </div>
+                    </div>
+                    <div className="dash-stat">
+                      <div className="dash-stat-label">Lost</div>
+                      <div className="dash-stat-value" style={{ color: 'var(--red)' }}>
+                        {dashAccount.recent_losses ?? 0}
+                      </div>
+                      <div className="dash-stat-sub">
+                        today {dashAccount.today_losses ?? 0}
+                      </div>
+                    </div>
+                    <div className="dash-stat">
+                      <div className="dash-stat-label">Trades</div>
+                      <div className="dash-stat-value">
+                        {dashAccount.recent_trades ?? 0}
+                      </div>
+                      <div className="dash-stat-sub">
+                        last ~100 on account
+                      </div>
+                    </div>
+                    <div className="dash-stat">
+                      <div className="dash-stat-label">Win rate</div>
+                      <div className="dash-stat-value">
+                        {(() => {
+                          const w = dashAccount.recent_wins ?? 0;
+                          const l = dashAccount.recent_losses ?? 0;
+                          const n = w + l;
+                          return n > 0 ? `${((w / n) * 100).toFixed(0)}%` : '—';
+                        })()}
+                      </div>
+                      <div className="dash-stat-sub">
+                        Today P/L{' '}
+                        <strong style={{
+                          color: (dashAccount.today_profit ?? 0) >= 0 ? 'var(--green)' : 'var(--red)',
+                        }}>
+                          {(dashAccount.today_profit ?? 0) >= 0 ? '+' : ''}
+                          {(dashAccount.today_profit ?? 0).toFixed(2)}
+                        </strong>
+                      </div>
+                    </div>
+                    <div className="dash-stat">
+                      <div className="dash-stat-label">Recent P/L</div>
+                      <div
+                        className="dash-stat-value"
+                        style={{
+                          color: (dashAccount.recent_profit ?? 0) >= 0 ? 'var(--green)' : 'var(--red)',
+                        }}
+                      >
+                        {(dashAccount.recent_profit ?? 0) >= 0 ? '+' : ''}
+                        {(dashAccount.recent_profit ?? 0).toFixed(2)}
+                      </div>
+                      <div className="dash-stat-sub">{dashAccount.currency || 'USD'}</div>
+                    </div>
+                  </div>
+                )}
+              </>
             )}
             {dashTokenConfigured && !dashAccount?.ok && (
               <div className="text-xs text-dim">
@@ -2283,23 +2344,7 @@ type TradePrefs = {
   token_mask?: string | null;
 };
 
-type TradeAccount = {
-  ok?: boolean;
-  error?: string;
-  loginid?: string;
-  currency?: string;
-  balance?: number;
-  is_virtual?: boolean;
-  account_type?: string;
-  email?: string;
-  fullname?: string;
-  today_profit?: number;
-  recent_profit?: number;
-  recent_trades?: number;
-  recent_wins?: number;
-  recent_losses?: number;
-  token_configured?: boolean;
-};
+type TradeAccount = TradeAccountInfo;
 
 const DEFAULT_TRADE: TradePrefs = {
   auto_trade_enabled: false,

@@ -732,6 +732,43 @@ select {
   flex-wrap: wrap;
   gap: 0.35rem 1.1rem;
 }
+.dash-trade-stats {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+.dash-stat {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.55rem 0.65rem;
+  min-width: 0;
+}
+.dash-stat-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  margin-bottom: 0.2rem;
+}
+.dash-stat-value {
+  font-family: var(--font-mono);
+  font-size: 1.15rem;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.dash-stat-sub {
+  margin-top: 0.2rem;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+@media (max-width: 900px) {
+  .dash-trade-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
 
 /* Dashboard Analyze/Force/Cross picker — portaled to document.body */
 .picker-overlay {
