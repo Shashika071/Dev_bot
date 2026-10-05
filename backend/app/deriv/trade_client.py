@@ -146,8 +146,51 @@ class DerivTradeClient:
             return await self._fetch_summary_pat()
         return await self._fetch_summary_legacy()
 
+    @staticmethod
+    def _tx_realized_profit(tx: dict) -> Optional[float]:
+        """
+        Realized P/L for one profit_table row.
+        New Deriv responses often omit `profit` and only send buy_price/sell_price.
+        Open / unsettled rows (no sell) return None — skip for W/L.
+        """
+        raw = tx.get("profit")
+        if isinstance(raw, dict):
+            try:
+                value = abs(float(raw.get("value") or raw.get("display") or 0))
+            except (TypeError, ValueError):
+                value = 0.0
+            sign = raw.get("sign")
+            if sign is not None:
+                try:
+                    s = int(sign)
+                except (TypeError, ValueError):
+                    s = 0
+                if s > 0:
+                    return value
+                if s < 0:
+                    return -value
+                return 0.0
+            if raw.get("is_win") is True:
+                return value
+            if raw.get("is_win") is False:
+                return -value
+        elif raw is not None and raw != "":
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                pass
+
+        sell = tx.get("sell_price")
+        buy = tx.get("buy_price")
+        if sell is None or sell == "" or buy is None or buy == "":
+            return None
+        try:
+            return float(sell) - float(buy)
+        except (TypeError, ValueError):
+            return None
+
     def _profit_stats_from_table(self, pt: dict) -> dict[str, Any]:
-        """Wins / losses / P&L from Deriv profit_table transactions."""
+        """Wins / losses / P&L from Deriv profit_table (settled trades only)."""
         import datetime as _dt
 
         today_profit = 0.0
@@ -155,23 +198,26 @@ class DerivTradeClient:
         today_losses = 0
         total_profit = 0.0
         trade_count = 0
+        open_count = 0
         wins = 0
         losses = 0
         transactions = pt.get("transactions") or []
         today = _dt.datetime.now(_dt.timezone.utc).date()
         for tx in transactions:
-            try:
-                profit = float(tx.get("profit") or 0)
-            except (TypeError, ValueError):
+            if not isinstance(tx, dict):
+                continue
+            profit = self._tx_realized_profit(tx)
+            if profit is None:
+                open_count += 1
                 continue
             total_profit += profit
             trade_count += 1
-            if profit > 0:
+            if profit > 1e-12:
                 wins += 1
-            elif profit < 0:
+            elif profit < -1e-12:
                 losses += 1
             is_today = False
-            ts = tx.get("purchase_time") or tx.get("transaction_time")
+            ts = tx.get("purchase_time") or tx.get("transaction_time") or tx.get("sell_time")
             if ts is not None:
                 try:
                     d = _dt.datetime.fromtimestamp(float(ts), tz=_dt.timezone.utc).date()
@@ -180,9 +226,9 @@ class DerivTradeClient:
                     is_today = False
             if is_today:
                 today_profit += profit
-                if profit > 0:
+                if profit > 1e-12:
                     today_wins += 1
-                elif profit < 0:
+                elif profit < -1e-12:
                     today_losses += 1
         return {
             "today_profit": round(today_profit, 2),
@@ -190,6 +236,7 @@ class DerivTradeClient:
             "today_losses": today_losses,
             "recent_profit": round(total_profit, 2),
             "recent_trades": trade_count,
+            "open_trades": open_count,
             "recent_wins": wins,
             "recent_losses": losses,
         }

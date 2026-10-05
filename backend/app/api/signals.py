@@ -7,12 +7,13 @@ import time
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
 from app.deriv.auto_trade import maybe_auto_trade_after_signal
+from app.models.outcome import SignalOutcome
 from app.models.signal import Signal
 from app.models.tick import Tick
 from app.notifications.browser import (
@@ -67,6 +68,24 @@ async def list_signals(
     """Get history of generated signals."""
     rows = await lifecycle.get_signals_history(db, limit, offset)
     return [_signal_to_dict(s) for s in rows]
+
+
+@router.delete("/{signal_id}")
+async def delete_signal(signal_id: str, db: AsyncSession = Depends(get_db)) -> dict:
+    """Delete one signal (and its outcome row) from Recent Signals history."""
+    sid = str(signal_id or "").strip()
+    if not sid or len(sid) > 64:
+        raise HTTPException(status_code=400, detail="Invalid signal_id")
+
+    result = await db.execute(select(Signal).where(Signal.signal_id == sid))
+    row = result.scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Signal {sid} not found")
+
+    await db.execute(delete(SignalOutcome).where(SignalOutcome.signal_id == sid))
+    await db.execute(delete(Signal).where(Signal.signal_id == sid))
+    await db.commit()
+    return {"ok": True, "deleted": sid, "message": f"Deleted signal {sid}"}
 
 
 @router.get("/active")

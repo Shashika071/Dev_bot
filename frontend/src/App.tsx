@@ -550,6 +550,7 @@ type TradeAccountInfo = {
   today_losses?: number | null;
   recent_profit?: number | null;
   recent_trades?: number | null;
+  open_trades?: number | null;
   recent_wins?: number | null;
   recent_losses?: number | null;
   token_configured?: boolean;
@@ -585,6 +586,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
   const [dashTokenConfigured, setDashTokenConfigured] = useState(false);
   const [dashAutoTrade, setDashAutoTrade] = useState(false);
   const [deletingModel, setDeletingModel] = useState<string | null>(null);
+  const [deletingSignal, setDeletingSignal] = useState<string | null>(null);
   const [analysisRows, setAnalysisRows] = useState<Array<{
     direction: string; ok?: boolean; calibrated_probability?: number;
     breakeven_probability?: number; margin_over_breakeven?: number;
@@ -766,6 +768,21 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
           ),
         )
   );
+
+  const deleteSignal = async (s: SigData) => {
+    const sid = s.signal_id;
+    if (!sid) return;
+    const label = `${s.symbol} ${s.direction} · ${new Date(s.created_at).toLocaleString()}`;
+    if (!window.confirm(`Delete signal ${label}?`)) return;
+    setDeletingSignal(sid);
+    try {
+      await api(`/signals/${encodeURIComponent(sid)}`, { method: 'DELETE' });
+      setSigs(prev => prev.filter(x => x.signal_id !== sid));
+    } catch (e: any) {
+      setErr(e.message || 'Failed to delete signal');
+    }
+    setDeletingSignal(null);
+  };
 
   const deleteTrainedModel = async (m: ModelInfo) => {
     const tag = m.version_tag;
@@ -1148,12 +1165,12 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
                       </div>
                     </div>
                     <div className="dash-stat">
-                      <div className="dash-stat-label">Trades</div>
+                      <div className="dash-stat-label">Settled</div>
                       <div className="dash-stat-value">
                         {dashAccount.recent_trades ?? 0}
                       </div>
                       <div className="dash-stat-sub">
-                        last ~100 on account
+                        open {dashAccount.open_trades ?? 0}
                       </div>
                     </div>
                     <div className="dash-stat">
@@ -1422,6 +1439,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
 
           {sigs.map(s => {
             const prob = s.probability ?? s.calibrated_probability ?? 0;
+            const busy = deletingSignal === s.signal_id;
             return (
               <div key={s.signal_id} className="signal-row">
                 <div>
@@ -1437,6 +1455,16 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
                 <div className="flex items-center gap-3">
                   <span className="font-mono text-sm font-semibold text-primary">{(prob*100).toFixed(1)}%</span>
                   <span className={`badge ${s.status==='active'?'badge-green':'badge-dim'}`}>{s.status}</span>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    style={{ padding: '4px 8px', color: 'var(--red)' }}
+                    title="Delete this signal"
+                    disabled={busy}
+                    onClick={() => deleteSignal(s)}
+                  >
+                    {busy ? <Loader2 size={14} className="spin"/> : <Trash2 size={14}/>}
+                  </button>
                 </div>
               </div>
             );
