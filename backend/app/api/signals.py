@@ -6,11 +6,14 @@ Optional auto-trade runs only when explicitly enabled in Setup.
 import time
 from typing import Any, Optional
 
+import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+
+logger = structlog.get_logger(__name__)
 from app.database import get_db
 from app.deriv.auto_trade import maybe_auto_trade_after_signal
 from app.models.outcome import SignalOutcome
@@ -131,41 +134,101 @@ async def chart_ticks(
     }
 
 
+# Short cache so the dashboard poll (every ~5s) does not open a new public WS each time
+_CHART_OHLC_CACHE: dict[str, tuple[float, list[dict]]] = {}
+_CHART_OHLC_TTL = 12.0
+
+
 @router.get("/chart-candles")
 async def chart_candles(
     symbol: Optional[str] = None,
     interval: str = Query(default="1m", pattern="^(1m|5m|15m)$"),
     limit: int = Query(default=120, ge=20, le=500),
+    source: str = Query(default="official", pattern="^(official|ticks|auto)$"),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """OHLC candles aggregated from stored ticks (1m / 5m / 15m)."""
+    """
+    OHLC candles for the dashboard chart (1m / 5m / 15m).
+
+    Default source=official → Deriv public candle API (same as candle confirm).
+    Falls back to tick-aggregated candles if official fetch fails / is sparse.
+    """
     sym = symbol
     if not sym:
         conf = await get_latest_confirmed_settings(db)
         sym = conf.symbol if conf else "R_100"
 
-    step = INTERVAL_SECONDS[interval]
-    # Extra buffer so the latest incomplete candle has enough ticks
-    lookback = step * (limit + 2)
-    min_epoch = int(time.time()) - lookback
+    gran = {"1m": 60, "5m": 300, "15m": 900}[interval]
+    candles: list[dict] = []
+    used = "ticks"
+    official_error = None
+    cached = False
 
-    result = await db.execute(
-        select(Tick.epoch, Tick.quote)
-        .where(Tick.symbol == sym, Tick.epoch >= min_epoch)
-        .order_by(Tick.epoch.asc())
-    )
-    rows = result.all()
-    # Fallback: if time window is empty/sparse, take recent ticks by count
-    if len(rows) < 50:
+    if source in ("official", "auto"):
+        cache_key = f"{sym}:{interval}:{limit}"
+        hit = _CHART_OHLC_CACHE.get(cache_key)
+        now = time.time()
+        if hit and (now - hit[0]) < _CHART_OHLC_TTL and len(hit[1]) >= 2:
+            candles = hit[1]
+            used = "deriv_official"
+            cached = True
+        else:
+            client = None
+            try:
+                from app.deriv.client import DerivWSClient
+
+                client = DerivWSClient()
+                await client.connect()
+                candles = await client.get_candles(
+                    sym, granularity=gran, count=int(limit)
+                )
+                if len(candles) >= 2:
+                    used = "deriv_official"
+                    _CHART_OHLC_CACHE[cache_key] = (now, candles)
+                else:
+                    official_error = f"official returned {len(candles)} candles"
+                    candles = []
+            except Exception as e:
+                official_error = str(e)
+                candles = []
+                logger.warning(
+                    "chart_official_candles_failed",
+                    symbol=sym,
+                    interval=interval,
+                    error=str(e),
+                )
+            finally:
+                if client is not None:
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+
+    if used != "deriv_official":
+        step = INTERVAL_SECONDS[interval]
+        lookback = step * (limit + 2)
+        min_epoch = int(time.time()) - lookback
+
         result = await db.execute(
             select(Tick.epoch, Tick.quote)
-            .where(Tick.symbol == sym)
-            .order_by(Tick.epoch.desc())
-            .limit(min(20000, max(2000, limit * step * 3)))
+            .where(Tick.symbol == sym, Tick.epoch >= min_epoch)
+            .order_by(Tick.epoch.asc())
         )
-        rows = list(reversed(result.all()))
+        rows = result.all()
+        if len(rows) < 50:
+            result = await db.execute(
+                select(Tick.epoch, Tick.quote)
+                .where(Tick.symbol == sym)
+                .order_by(Tick.epoch.desc())
+                .limit(min(20000, max(2000, limit * step * 3)))
+            )
+            rows = list(reversed(result.all()))
 
-    candles = aggregate_ohlc(((int(e), float(q)) for e, q in rows), interval, max_candles=limit)
+        candles = aggregate_ohlc(
+            ((int(e), float(q)) for e, q in rows), interval, max_candles=limit
+        )
+        used = "tick_aggregate"
+
     last = candles[-1]["close"] if candles else None
     return {
         "symbol": sym,
@@ -173,6 +236,9 @@ async def chart_candles(
         "count": len(candles),
         "last_quote": last,
         "candles": candles,
+        "source": used,
+        "cached": cached,
+        "official_error": official_error,
     }
 
 

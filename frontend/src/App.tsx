@@ -23,7 +23,15 @@ interface SigData {
 interface ChartPoint { epoch: number; quote: number; time?: string|null; }
 interface ChartTicks { symbol: string; count: number; last_quote: number|null; points: ChartPoint[]; }
 interface Candle { epoch: number; open: number; high: number; low: number; close: number; ticks?: number; }
-interface ChartCandles { symbol: string; interval: string; count: number; last_quote: number|null; candles: Candle[]; }
+interface ChartCandles {
+  symbol: string;
+  interval: string;
+  count: number;
+  last_quote: number|null;
+  candles: Candle[];
+  source?: string;
+  official_error?: string | null;
+}
 type ChartTf = 'tick' | '1m' | '5m' | '15m';
 
 function CandleChart({ data, interval }: { data: Candle[]; interval: string }) {
@@ -1356,7 +1364,13 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
           <h3 className="section-title">
             <BarChart2 size={16}/>
             Live {(tf === 'tick' ? chart?.symbol : candles?.symbol) || apiStatus?.symbol || 'R_100'} Chart
-            {tf !== 'tick' && <span className="badge badge-dim" style={{marginLeft:8}}>Candles</span>}
+            {tf !== 'tick' && (
+              candles?.source === 'deriv_official'
+                ? <span className="badge badge-green" style={{marginLeft:8}} title="Deriv official OHLC">OFFICIAL</span>
+                : candles?.source === 'tick_aggregate'
+                  ? <span className="badge badge-amber" style={{marginLeft:8}} title={candles.official_error || 'Built from local ticks'}>TICKS</span>
+                  : <span className="badge badge-dim" style={{marginLeft:8}}>Candles</span>
+            )}
           </h3>
           <div className="flex items-center gap-3">
             <div className="tf-picker" role="group" aria-label="Chart timeframe">
@@ -1382,7 +1396,11 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
         {!chartReady ? (
           <div className="empty-state" style={{padding:'2rem'}}>
             <p className="text-sm text-secondary">Waiting for chart data…</p>
-            <p className="text-xs text-dim mt-1">Need more ticks for {tf === 'tick' ? 'tick' : `${tf} candle`} view.</p>
+            <p className="text-xs text-dim mt-1">
+              {tf === 'tick'
+                ? 'Need more ticks for tick view.'
+                : `Need Deriv official or local ${tf} candles.`}
+            </p>
           </div>
         ) : tf === 'tick' ? (
           <div className="live-chart">
