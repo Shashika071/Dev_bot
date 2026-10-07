@@ -558,6 +558,11 @@ type TradeAccountInfo = {
   recent_wins?: number | null;
   recent_losses?: number | null;
   token_configured?: boolean;
+  cached?: boolean;
+  throttled?: boolean;
+  message?: string;
+  refresh_allowed_in?: number;
+  cache_age_seconds?: number;
 };
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -636,19 +641,31 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
     } catch { /* keep last chart */ }
   }, [apiStatus?.symbol, tf]);
 
-  const loadDashAccount = useCallback(async (refresh = true) => {
+  const [acctCooldown, setAcctCooldown] = useState(0);
+
+  const loadDashAccount = useCallback(async (mode: 'cache' | 'refresh' | 'force' = 'cache') => {
     setDashAccountLoading(true);
     try {
-      const a = await api<TradeAccountInfo>(
-        `/setup/trade-account?refresh=${refresh ? 'true' : 'false'}`,
-      );
+      const q =
+        mode === 'force' ? 'force=true'
+        : mode === 'refresh' ? 'refresh=true'
+        : 'refresh=false';
+      const a = await api<TradeAccountInfo>(`/setup/trade-account?${q}`);
       setDashAccount(a);
       setDashTokenConfigured(!!a.token_configured || !!a.ok);
+      const wait = Number(a.refresh_allowed_in || 0);
+      if (a.throttled || wait > 0) setAcctCooldown(wait);
     } catch {
       setDashAccount(null);
     }
     setDashAccountLoading(false);
   }, []);
+
+  useEffect(() => {
+    if (acctCooldown <= 0) return;
+    const t = setTimeout(() => setAcctCooldown(s => Math.max(0, s - 1)), 1000);
+    return () => clearTimeout(t);
+  }, [acctCooldown]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
@@ -665,7 +682,8 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
         }
         setDashTokenConfigured(!!r.token_configured);
         setDashAutoTrade(!!r.auto_trade_enabled);
-        if (r.token_configured) loadDashAccount(true);
+        // Cache first — live Deriv call only when user clicks Refresh (throttled)
+        if (r.token_configured) loadDashAccount('cache');
       })
       .catch(() => {});
     api<{ barrier_input?: string }>('/setup/current')
@@ -712,7 +730,8 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
           `Auto-trade OK · contract ${st.trade.contract_id} · stake ${st.trade.stake}` +
           (st.signals_this_session != null ? ` · session signals ${st.signals_this_session}` : '')
         );
-        loadDashAccount(true);
+        // Soft refresh (respects 120s cooldown) — don't hammer Deriv after every fill
+        loadDashAccount('refresh');
       } else if (st.trade.error) {
         setTradeResultMsg(`Auto-trade failed: ${st.trade.error}`);
       }
@@ -1125,15 +1144,23 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
                 type="button"
                 className="btn btn-ghost"
                 style={{ padding: '2px 8px', fontSize: 12 }}
-                onClick={() => loadDashAccount(true)}
-                disabled={dashAccountLoading}
+                onClick={() => loadDashAccount('refresh')}
+                disabled={dashAccountLoading || acctCooldown > 0}
+                title={acctCooldown > 0
+                  ? `Wait ${acctCooldown}s — limits Deriv API calls`
+                  : 'Live refresh from Deriv (max once per 2 min)'}
               >
-                Refresh
+                {acctCooldown > 0 ? `Wait ${acctCooldown}s` : 'Refresh'}
               </button>
             </div>
             {!dashTokenConfigured && (
               <div className="text-xs text-dim">
                 No trade token — set it in Setup to show balance / P&L here.
+              </div>
+            )}
+            {dashTokenConfigured && dashAccount?.throttled && dashAccount.message && (
+              <div className="text-xs text-dim" style={{ marginBottom: 4 }}>
+                {dashAccount.message}
               </div>
             )}
             {dashTokenConfigured && dashAccount?.ok && (
@@ -1145,6 +1172,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
                       : <span className="badge badge-green">REAL</span>}
                     {' '}{dashAccount.loginid}
                     {dashAccount.fullname ? ` · ${dashAccount.fullname}` : ''}
+                    {dashAccount.cached ? <span className="text-dim"> · cached</span> : null}
                   </span>
                   <span>
                     Balance{' '}
@@ -2577,9 +2605,13 @@ function SetupView({ online }: { online: boolean }) {
   const [tradeMsg, setTradeMsg] = useState('');
   const [tradeOk, setTradeOk] = useState(false);
 
-  const syncTradeCurrency = async (refresh = true) => {
+  const syncTradeCurrency = async (mode: 'cache' | 'refresh' | 'force' = 'cache') => {
     try {
-      const a = await api<TradeAccount>(`/setup/trade-account?refresh=${refresh ? 'true' : 'false'}`);
+      const q =
+        mode === 'force' ? 'force=true'
+        : mode === 'refresh' ? 'refresh=true'
+        : 'refresh=false';
+      const a = await api<TradeAccount>(`/setup/trade-account?${q}`);
       if (a.ok && a.currency) {
         setTrade(prev => ({ ...prev, trade_currency: a.currency || prev.trade_currency }));
       }
@@ -2628,7 +2660,7 @@ function SetupView({ online }: { online: boolean }) {
           token_configured: !!r.token_configured,
           token_mask: r.token_mask ?? null,
         });
-        if (r.token_configured) syncTradeCurrency(true);
+        if (r.token_configured) syncTradeCurrency('cache');
       })
       .catch(() => {});
   }, []);
@@ -2691,9 +2723,10 @@ function SetupView({ online }: { online: boolean }) {
       let msg = `✓ Trade prefs saved · account type: ${r.trade_account_prefer === 'real' ? 'Real' : 'Demo'}.`;
       if (r.token_configured) {
         try {
-          const a = await api<TradeAccount>('/setup/trade-account?refresh=true');
+          // force once after account-type / app-id change (cache cleared server-side)
+          const a = await api<TradeAccount>('/setup/trade-account?force=true');
           if (a.ok) {
-            msg += ` Loaded ${a.account_type?.toUpperCase()} ${a.loginid} · ${a.balance} ${a.currency}. Refresh Dashboard to see it.`;
+            msg += ` Loaded ${a.account_type?.toUpperCase()} ${a.loginid} · ${a.balance} ${a.currency}.`;
             if (a.currency) {
               setTrade(prev => ({ ...prev, trade_currency: a.currency || prev.trade_currency }));
             }
