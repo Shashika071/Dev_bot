@@ -532,6 +532,13 @@ async def fetch_deriv_official_candles(client: Any, symbol: str) -> dict[str, li
     return {"1m": c1, "5m": c5, "15m": c15, "source": "deriv_official"}
 
 
+def _drop_forming_candle(candles: list[dict], *, min_keep: int = 8) -> list[dict]:
+    """Prefer completed bars only — the latest candle is often still forming."""
+    if len(candles) <= min_keep:
+        return candles
+    return candles[:-1]
+
+
 def evaluate_candle_confirm_ohlc(
     candles_1m: list[dict],
     candles_5m: list[dict],
@@ -549,7 +556,14 @@ def evaluate_candle_confirm_ohlc(
             False, direction, 0.0, 0.0, "invalid direction", {}
         )
 
-    c1, c5, c15 = candles_1m, candles_5m, candles_15m
+    # Official OHLC is cleaner than tick buckets — use completed bars + stricter bar
+    is_official = str(source) == "deriv_official"
+    c1 = _drop_forming_candle(candles_1m) if is_official else list(candles_1m)
+    c5 = _drop_forming_candle(candles_5m) if is_official else list(candles_5m)
+    c15 = _drop_forming_candle(candles_15m) if is_official else list(candles_15m)
+    need_score = float(min_score) + (1.5 if is_official else 0.0)
+    need_gap = float(min_gap) + (0.5 if is_official else 0.0)
+
     if len(c1) < 8 or len(c5) < 8:
         return CandleConfirmResult(
             False,
@@ -571,17 +585,17 @@ def evaluate_candle_confirm_ohlc(
     score = 0.30 * s1 + 0.45 * s5 + 0.25 * s15
     opp = 0.30 * o1 + 0.45 * o5 + 0.25 * o15
     gap = score - opp
-    confirmed = score >= float(min_score) and gap >= float(min_gap)
+    confirmed = score >= need_score and gap >= need_gap
 
     reasons = (
         [f"1m:{x}" for x in r1[:2]]
         + [f"5m:{x}" for x in r5[:3]]
         + [f"15m:{x}" for x in r15[:2]]
     )
-    src_label = "official" if source == "deriv_official" else source
+    src_label = "official" if is_official else source
     expl = (
         f"candle_confirm[{src_label}] {direction}: score={score:.1f} "
-        f"(opp={opp:.1f}, gap={gap:.1f}) min={min_score:.1f} — "
+        f"(opp={opp:.1f}, gap={gap:.1f}) need≥{need_score:.1f}/{need_gap:.1f} — "
         + ("; ".join(reasons) if reasons else "weak structure")
     )
     return CandleConfirmResult(
@@ -599,6 +613,8 @@ def evaluate_candle_confirm_ohlc(
             "n_15m": len(c15),
             "min_score": min_score,
             "min_gap": min_gap,
+            "effective_min_score": need_score,
+            "effective_min_gap": need_gap,
             "reasons": reasons,
             "source": source,
         },
