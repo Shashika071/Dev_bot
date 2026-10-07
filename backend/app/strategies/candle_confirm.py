@@ -1,7 +1,8 @@
 """
 Candle confirmation layer for One-Touch signals.
 
-Builds 1m + 5m + 15m OHLC from recent ticks and scores trend + classic
+Prefers Deriv official 1m + 5m + 15m OHLC; falls back to tick-aggregated
+candles if the public candle API is unavailable. Scores trend + classic
 candlestick patterns (engulfing, stars, harami, tweezers, soldiers/crows,
 abandoned baby, three methods, etc.). Extra gate on top of tick confluence
 + ML confidence — does not replace tick training.
@@ -10,12 +11,15 @@ abandoned baby, three methods, etc.). Extra gate on top of tick confluence
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 import numpy as np
 import pandas as pd
+import structlog
 
 from app.signal_engine.chart_candles import aggregate_ohlc
+
+logger = structlog.get_logger(__name__)
 
 
 @dataclass
@@ -514,6 +518,93 @@ def _score_tf(candles: list[dict], direction: str) -> tuple[float, list[str]]:
     return score, reasons
 
 
+async def fetch_deriv_official_candles(client: Any, symbol: str) -> dict[str, list[dict]]:
+    """
+    Pull official Deriv OHLC for 1m / 5m / 15m on the public WS client.
+    """
+    c1 = await client.get_candles(symbol, granularity=60, count=80)
+    c5 = await client.get_candles(symbol, granularity=300, count=40)
+    c15 = await client.get_candles(symbol, granularity=900, count=24)
+    if len(c1) < 8 or len(c5) < 8:
+        raise RuntimeError(
+            f"Official candles too short: 1m={len(c1)} 5m={len(c5)} 15m={len(c15)}"
+        )
+    return {"1m": c1, "5m": c5, "15m": c15, "source": "deriv_official"}
+
+
+def evaluate_candle_confirm_ohlc(
+    candles_1m: list[dict],
+    candles_5m: list[dict],
+    candles_15m: list[dict],
+    direction: str,
+    *,
+    min_score: float = 4.0,
+    min_gap: float = 1.0,
+    source: str = "ohlc",
+) -> CandleConfirmResult:
+    """Confirm direction from pre-built 1m/5m/15m OHLC lists."""
+    direction = str(direction).lower()
+    if direction not in ("upper", "lower"):
+        return CandleConfirmResult(
+            False, direction, 0.0, 0.0, "invalid direction", {}
+        )
+
+    c1, c5, c15 = candles_1m, candles_5m, candles_15m
+    if len(c1) < 8 or len(c5) < 8:
+        return CandleConfirmResult(
+            False,
+            direction,
+            0.0,
+            0.0,
+            "insufficient official/local candles",
+            {"n_1m": len(c1), "n_5m": len(c5), "n_15m": len(c15), "source": source},
+        )
+
+    opposite = "lower" if direction == "upper" else "upper"
+    s1, r1 = _score_tf(c1, direction)
+    s5, r5 = _score_tf(c5, direction)
+    s15, r15 = _score_tf(c15, direction)
+    o1, _ = _score_tf(c1, opposite)
+    o5, _ = _score_tf(c5, opposite)
+    o15, _ = _score_tf(c15, opposite)
+
+    score = 0.30 * s1 + 0.45 * s5 + 0.25 * s15
+    opp = 0.30 * o1 + 0.45 * o5 + 0.25 * o15
+    gap = score - opp
+    confirmed = score >= float(min_score) and gap >= float(min_gap)
+
+    reasons = (
+        [f"1m:{x}" for x in r1[:2]]
+        + [f"5m:{x}" for x in r5[:3]]
+        + [f"15m:{x}" for x in r15[:2]]
+    )
+    src_label = "official" if source == "deriv_official" else source
+    expl = (
+        f"candle_confirm[{src_label}] {direction}: score={score:.1f} "
+        f"(opp={opp:.1f}, gap={gap:.1f}) min={min_score:.1f} — "
+        + ("; ".join(reasons) if reasons else "weak structure")
+    )
+    return CandleConfirmResult(
+        confirmed=confirmed,
+        direction=direction,
+        score=float(score),
+        opposite_score=float(opp),
+        explanation=expl,
+        details={
+            "score_1m": s1,
+            "score_5m": s5,
+            "score_15m": s15,
+            "n_1m": len(c1),
+            "n_5m": len(c5),
+            "n_15m": len(c15),
+            "min_score": min_score,
+            "min_gap": min_gap,
+            "reasons": reasons,
+            "source": source,
+        },
+    )
+
+
 def evaluate_candle_confirm(
     ticks: Iterable[tuple[int, float]] | pd.DataFrame,
     direction: str,
@@ -522,8 +613,8 @@ def evaluate_candle_confirm(
     min_gap: float = 1.0,
 ) -> CandleConfirmResult:
     """
-    Confirm direction using 1m + 5m candle structure.
-    ticks: DataFrame with epoch/quote or iterable of (epoch, quote).
+    Fallback: confirm direction using 1m/5m/15m candles built from ticks.
+    Prefer evaluate_candle_confirm_ohlc with Deriv official candles in live paths.
     """
     direction = str(direction).lower()
     if direction not in ("upper", "lower"):
@@ -548,47 +639,36 @@ def evaluate_candle_confirm(
     c1 = aggregate_ohlc(pairs, "1m", max_candles=80)
     c5 = aggregate_ohlc(pairs, "5m", max_candles=40)
     c15 = aggregate_ohlc(pairs, "15m", max_candles=24)
-    opposite = "lower" if direction == "upper" else "upper"
-
-    s1, r1 = _score_tf(c1, direction)
-    s5, r5 = _score_tf(c5, direction)
-    s15, r15 = _score_tf(c15, direction)
-    o1, _ = _score_tf(c1, opposite)
-    o5, _ = _score_tf(c5, opposite)
-    o15, _ = _score_tf(c15, opposite)
-
-    # 1m timing, 5m structure, 15m bias — patterns included in each TF score
-    score = 0.30 * s1 + 0.45 * s5 + 0.25 * s15
-    opp = 0.30 * o1 + 0.45 * o5 + 0.25 * o15
-    gap = score - opp
-    confirmed = score >= float(min_score) and gap >= float(min_gap)
-
-    reasons = (
-        [f"1m:{x}" for x in r1[:2]]
-        + [f"5m:{x}" for x in r5[:3]]
-        + [f"15m:{x}" for x in r15[:2]]
+    return evaluate_candle_confirm_ohlc(
+        c1, c5, c15, direction, min_score=min_score, min_gap=min_gap, source="tick_aggregate"
     )
-    expl = (
-        f"candle_confirm {direction}: score={score:.1f} (opp={opp:.1f}, gap={gap:.1f}) "
-        f"min={min_score:.1f} — " +("; ".join(reasons) if reasons else "weak structure")
-    )
+
+
+def evaluate_candle_confirm_best(
+    direction: str,
+    *,
+    official: Optional[dict[str, list[dict]]] = None,
+    ticks: Iterable[tuple[int, float]] | pd.DataFrame | None = None,
+    min_score: float = 4.0,
+    min_gap: float = 1.0,
+) -> CandleConfirmResult:
+    """Use official Deriv OHLC when present; else tick-aggregated fallback."""
+    if official and official.get("1m") and official.get("5m"):
+        return evaluate_candle_confirm_ohlc(
+            official["1m"],
+            official.get("5m") or [],
+            official.get("15m") or [],
+            direction,
+            min_score=min_score,
+            min_gap=min_gap,
+            source=str(official.get("source") or "deriv_official"),
+        )
+    if ticks is not None:
+        return evaluate_candle_confirm(
+            ticks, direction, min_score=min_score, min_gap=min_gap
+        )
     return CandleConfirmResult(
-        confirmed=confirmed,
-        direction=direction,
-        score=float(score),
-        opposite_score=float(opp),
-        explanation=expl,
-        details={
-            "score_1m": s1,
-            "score_5m": s5,
-            "score_15m": s15,
-            "n_1m": len(c1),
-            "n_5m": len(c5),
-            "n_15m": len(c15),
-            "min_score": min_score,
-            "min_gap": min_gap,
-            "reasons": reasons,
-        },
+        False, str(direction), 0.0, 0.0, "no official candles or ticks", {}
     )
 
 

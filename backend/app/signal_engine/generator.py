@@ -108,6 +108,7 @@ class SignalGenerator:
         min_confidence: Optional[float] = None,
         min_margin_over_breakeven: Optional[float] = None,
         require_candle_confirm: Optional[bool] = None,
+        official_candles: Optional[dict] = None,
     ) -> Optional[dict]:
         """
         confidence_override: allow signals without demonstrated edge, but only when
@@ -115,6 +116,7 @@ class SignalGenerator:
         force_model_candles: model calibrated p + candle confirm only (skip confluence/EV/edge).
         force_no_edge: legacy blind bypass (avoid for UI; tests only).
         require_candle_confirm: override candle gate (None = default Force/ops behavior).
+        official_candles: optional Deriv 1m/5m/15m OHLC set from public API.
         """
         # Manual research analysis may run while auto-alerts are paused.
         ok, reason = await self.check_prerequisites(
@@ -153,6 +155,32 @@ class SignalGenerator:
             and not force_model_candles
         )
 
+        # Prefer one official Deriv OHLC pull for all directions (public WS)
+        ohlc_set = official_candles
+        if ohlc_set is None:
+            will_need_candles = (
+                bool(require_candle_confirm)
+                if require_candle_confirm is not None
+                else (
+                    force_model_candles
+                    or (bool(ops.get("require_candle_confirm", True)) and not force_no_edge)
+                )
+            )
+            if will_need_candles:
+                try:
+                    from app.deriv.client import DerivWSClient
+                    from app.strategies.candle_confirm import fetch_deriv_official_candles
+
+                    _c = DerivWSClient()
+                    await _c.connect()
+                    try:
+                        ohlc_set = await fetch_deriv_official_candles(_c, symbol)
+                    finally:
+                        await _c.disconnect()
+                except Exception as e:
+                    logger.warning("official_candles_generator_fetch_failed", error=str(e))
+                    ohlc_set = None
+
         for direction in dirs:
             feat_df = None
             if features_by_direction and direction in features_by_direction:
@@ -183,19 +211,20 @@ class SignalGenerator:
                 )
             if require_candle:
                 from app.strategies.candle_confirm import (
-                    evaluate_candle_confirm,
+                    evaluate_candle_confirm_best,
                     ticks_from_features,
                 )
 
                 tick_frame = ticks_from_features(feat_df)
-                if tick_frame is None or len(tick_frame) < 80:
-                    logger.debug("signal_candle_confirm_insufficient_ticks", direction=direction)
+                if ohlc_set is None and (tick_frame is None or len(tick_frame) < 80):
+                    logger.debug("signal_candle_confirm_insufficient_data", direction=direction)
                     candidates = []
                     candle_blocked = True
                 else:
-                    candle_result = evaluate_candle_confirm(
-                        tick_frame,
+                    candle_result = evaluate_candle_confirm_best(
                         direction,
+                        official=ohlc_set,
+                        ticks=tick_frame,
                         min_score=float(ops.get("candle_confirm_min_score", 4.0)),
                         min_gap=float(ops.get("candle_confirm_min_gap", 1.0)),
                     )
@@ -204,6 +233,7 @@ class SignalGenerator:
                             "signal_candle_confirm_rejected",
                             direction=direction,
                             score=candle_result.score,
+                            source=(candle_result.details or {}).get("source"),
                             explanation=candle_result.explanation,
                         )
                         candidates = []
@@ -437,6 +467,7 @@ class SignalGenerator:
                                 "confirmed": True,
                                 "score": candle_result.score,
                                 "explanation": candle_result.explanation,
+                                "source": (candle_result.details or {}).get("source"),
                             }
                             if candle_result is not None
                             else None
@@ -466,7 +497,11 @@ class SignalGenerator:
         comp_txt = ", ".join(f"{k}={v:.3f}" for k, v in comps.items())
         candle_bit = ""
         if best.get("candle_confirm"):
-            candle_bit = f" | candle✓ score={best['candle_confirm'].get('score', 0):.1f}"
+            src = best["candle_confirm"].get("source") or "?"
+            candle_bit = (
+                f" | candle✓ score={best['candle_confirm'].get('score', 0):.1f}"
+                f" src={src}"
+            )
         explanation = (
             f"{candidate.explanation} | selected={best.get('selected_pipeline')} "
             f"| components: {comp_txt}{candle_bit}"

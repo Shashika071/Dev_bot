@@ -410,6 +410,7 @@ async def generate_manual_signal(
             return {"ok": False, "reason": f"Deriv API unavailable: {e}", "analysis": []}
 
     quotes_by_direction: dict[str, dict] = {}
+    official_candles: dict | None = None
     try:
         for direction in dirs:
             signed = barrier_for_direction(str(trade_barrier), direction)
@@ -424,6 +425,20 @@ async def generate_manual_signal(
             q = await qc.fetch_single_quote()
             if q:
                 quotes_by_direction[direction] = q
+        try:
+            from app.strategies.candle_confirm import fetch_deriv_official_candles
+
+            official_candles = await fetch_deriv_official_candles(client, conf.symbol)
+            logger.info(
+                "official_candles_loaded",
+                symbol=conf.symbol,
+                n_1m=len(official_candles.get("1m") or []),
+                n_5m=len(official_candles.get("5m") or []),
+                n_15m=len(official_candles.get("15m") or []),
+            )
+        except Exception as e:
+            logger.warning("official_candles_fetch_failed", error=str(e))
+            official_candles = None
     finally:
         if owns_client and client is not None:
             await client.disconnect()
@@ -488,7 +503,7 @@ async def generate_manual_signal(
         )
         confluence_met = bool(confluence and confluence.direction == direction)
 
-        from app.strategies.candle_confirm import evaluate_candle_confirm
+        from app.strategies.candle_confirm import evaluate_candle_confirm_best
 
         if cross_barrier:
             require_candle = require_candles_cross
@@ -496,9 +511,10 @@ async def generate_manual_signal(
             require_candle = force_model_candles or (
                 bool(ops.get("require_candle_confirm", True)) and not force_no_edge
             )
-        candle = evaluate_candle_confirm(
-            df,
+        candle = evaluate_candle_confirm_best(
             direction,
+            official=official_candles,
+            ticks=df,
             min_score=float(ops.get("candle_confirm_min_score", 4.0)),
             min_gap=float(ops.get("candle_confirm_min_gap", 1.0)),
         )
@@ -531,6 +547,7 @@ async def generate_manual_signal(
             "candle_confirm_met": candle_met,
             "candle_confirm_score": candle.score,
             "candle_confirm_explanation": candle.explanation,
+            "candle_source": (candle.details or {}).get("source"),
             "spot": current_price,
             "mode": mode_label,
             "model_barrier": feature_barrier,
@@ -574,6 +591,7 @@ async def generate_manual_signal(
         require_candle_confirm=(
             require_candles_cross if cross_barrier else (True if force_model_candles else None)
         ),
+        official_candles=official_candles,
     )
 
     if signal_data and cross_barrier:

@@ -405,12 +405,14 @@ class DerivWSClient:
         start: Optional[int] = None,
         style: str = "ticks",
         count: int = 1000,
+        granularity: int | None = None,
     ) -> dict:
         """
-        Fetch historical tick data.
+        Fetch historical tick or candle data.
 
         Public Options WS currently returns up to ~1000 ticks ending at `end`.
         Omit `start` and page backward by lowering `end` for longer history.
+        For style=candles, pass granularity in seconds (60 / 300 / 900).
         """
         msg = {
             "ticks_history": symbol,
@@ -422,8 +424,48 @@ class DerivWSClient:
         if start is not None:
             msg["start"] = start
         if style == "candles":
-            msg["granularity"] = 60  # 1-minute candles
+            msg["granularity"] = int(granularity or 60)
         return await self.send(msg, timeout=60.0)
+
+    async def get_candles(
+        self,
+        symbol: str,
+        *,
+        granularity: int = 60,
+        count: int = 80,
+    ) -> list[dict]:
+        """
+        Official Deriv OHLC candles (public WS).
+        granularity: 60=1m, 300=5m, 900=15m.
+        Returns list of {epoch, open, high, low, close}.
+        """
+        data = await self.get_ticks_history(
+            symbol,
+            end="latest",
+            style="candles",
+            count=int(count),
+            granularity=int(granularity),
+        )
+        raw = data.get("candles") or data.get("history") or []
+        if isinstance(raw, dict):
+            # Some payloads nest under history-like keys
+            raw = raw.get("candles") or []
+        out: list[dict] = []
+        for c in raw or []:
+            if not isinstance(c, dict):
+                continue
+            try:
+                out.append({
+                    "epoch": int(c.get("epoch") or c.get("open_time") or 0),
+                    "open": float(c["open"]),
+                    "high": float(c["high"]),
+                    "low": float(c["low"]),
+                    "close": float(c["close"]),
+                })
+            except (KeyError, TypeError, ValueError):
+                continue
+        out.sort(key=lambda x: x["epoch"])
+        return out
 
     async def subscribe_ticks(self, symbol: str, handler: Callable):
         """Subscribe to live tick stream (request key 'ticks', stream msg_type 'tick')."""

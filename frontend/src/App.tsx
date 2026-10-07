@@ -605,6 +605,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
     breakeven_probability?: number; margin_over_breakeven?: number;
     meets_confidence?: boolean; confluence_met?: boolean;
     candle_confirm_met?: boolean; candle_confirm_score?: number;
+    candle_source?: string;
     selected_pipeline?: string; reason?: string;
   }>>([]);
   const [perf, setPerf] = useState<{
@@ -1287,6 +1288,25 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
             {tradeResultMsg && (
               <div className="analyze-status-trade text-xs font-mono" title={tradeResultMsg}>{tradeResultMsg}</div>
             )}
+            {(() => {
+              const src = analysisRows.find(r => r.candle_source)?.candle_source
+                || analysisRows.find(r => r.ok)?.candle_source;
+              if (!src && analysisRows.length === 0) return null;
+              const official = src === 'deriv_official';
+              const ticks = src === 'tick_aggregate';
+              const label = official ? 'Official Deriv 1m/5m/15m' : ticks ? 'Tick-built 1m/5m/15m' : (src || 'Candles pending');
+              return (
+                <div className="text-xs font-mono" style={{ marginBottom: 6 }}>
+                  Candles:{' '}
+                  {official
+                    ? <span className="badge badge-green">OFFICIAL</span>
+                    : ticks
+                      ? <span className="badge badge-amber">TICKS</span>
+                      : <span className="badge badge-dim">{label}</span>}
+                  <span className="text-dim"> · {label}</span>
+                </div>
+              );
+            })()}
             <div className="analyze-grid">
               {(analysisRows.length > 0 ? analysisRows : [
                 { direction: 'upper', ok: false, reason: '—' },
@@ -1294,7 +1314,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
               ]).slice(0, 2).map(a => (
                 <div key={a.direction} className="analyze-row font-mono text-xs" title={
                   a.ok
-                    ? `p=${((a.calibrated_probability ?? 0) * 100).toFixed(1)}%`
+                    ? `p=${((a.calibrated_probability ?? 0) * 100).toFixed(1)}% · candles=${a.candle_source || '?'}`
                     : (a.reason || '')
                 }>
                   <strong>{(a.direction || '').toUpperCase()}</strong>
@@ -1310,6 +1330,13 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
                       {a.candle_confirm_met
                         ? <span className="text-green"> · candles ✓{a.candle_confirm_score != null ? ` (${a.candle_confirm_score.toFixed(1)})` : ''}</span>
                         : <span className="text-dim"> · no candle confirm</span>}
+                      {a.candle_source === 'deriv_official'
+                        ? <span className="text-green"> · official</span>
+                        : a.candle_source === 'tick_aggregate'
+                          ? <span className="text-amber"> · ticks</span>
+                          : a.candle_source
+                            ? <span className="text-dim"> · {a.candle_source}</span>
+                            : null}
                       {a.meets_confidence
                         ? <span className="text-green"> · READY</span>
                         : <span className="text-dim"> · below bar</span>}
