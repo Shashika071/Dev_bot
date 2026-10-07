@@ -130,14 +130,53 @@ class DerivTradeClient:
             raise RuntimeError(f"OTP response missing url: {str(body)[:200]}")
         return str(url)
 
-    def _pick_account(self, accounts: list[dict]) -> dict:
+    @staticmethod
+    def _is_demo_account(a: dict) -> bool:
+        at = str(a.get("account_type") or a.get("group") or "").lower()
+        aid = str(a.get("account_id") or a.get("loginid") or a.get("id") or "").upper()
+        return (
+            "demo" in at
+            or "virtual" in at
+            or aid.startswith(("VRTC", "VRT", "DOT", "VRW"))
+        )
+
+    def _pick_account(
+        self,
+        accounts: list[dict],
+        *,
+        prefer: str = "demo",
+        account_id: str | None = None,
+    ) -> dict:
         if not accounts:
             raise RuntimeError("No Deriv options accounts on this PAT")
-        # Prefer demo first (safer), else first active
-        for a in accounts:
-            at = str(a.get("account_type") or a.get("group") or "").lower()
-            if "demo" in at or str(a.get("account_id") or "").upper().startswith(("VRTC", "VRT", "DOT")):
-                return a
+
+        want_id = str(account_id or "").strip()
+        if want_id:
+            for a in accounts:
+                for key in ("account_id", "loginid", "id"):
+                    if str(a.get(key) or "").strip() == want_id:
+                        return a
+            raise RuntimeError(
+                f"Account {want_id!r} not found on this PAT. "
+                f"Available: "
+                + ", ".join(
+                    str(a.get("account_id") or a.get("loginid") or "?") for a in accounts
+                )
+            )
+
+        prefer = str(prefer or "demo").strip().lower()
+        demos = [a for a in accounts if self._is_demo_account(a)]
+        reals = [a for a in accounts if not self._is_demo_account(a)]
+        if prefer == "real":
+            if reals:
+                return reals[0]
+            raise RuntimeError(
+                "No real account on this PAT — only demo found. "
+                "Link a real trading account to the app / use a token with real access."
+            )
+        # demo (default, safer)
+        if demos:
+            return demos[0]
         return accounts[0]
 
     async def fetch_account_summary(self) -> dict[str, Any]:
@@ -241,9 +280,22 @@ class DerivTradeClient:
             "recent_losses": losses,
         }
 
+    def _account_pick_prefs(self) -> tuple[str, str]:
+        try:
+            from app.trade_prefs import load_trade_prefs
+
+            prefs = load_trade_prefs()
+            return (
+                str(prefs.get("trade_account_prefer") or "demo"),
+                str(prefs.get("trade_account_id") or ""),
+            )
+        except Exception:
+            return "demo", ""
+
     async def _fetch_summary_pat(self) -> dict[str, Any]:
         accounts = await self.list_accounts()
-        chosen = self._pick_account(accounts)
+        prefer, account_id = self._account_pick_prefs()
+        chosen = self._pick_account(accounts, prefer=prefer, account_id=account_id or None)
         self._account_id = str(
             chosen.get("account_id") or chosen.get("loginid") or chosen.get("id") or ""
         )
@@ -252,8 +304,7 @@ class DerivTradeClient:
         except (TypeError, ValueError):
             balance = 0.0
         currency = str(chosen.get("currency") or "USD")
-        at = str(chosen.get("account_type") or chosen.get("group") or "").lower()
-        is_virtual = "demo" in at or self._account_id.upper().startswith(("VRTC", "VRT", "DOT"))
+        is_virtual = self._is_demo_account(chosen)
 
         stats: dict[str, Any] = {
             "today_profit": None,
@@ -285,6 +336,8 @@ class DerivTradeClient:
             "balance": balance,
             "is_virtual": is_virtual,
             "account_type": "demo" if is_virtual else "real",
+            "trade_account_prefer": prefer,
+            "trade_account_id": account_id or self._account_id,
             "email": None,
             "fullname": None,
             **stats,
@@ -294,6 +347,7 @@ class DerivTradeClient:
                     "balance": a.get("balance"),
                     "currency": a.get("currency"),
                     "account_type": a.get("account_type") or a.get("group"),
+                    "is_demo": self._is_demo_account(a),
                 }
                 for a in accounts
             ],
@@ -349,7 +403,10 @@ class DerivTradeClient:
         if self._use_pat:
             if not self._account_id:
                 accounts = await self.list_accounts()
-                chosen = self._pick_account(accounts)
+                prefer, account_id = self._account_pick_prefs()
+                chosen = self._pick_account(
+                    accounts, prefer=prefer, account_id=account_id or None
+                )
                 self._account_id = str(
                     chosen.get("account_id") or chosen.get("loginid") or ""
                 )

@@ -42,6 +42,10 @@ def _defaults() -> dict[str, Any]:
         "trade_currency": "USD",
         # PAT apps use alphanumeric App ID from developers.deriv.com
         "deriv_app_id": str(settings.deriv_app_id or ""),
+        # PAT multi-account: demo (default/safer) or real
+        "trade_account_prefer": "demo",
+        # Optional exact loginid / account_id (overrides prefer when set)
+        "trade_account_id": "",
         # Cross-barrier filter: score with model_barrier, trade Setup barrier
         "cross_barrier_enabled": False,
         "model_barrier_distance": 0.9,
@@ -63,6 +67,10 @@ def _clamp(prefs: dict[str, Any]) -> dict[str, Any]:
     out["trade_currency"] = cur[:8]
     aid = str(out.get("deriv_app_id") or settings.deriv_app_id or "").strip()
     out["deriv_app_id"] = aid[:64]
+    prefer = str(out.get("trade_account_prefer") or "demo").strip().lower()
+    out["trade_account_prefer"] = prefer if prefer in ("demo", "real") else "demo"
+    acc_id = str(out.get("trade_account_id") or "").strip()
+    out["trade_account_id"] = acc_id[:64]
     out["cross_barrier_enabled"] = bool(out.get("cross_barrier_enabled", False))
     out["model_barrier_distance"] = max(0.01, min(50.0, float(out.get("model_barrier_distance", 0.9))))
     out["cross_barrier_min_probability"] = max(

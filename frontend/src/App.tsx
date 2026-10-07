@@ -2527,6 +2527,8 @@ type TradePrefs = {
   force_min_probability: number;
   trade_currency: string;
   deriv_app_id: string;
+  trade_account_prefer: 'demo' | 'real';
+  trade_account_id: string;
   cross_barrier_enabled: boolean;
   model_barrier_distance: number;
   cross_barrier_min_probability: number;
@@ -2543,6 +2545,8 @@ const DEFAULT_TRADE: TradePrefs = {
   force_min_probability: 0.8,
   trade_currency: 'USD',
   deriv_app_id: '',
+  trade_account_prefer: 'demo',
+  trade_account_id: '',
   cross_barrier_enabled: false,
   model_barrier_distance: 0.9,
   cross_barrier_min_probability: 0.8,
@@ -2615,6 +2619,8 @@ function SetupView({ online }: { online: boolean }) {
           force_min_probability: Number(r.force_min_probability ?? 0.8),
           trade_currency: r.trade_currency || 'USD',
           deriv_app_id: r.deriv_app_id || '',
+          trade_account_prefer: r.trade_account_prefer === 'real' ? 'real' : 'demo',
+          trade_account_id: r.trade_account_id || '',
           cross_barrier_enabled: !!r.cross_barrier_enabled,
           model_barrier_distance: Number(r.model_barrier_distance ?? 0.9),
           cross_barrier_min_probability: Number(r.cross_barrier_min_probability ?? 0.8),
@@ -2655,6 +2661,8 @@ function SetupView({ online }: { online: boolean }) {
           force_min_probability: trade.force_min_probability,
           trade_currency: trade.trade_currency,
           deriv_app_id: trade.deriv_app_id,
+          trade_account_prefer: trade.trade_account_prefer,
+          trade_account_id: trade.trade_account_id,
           cross_barrier_enabled: trade.cross_barrier_enabled,
           model_barrier_distance: trade.model_barrier_distance,
           cross_barrier_min_probability: trade.cross_barrier_min_probability,
@@ -2668,6 +2676,8 @@ function SetupView({ online }: { online: boolean }) {
         force_min_probability: Number(r.force_min_probability ?? prev.force_min_probability),
         trade_currency: r.trade_currency || prev.trade_currency,
         deriv_app_id: r.deriv_app_id || prev.deriv_app_id,
+        trade_account_prefer: r.trade_account_prefer === 'real' ? 'real' : 'demo',
+        trade_account_id: r.trade_account_id || '',
         cross_barrier_enabled: !!r.cross_barrier_enabled,
         model_barrier_distance: Number(r.model_barrier_distance ?? prev.model_barrier_distance),
         cross_barrier_min_probability: Number(
@@ -2678,7 +2688,23 @@ function SetupView({ online }: { online: boolean }) {
         token_mask: r.token_mask ?? prev.token_mask,
       }));
       setTradeOk(true);
-      setTradeMsg('✓ Trade prefs saved.');
+      let msg = `✓ Trade prefs saved · account type: ${r.trade_account_prefer === 'real' ? 'Real' : 'Demo'}.`;
+      if (r.token_configured) {
+        try {
+          const a = await api<TradeAccount>('/setup/trade-account?refresh=true');
+          if (a.ok) {
+            msg += ` Loaded ${a.account_type?.toUpperCase()} ${a.loginid} · ${a.balance} ${a.currency}. Refresh Dashboard to see it.`;
+            if (a.currency) {
+              setTrade(prev => ({ ...prev, trade_currency: a.currency || prev.trade_currency }));
+            }
+          } else if (a.error) {
+            msg += ` Account lookup: ${a.error}`;
+          }
+        } catch (e: any) {
+          msg += ` Account refresh failed: ${e.message}`;
+        }
+      }
+      setTradeMsg(msg);
     } catch (e: any) {
       setTradeOk(false);
       setTradeMsg(`✗ ${e.message}`);
@@ -3053,6 +3079,32 @@ function SetupView({ online }: { online: boolean }) {
               className="form-input"
               value={trade.trade_currency}
               onChange={e => setTrade(prev => ({ ...prev, trade_currency: e.target.value.toUpperCase() }))}
+            />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Account type</label>
+            <select
+              className="form-select"
+              value={trade.trade_account_prefer}
+              onChange={e => setTrade(prev => ({
+                ...prev,
+                trade_account_prefer: e.target.value === 'real' ? 'real' : 'demo',
+              }))}
+            >
+              <option value="demo">Demo (safer default)</option>
+              <option value="real">Real</option>
+            </select>
+            <div className="form-hint">PAT can list both — pick which one to load / trade.</div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Account ID (optional)</label>
+            <input
+              type="text"
+              className="form-input"
+              placeholder="e.g. CR… leave blank to use Account type"
+              value={trade.trade_account_id}
+              onChange={e => setTrade(prev => ({ ...prev, trade_account_id: e.target.value.trim() }))}
+              autoComplete="off"
             />
           </div>
           <div className="form-group">
