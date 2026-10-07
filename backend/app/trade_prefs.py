@@ -38,6 +38,8 @@ def _defaults() -> dict[str, Any]:
     return {
         "auto_trade_enabled": False,
         "trade_stake": 1.0,
+        # When true, each buy uses nearly the full live account balance (ignores fixed stake)
+        "trade_stake_use_full_balance": False,
         "force_min_probability": 0.80,
         "trade_currency": "USD",
         # PAT apps use alphanumeric App ID from developers.deriv.com
@@ -64,6 +66,7 @@ def _clamp(prefs: dict[str, Any]) -> dict[str, Any]:
     out.update({k: prefs[k] for k in prefs if k in _KEYS})
     out["auto_trade_enabled"] = bool(out["auto_trade_enabled"])
     out["trade_stake"] = max(0.35, min(10000.0, float(out["trade_stake"])))
+    out["trade_stake_use_full_balance"] = bool(out.get("trade_stake_use_full_balance", False))
     out["force_min_probability"] = max(0.50, min(0.99, float(out["force_min_probability"])))
     cur = str(out.get("trade_currency") or "USD").strip().upper() or "USD"
     out["trade_currency"] = cur[:8]

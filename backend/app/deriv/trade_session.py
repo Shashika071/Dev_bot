@@ -94,6 +94,30 @@ class TradeAccountSession:
         await self._refresh_profit_table(force=True)
         return self.snapshot()
 
+    async def get_live_balance(self) -> Optional[float]:
+        """Latest balance from snapshot or a live balance request on the open socket."""
+        snap = self.snapshot()
+        if snap.get("balance") is not None:
+            try:
+                return float(snap["balance"])
+            except (TypeError, ValueError):
+                pass
+        client = self._client
+        if client is None or not self._connected:
+            return None
+        try:
+            bal = await client.get_balance()
+            if bal.get("balance") is not None:
+                amount = float(bal.get("balance") or 0)
+                self._snapshot["balance"] = amount
+                if bal.get("currency"):
+                    self._snapshot["currency"] = str(bal.get("currency"))
+                self._persist_snapshot()
+                return amount
+        except Exception as e:
+            logger.warning("trade_session_get_balance_failed", error=str(e))
+        return None
+
     async def place_one_touch(self, **kwargs: Any) -> dict[str, Any]:
         """Place a trade on the shared socket when connected; else one-shot client."""
         client = self._client

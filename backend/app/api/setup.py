@@ -117,6 +117,7 @@ async def put_ops_prefs(body: OpsPrefsBody) -> dict:
 class TradePrefsBody(BaseModel):
     auto_trade_enabled: bool = False
     trade_stake: float = Field(1.0, ge=0.35, le=10000.0)
+    trade_stake_use_full_balance: bool = False
     force_min_probability: float = Field(0.80, ge=0.50, le=0.99)
     trade_currency: str = Field("USD", min_length=1, max_length=8)
     deriv_app_id: str = Field("", max_length=64)
@@ -145,7 +146,8 @@ async def get_trade_prefs() -> dict:
         ),
         "guide": {
             "auto_trade_enabled": "When on, Analyze / Force signal may place a buy after a signal is created.",
-            "trade_stake": "Stake amount sent in the proposal/buy (your account currency).",
+            "trade_stake": "Fixed stake when full-balance mode is off.",
+            "trade_stake_use_full_balance": "Each trade stakes ~full live balance (25→27→29 as balance changes). High risk.",
             "force_min_probability": "Force (model + candles) mode min calibrated probability (e.g. 0.8 = 80%).",
             "trade_currency": "Currency for proposal (usually USD).",
             "deriv_app_id": "App ID from developers.deriv.com → Apps (must match your PAT app).",

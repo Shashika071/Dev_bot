@@ -2618,6 +2618,7 @@ const DEFAULT_OPS: OpsPrefs = {
 type TradePrefs = {
   auto_trade_enabled: boolean;
   trade_stake: number;
+  trade_stake_use_full_balance: boolean;
   force_min_probability: number;
   trade_currency: string;
   deriv_app_id: string;
@@ -2637,6 +2638,7 @@ type TradeAccount = TradeAccountInfo;
 const DEFAULT_TRADE: TradePrefs = {
   auto_trade_enabled: false,
   trade_stake: 1,
+  trade_stake_use_full_balance: false,
   force_min_probability: 0.8,
   trade_currency: 'USD',
   deriv_app_id: '',
@@ -2716,6 +2718,7 @@ function SetupView({ online }: { online: boolean }) {
         setTrade({
           auto_trade_enabled: !!r.auto_trade_enabled,
           trade_stake: Number(r.trade_stake ?? 1),
+          trade_stake_use_full_balance: !!r.trade_stake_use_full_balance,
           force_min_probability: Number(r.force_min_probability ?? 0.8),
           trade_currency: r.trade_currency || 'USD',
           deriv_app_id: r.deriv_app_id || '',
@@ -2759,6 +2762,7 @@ function SetupView({ online }: { online: boolean }) {
         body: JSON.stringify({
           auto_trade_enabled: trade.auto_trade_enabled,
           trade_stake: trade.trade_stake,
+          trade_stake_use_full_balance: trade.trade_stake_use_full_balance,
           force_min_probability: trade.force_min_probability,
           trade_currency: trade.trade_currency,
           deriv_app_id: trade.deriv_app_id,
@@ -2775,6 +2779,7 @@ function SetupView({ online }: { online: boolean }) {
         ...prev,
         auto_trade_enabled: !!r.auto_trade_enabled,
         trade_stake: Number(r.trade_stake ?? prev.trade_stake),
+        trade_stake_use_full_balance: !!r.trade_stake_use_full_balance,
         force_min_probability: Number(r.force_min_probability ?? prev.force_min_probability),
         trade_currency: r.trade_currency || prev.trade_currency,
         deriv_app_id: r.deriv_app_id || prev.deriv_app_id,
@@ -3202,8 +3207,25 @@ function SetupView({ online }: { online: boolean }) {
               min={0.35}
               className="form-input"
               value={trade.trade_stake}
+              disabled={trade.trade_stake_use_full_balance}
               onChange={e => setTrade(prev => ({ ...prev, trade_stake: Number(e.target.value) }))}
             />
+            <label className="text-sm flex items-center gap-2 mt-2" style={{ cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={trade.trade_stake_use_full_balance}
+                onChange={e => setTrade(prev => ({
+                  ...prev,
+                  trade_stake_use_full_balance: e.target.checked,
+                }))}
+              />
+              Use full account balance each trade
+            </label>
+            <div className="form-hint">
+              {trade.trade_stake_use_full_balance
+                ? 'Each buy stakes ~live balance (e.g. 25 → 27 → 29). Leaves 0.01 cushion. Very high risk.'
+                : 'Fixed stake amount in your account currency.'}
+            </div>
           </div>
           <div className="form-group">
             <label className="form-label">Currency</label>
