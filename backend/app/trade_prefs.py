@@ -51,6 +51,8 @@ def _defaults() -> dict[str, Any]:
         "model_barrier_distance": 0.9,
         "cross_barrier_min_probability": 0.80,
         "cross_barrier_require_candles": True,
+        # Optional: also require touch confluence on Cross (stricter)
+        "cross_barrier_require_confluence": False,
     }
 
 
@@ -77,6 +79,9 @@ def _clamp(prefs: dict[str, Any]) -> dict[str, Any]:
         0.50, min(0.99, float(out.get("cross_barrier_min_probability", 0.80)))
     )
     out["cross_barrier_require_candles"] = bool(out.get("cross_barrier_require_candles", True))
+    out["cross_barrier_require_confluence"] = bool(
+        out.get("cross_barrier_require_confluence", False)
+    )
     return out
 
 

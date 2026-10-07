@@ -108,6 +108,8 @@ class SignalGenerator:
         min_confidence: Optional[float] = None,
         min_margin_over_breakeven: Optional[float] = None,
         require_candle_confirm: Optional[bool] = None,
+        require_touch_confluence: Optional[bool] = None,
+        strategy_barrier_distance: Optional[float] = None,
         official_candles: Optional[dict] = None,
     ) -> Optional[dict]:
         """
@@ -116,6 +118,9 @@ class SignalGenerator:
         force_model_candles: model calibrated p + candle confirm only (skip confluence/EV/edge).
         force_no_edge: legacy blind bypass (avoid for UI; tests only).
         require_candle_confirm: override candle gate (None = default Force/ops behavior).
+        require_touch_confluence: override confluence gate (None = default; True forces on
+        even for Force/Cross paths).
+        strategy_barrier_distance: barrier used for confluence/strategies (Cross: model barrier).
         official_candles: optional Deriv 1m/5m/15m OHLC set from public API.
         """
         # Manual research analysis may run while auto-alerts are paused.
@@ -149,11 +154,14 @@ class SignalGenerator:
         from app.ops_prefs import load_ops_prefs
 
         ops = load_ops_prefs()
-        require_confluence = (
-            bool(ops["require_touch_confluence"])
-            and not force_no_edge
-            and not force_model_candles
-        )
+        if require_touch_confluence is not None:
+            require_confluence = bool(require_touch_confluence)
+        else:
+            require_confluence = (
+                bool(ops["require_touch_confluence"])
+                and not force_no_edge
+                and not force_model_candles
+            )
 
         # Prefer one official Deriv OHLC pull for all directions (public WS)
         ohlc_set = official_candles
@@ -190,7 +198,12 @@ class SignalGenerator:
             if feat_df is None or feat_df.empty:
                 continue
 
-            candidates = self.strategies.evaluate_all(feat_df, current_price, barrier_distance)
+            strat_barrier = (
+                float(strategy_barrier_distance)
+                if strategy_barrier_distance is not None
+                else float(barrier_distance)
+            )
+            candidates = self.strategies.evaluate_all(feat_df, current_price, strat_barrier)
             candidates = [c for c in candidates if c.direction == direction]
             if require_confluence:
                 # Auto alerts and Analyze & Signal both require direction-matched confluence.
@@ -240,8 +253,13 @@ class SignalGenerator:
                         candle_blocked = True
 
             # Inject model-only candidate when strategy/confluence is empty —
-            # never after a failed candle gate.
-            if not candidates and (force_no_edge or force_model_candles) and not candle_blocked:
+            # never after a failed candle gate, and never when confluence is required.
+            if (
+                not candidates
+                and (force_no_edge or force_model_candles)
+                and not candle_blocked
+                and not require_confluence
+            ):
                 from app.strategies.base import StrategySignal
 
                 candidates = [

@@ -126,6 +126,7 @@ class TradePrefsBody(BaseModel):
     model_barrier_distance: float = Field(0.9, ge=0.01, le=50.0)
     cross_barrier_min_probability: float = Field(0.80, ge=0.50, le=0.99)
     cross_barrier_require_candles: bool = True
+    cross_barrier_require_confluence: bool = False
 
 
 class TradeTokenBody(BaseModel):
@@ -153,7 +154,8 @@ async def get_trade_prefs() -> dict:
             "cross_barrier_enabled": "Show Cross-barrier watch on Dashboard (score far model, trade Setup barrier).",
             "model_barrier_distance": "Barrier the trained model used (e.g. 0.9). Features/score use this.",
             "cross_barrier_min_probability": "Step confidence on the model barrier before trading Setup (e.g. 0.8 = 80%).",
-            "cross_barrier_require_candles": "When on, Cross-barrier also needs 1m/5m candle confirm on the trade direction.",
+            "cross_barrier_require_candles": "When on, Cross-barrier also needs 1m/5m/15m candle confirm on the trade direction.",
+            "cross_barrier_require_confluence": "When on, Cross also needs touch confluence (reachability + momentum/EMA agreement).",
         },
     }
 

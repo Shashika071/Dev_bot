@@ -447,6 +447,7 @@ async def generate_manual_signal(
         return {"ok": False, "reason": "Could not fetch live contract quotes from Deriv.", "analysis": []}
 
     require_candles_cross = bool(trade.get("cross_barrier_require_candles", True))
+    require_confluence_cross = bool(trade.get("cross_barrier_require_confluence", False))
     if cross_barrier:
         min_conf = (
             float(min_probability)
@@ -522,6 +523,8 @@ async def generate_manual_signal(
 
         if use_force_gates:
             meets = cal >= min_conf and candle_met
+            if cross_barrier and require_confluence_cross:
+                meets = meets and confluence_met
         else:
             meets = (
                 cal >= min_conf
@@ -591,6 +594,13 @@ async def generate_manual_signal(
         require_candle_confirm=(
             require_candles_cross if cross_barrier else (True if force_model_candles else None)
         ),
+        require_touch_confluence=(
+            require_confluence_cross if cross_barrier else None
+        ),
+        # Confluence reachability vs model (far) barrier on Cross
+        strategy_barrier_distance=(
+            float(feature_barrier) if (cross_barrier and require_confluence_cross) else None
+        ),
         official_candles=official_candles,
     )
 
@@ -621,9 +631,10 @@ async def generate_manual_signal(
             )
         if cross_barrier:
             candle_bit = " + candle confirm" if require_candles_cross else ""
+            conf_bit = " + confluence" if require_confluence_cross else ""
             reason = (
                 f"Cross-barrier — no setup. Need model@{feature_barrier:g} "
-                f"p≥{min_conf*100:.0f}%{candle_bit}, then trade Setup {barrier_dist:g}."
+                f"p≥{min_conf*100:.0f}%{candle_bit}{conf_bit}, then trade Setup {barrier_dist:g}."
                 f"{best_line}"
             )
         elif force_model_candles:

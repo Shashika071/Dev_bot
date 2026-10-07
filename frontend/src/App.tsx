@@ -2627,6 +2627,7 @@ type TradePrefs = {
   model_barrier_distance: number;
   cross_barrier_min_probability: number;
   cross_barrier_require_candles: boolean;
+  cross_barrier_require_confluence: boolean;
   token_configured?: boolean;
   token_mask?: string | null;
 };
@@ -2645,6 +2646,7 @@ const DEFAULT_TRADE: TradePrefs = {
   model_barrier_distance: 0.9,
   cross_barrier_min_probability: 0.8,
   cross_barrier_require_candles: true,
+  cross_barrier_require_confluence: false,
   token_configured: false,
   token_mask: null,
 };
@@ -2723,6 +2725,7 @@ function SetupView({ online }: { online: boolean }) {
           model_barrier_distance: Number(r.model_barrier_distance ?? 0.9),
           cross_barrier_min_probability: Number(r.cross_barrier_min_probability ?? 0.8),
           cross_barrier_require_candles: r.cross_barrier_require_candles !== false,
+          cross_barrier_require_confluence: !!r.cross_barrier_require_confluence,
           token_configured: !!r.token_configured,
           token_mask: r.token_mask ?? null,
         });
@@ -2765,6 +2768,7 @@ function SetupView({ online }: { online: boolean }) {
           model_barrier_distance: trade.model_barrier_distance,
           cross_barrier_min_probability: trade.cross_barrier_min_probability,
           cross_barrier_require_candles: trade.cross_barrier_require_candles,
+          cross_barrier_require_confluence: trade.cross_barrier_require_confluence,
         }),
       });
       setTrade(prev => ({
@@ -2782,6 +2786,7 @@ function SetupView({ online }: { online: boolean }) {
           r.cross_barrier_min_probability ?? prev.cross_barrier_min_probability,
         ),
         cross_barrier_require_candles: r.cross_barrier_require_candles !== false,
+        cross_barrier_require_confluence: !!r.cross_barrier_require_confluence,
         token_configured: r.token_configured ?? prev.token_configured,
         token_mask: r.token_mask ?? prev.token_mask,
       }));
@@ -3158,6 +3163,35 @@ function SetupView({ online }: { online: boolean }) {
           />
           Enable auto-trade (demo or real)
         </label>
+
+        <div className="flex items-center gap-4 mb-3" style={{ flexWrap: 'wrap' }}>
+          <label className="text-sm flex items-center gap-2" style={{ cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={trade.cross_barrier_require_candles}
+              onChange={e => setTrade(prev => ({
+                ...prev,
+                cross_barrier_require_candles: e.target.checked,
+              }))}
+            />
+            Cross: require candles
+          </label>
+          <label className="text-sm flex items-center gap-2" style={{ cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={trade.cross_barrier_require_confluence}
+              onChange={e => setTrade(prev => ({
+                ...prev,
+                cross_barrier_require_confluence: e.target.checked,
+              }))}
+            />
+            Cross: require confluence
+          </label>
+        </div>
+        <p className="text-xs text-dim mb-3">
+          Confluence = tick reachability + momentum/EMA agreement on the <strong>model</strong> barrier.
+          Turn on for stricter Cross (fewer signals).
+        </p>
 
         <div className="grid-2">
           <div className="form-group">
