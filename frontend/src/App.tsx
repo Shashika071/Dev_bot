@@ -563,6 +563,9 @@ type TradeAccountInfo = {
   message?: string;
   refresh_allowed_in?: number;
   cache_age_seconds?: number;
+  live?: boolean;
+  update_source?: string;
+  session?: { live?: boolean; last_error?: string | null };
 };
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
@@ -682,7 +685,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
         }
         setDashTokenConfigured(!!r.token_configured);
         setDashAutoTrade(!!r.auto_trade_enabled);
-        // Cache first — live Deriv call only when user clicks Refresh (throttled)
+        // Cache/live snapshot — no PAT spam (server holds one balance stream)
         if (r.token_configured) loadDashAccount('cache');
       })
       .catch(() => {});
@@ -693,6 +696,13 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
       })
       .catch(() => {});
   }, [loadDashAccount]);
+
+  // Poll disk/live snapshot only (backend does not open new OTP for cache reads)
+  useEffect(() => {
+    if (!dashTokenConfigured) return;
+    const id = setInterval(() => loadDashAccount('cache'), 8000);
+    return () => clearInterval(id);
+  }, [dashTokenConfigured, loadDashAccount]);
   useEffect(() => {
     loadChart();
     const id = setInterval(loadChart, tf === 'tick' ? 2500 : 5000);
@@ -730,8 +740,8 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
           `Auto-trade OK · contract ${st.trade.contract_id} · stake ${st.trade.stake}` +
           (st.signals_this_session != null ? ` · session signals ${st.signals_this_session}` : '')
         );
-        // Soft refresh (respects 120s cooldown) — don't hammer Deriv after every fill
-        loadDashAccount('refresh');
+        // Live session already got the balance push; pull snapshot only
+        loadDashAccount('cache');
       } else if (st.trade.error) {
         setTradeResultMsg(`Auto-trade failed: ${st.trade.error}`);
       }
@@ -1140,17 +1150,24 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
                 ? <span className="badge badge-green">Auto-trade ON</span>
                 : <span className="badge badge-dim">Auto-trade off</span>}
               {dashAccountLoading && <Loader2 size={12} className="spin"/>}
+              {dashAccount?.live
+                ? <span className="badge badge-green">LIVE</span>
+                : dashTokenConfigured
+                  ? <span className="badge badge-dim">offline</span>
+                  : null}
               <button
                 type="button"
                 className="btn btn-ghost"
                 style={{ padding: '2px 8px', fontSize: 12 }}
-                onClick={() => loadDashAccount('refresh')}
-                disabled={dashAccountLoading || acctCooldown > 0}
-                title={acctCooldown > 0
-                  ? `Wait ${acctCooldown}s — limits Deriv API calls`
-                  : 'Live refresh from Deriv (max once per 2 min)'}
+                onClick={() => loadDashAccount(dashAccount?.live ? 'force' : 'refresh')}
+                disabled={dashAccountLoading || (!dashAccount?.live && acctCooldown > 0)}
+                title={dashAccount?.live
+                  ? 'Refresh P/L stats on the live session (no new login)'
+                  : acctCooldown > 0
+                    ? `Wait ${acctCooldown}s — limits Deriv API calls`
+                    : 'Sync account (throttled)'}
               >
-                {acctCooldown > 0 ? `Wait ${acctCooldown}s` : 'Refresh'}
+                {!dashAccount?.live && acctCooldown > 0 ? `Wait ${acctCooldown}s` : 'Refresh'}
               </button>
             </div>
             {!dashTokenConfigured && (
@@ -1158,7 +1175,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
                 No trade token — set it in Setup to show balance / P&L here.
               </div>
             )}
-            {dashTokenConfigured && dashAccount?.throttled && dashAccount.message && (
+            {dashTokenConfigured && dashAccount?.message && (
               <div className="text-xs text-dim" style={{ marginBottom: 4 }}>
                 {dashAccount.message}
               </div>
@@ -1172,7 +1189,11 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
                       : <span className="badge badge-green">REAL</span>}
                     {' '}{dashAccount.loginid}
                     {dashAccount.fullname ? ` · ${dashAccount.fullname}` : ''}
-                    {dashAccount.cached ? <span className="text-dim"> · cached</span> : null}
+                    {dashAccount.live
+                      ? <span className="text-dim"> · stream</span>
+                      : dashAccount.cached
+                        ? <span className="text-dim"> · cached</span>
+                        : null}
                   </span>
                   <span>
                     Balance{' '}

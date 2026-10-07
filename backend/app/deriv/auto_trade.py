@@ -12,7 +12,7 @@ from typing import Any, Optional
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.deriv.trade_client import DerivTradeClient
+from app.deriv.trade_session import trade_account_session
 from app.models.signal import Signal
 from app.signal_engine.settings_lookup import get_latest_confirmed_settings
 from app.trade_prefs import get_trade_token, load_trade_prefs
@@ -54,22 +54,16 @@ async def maybe_auto_trade_after_signal(
     duration_unit = str(conf.duration_unit or "m")
     currency = str(prefs.get("trade_currency") or conf.currency or "USD")
 
-    client = DerivTradeClient(token)
-    try:
-        result = await client.place_one_touch(
-            symbol=str(symbol),
-            direction=str(direction),
-            barrier=str(barrier),
-            duration=duration,
-            duration_unit=duration_unit,
-            stake=stake,
-            currency=currency,
-        )
-    finally:
-        try:
-            await client.close()
-        except Exception:
-            pass
+    # Shared live trade WS — avoids a new PAT/OTP per buy
+    result = await trade_account_session.place_one_touch(
+        symbol=str(symbol),
+        direction=str(direction),
+        barrier=str(barrier),
+        duration=duration,
+        duration_unit=duration_unit,
+        stake=stake,
+        currency=currency,
+    )
 
     # Persist contract id on signal notes
     signal_id = signal_data.get("signal_id")

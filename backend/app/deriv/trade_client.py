@@ -35,6 +35,7 @@ ALLOWED_ROOT_KEYS = {
     "ping",
     "balance",
     "profit_table",
+    "transaction",
     "get_account_status",
 }
 
@@ -68,11 +69,16 @@ class DerivTradeClient:
         self._authorized_loginid: Optional[str] = None
         self._account_id: Optional[str] = None
         self._use_pat = _is_pat(self.token)
+        self._stream_handler: Optional[Any] = None
         if self._use_pat and not self.app_id:
             raise RuntimeError(
                 "PAT token requires App ID. Set Setup → Deriv App ID "
                 "or DERIV_APP_ID in .env.prod (from developers.deriv.com → Apps)."
             )
+
+    def set_stream_handler(self, handler) -> None:
+        """Optional async/sync callback for unsolicited WS messages (balance, etc.)."""
+        self._stream_handler = handler
 
     def _rest_headers(self) -> dict[str, str]:
         return {
@@ -503,6 +509,14 @@ class DerivTradeClient:
                     fut = self._pending.pop(int(req_id))
                     if not fut.done():
                         fut.set_result(data)
+                    # First subscribe reply also useful as a stream event
+                    if data.get("subscription") or data.get("msg_type") in (
+                        "balance",
+                        "transaction",
+                    ):
+                        await self._dispatch_stream(data)
+                    continue
+                await self._dispatch_stream(data)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -512,8 +526,22 @@ class DerivTradeClient:
                     fut.set_exception(ConnectionError(str(e)))
             self._pending.clear()
 
+    async def _dispatch_stream(self, data: dict) -> None:
+        handler = self._stream_handler
+        if not handler:
+            return
+        try:
+            result = handler(data)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception as e:
+            logger.warning("deriv_trade_stream_handler_failed", error=str(e))
+
     async def send(self, msg: dict, timeout: float = 30.0) -> dict:
-        root = next((k for k in msg if k not in ("req_id", "passthrough")), None)
+        root = next(
+            (k for k in msg if k not in ("req_id", "passthrough", "subscribe")),
+            None,
+        )
         if root not in ALLOWED_ROOT_KEYS:
             raise RuntimeError(f"Trade client blocked message type: {root}")
         if self.ws is None:
@@ -550,6 +578,97 @@ class DerivTradeClient:
     async def get_balance(self) -> dict:
         data = await self.send({"balance": 1})
         return data.get("balance") or {}
+
+    async def subscribe_balance(self) -> dict:
+        """Subscribe to live balance pushes on this socket."""
+        data = await self.send({"balance": 1, "subscribe": 1})
+        return data.get("balance") or data
+
+    async def subscribe_transactions(self) -> dict:
+        """Subscribe to transaction stream (buy/sell) when the API allows it."""
+        data = await self.send({"transaction": 1, "subscribe": 1})
+        return data.get("transaction") or data
+
+    async def seed_account_snapshot(self) -> dict[str, Any]:
+        """
+        Build account summary on the *already connected* socket.
+        Does not open a second PAT/OTP session.
+        """
+        prefer, account_id_pref = self._account_pick_prefs()
+        accounts: list[dict] = []
+        chosen: dict = {}
+        if self._use_pat:
+            try:
+                accounts = await self.list_accounts()
+                chosen = self._pick_account(
+                    accounts, prefer=prefer, account_id=account_id_pref or None
+                )
+                self._account_id = str(
+                    chosen.get("account_id") or chosen.get("loginid") or self._account_id or ""
+                )
+            except Exception as e:
+                logger.warning("pat_list_accounts_seed_failed", error=str(e))
+
+        balance = 0.0
+        currency = str(chosen.get("currency") or "USD")
+        is_virtual = self._is_demo_account(chosen) if chosen else False
+        try:
+            bal = await self.get_balance()
+            if bal.get("balance") is not None:
+                balance = float(bal.get("balance") or 0)
+            currency = str(bal.get("currency") or currency)
+            if bal.get("loginid"):
+                self._authorized_loginid = str(bal.get("loginid"))
+        except Exception as e:
+            logger.warning("seed_balance_failed", error=str(e))
+            try:
+                balance = float(chosen.get("balance") or 0)
+            except (TypeError, ValueError):
+                balance = 0.0
+
+        stats: dict[str, Any] = {
+            "today_profit": None,
+            "today_wins": None,
+            "today_losses": None,
+            "recent_profit": None,
+            "recent_trades": None,
+            "recent_wins": None,
+            "recent_losses": None,
+            "open_trades": None,
+        }
+        try:
+            pt = await self.get_profit_table(limit=100)
+            stats = self._profit_stats_from_table(pt)
+        except Exception as e:
+            logger.warning("seed_profit_table_failed", error=str(e))
+
+        loginid = self._authorized_loginid or self._account_id
+        return {
+            "ok": True,
+            "loginid": loginid,
+            "currency": currency,
+            "balance": balance,
+            "is_virtual": is_virtual,
+            "account_type": "demo" if is_virtual else "real",
+            "trade_account_prefer": prefer,
+            "trade_account_id": account_id_pref or loginid,
+            "email": None,
+            "fullname": None,
+            **stats,
+            "accounts": [
+                {
+                    "account_id": a.get("account_id") or a.get("loginid"),
+                    "balance": a.get("balance"),
+                    "currency": a.get("currency"),
+                    "account_type": a.get("account_type") or a.get("group"),
+                    "is_demo": self._is_demo_account(a),
+                }
+                for a in accounts
+            ],
+            "auth_mode": "pat" if self._use_pat else "legacy",
+            "app_id": self.app_id,
+            "token_configured": True,
+        }
 
     async def get_profit_table(self, *, limit: int = 100) -> dict:
         data = await self.send(

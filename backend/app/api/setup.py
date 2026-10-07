@@ -163,12 +163,17 @@ async def put_trade_prefs(body: TradePrefsBody) -> dict:
     before = load_trade_prefs()
     saved = save_trade_prefs(body.model_dump())
     # Account prefer / id change → drop cache so next load can hit Deriv once
-    if (
+    account_changed = (
         before.get("trade_account_prefer") != saved.get("trade_account_prefer")
         or before.get("trade_account_id") != saved.get("trade_account_id")
         or before.get("deriv_app_id") != saved.get("deriv_app_id")
-    ):
-        _clear_account_cache()
+    )
+    if account_changed:
+        from app.deriv.account_cache import clear_account_cache
+        from app.deriv.trade_session import trade_account_session
+
+        clear_account_cache()
+        await trade_account_session.restart()
     return {
         **saved,
         **trade_prefs_public(),
@@ -177,69 +182,9 @@ async def put_trade_prefs(body: TradePrefsBody) -> dict:
     }
 
 
-# Avoid hammering Deriv PAT/OTP on every Dashboard Refresh click.
-_ACCOUNT_CACHE_TTL_SECONDS = 120
-
-
-def _account_cache_path() -> str:
-    import os
-    from app.config import settings
-
-    return os.path.join(settings.model_dir, "deriv_trade_account.json")
-
-
-def _read_account_cache() -> dict | None:
-    import json
-    import os
-    import time
-
-    path = _account_cache_path()
-    if not os.path.isfile(path):
-        return None
-    try:
-        with open(path, encoding="utf-8") as f:
-            cached = json.load(f)
-        if not isinstance(cached, dict):
-            return None
-        fetched_at = float(cached.get("fetched_at") or 0)
-        age = max(0.0, time.time() - fetched_at) if fetched_at else 1e9
-        cached = {
-            **cached,
-            "cached": True,
-            "cache_age_seconds": int(age),
-            "cache_ttl_seconds": _ACCOUNT_CACHE_TTL_SECONDS,
-            "refresh_allowed_in": max(0, int(_ACCOUNT_CACHE_TTL_SECONDS - age)),
-        }
-        return cached
-    except Exception:
-        return None
-
-
-def _write_account_cache(summary: dict) -> dict:
-    import json
-    import os
-    import time
-    from app.config import settings
-
-    out = {
-        **summary,
-        "fetched_at": time.time(),
-        "cached": False,
-        "cache_age_seconds": 0,
-        "cache_ttl_seconds": _ACCOUNT_CACHE_TTL_SECONDS,
-        "refresh_allowed_in": _ACCOUNT_CACHE_TTL_SECONDS,
-    }
-    try:
-        os.makedirs(settings.model_dir, exist_ok=True)
-        with open(_account_cache_path(), "w", encoding="utf-8") as f:
-            json.dump(out, f, indent=2, default=str)
-    except Exception:
-        pass
-    return out
-
-
 async def _fetch_trade_account() -> dict:
-    """Authorize with stored token and return balance / profit summary (hard timeout)."""
+    """One-shot account lookup (fallback when live session is down)."""
+    from app.deriv.account_cache import write_account_cache
     from app.deriv.trade_client import DerivTradeClient
     from app.trade_prefs import get_trade_token, resolve_deriv_app_id
 
@@ -254,7 +199,8 @@ async def _fetch_trade_account() -> dict:
         summary = await client.fetch_account_summary()
         summary["token_configured"] = True
         summary["app_id_used"] = app_id
-        return _write_account_cache(summary)
+        summary["live"] = False
+        return write_account_cache(summary)
 
     try:
         return await asyncio.wait_for(_run(), timeout=22.0)
@@ -279,41 +225,78 @@ async def _fetch_trade_account() -> dict:
             pass
 
 
-def _clear_account_cache() -> None:
-    import os
-
-    try:
-        path = _account_cache_path()
-        if os.path.isfile(path):
-            os.remove(path)
-    except Exception:
-        pass
-
-
 @router.get("/trade-account")
 async def get_trade_account(refresh: bool = False, force: bool = False) -> dict:
     """
-    Show Deriv account details for the saved trade token.
+    Trade account snapshot.
 
-    - Default / refresh=false: disk cache only (no Deriv call).
-    - refresh=true: live Deriv fetch only if cache older than 120s (anti-spam).
-    - force=true: live fetch now (after token/prefs change); bypasses TTL once.
+    Prefer the event-driven live session cache (no new Deriv auth).
+    Manual refresh/force only opens a one-shot client when the live session
+    is down or force is requested after a long cooldown.
     """
+    from app.deriv.account_cache import ACCOUNT_CACHE_TTL_SECONDS, read_account_cache
+    from app.deriv.trade_session import trade_account_session
     from app.trade_prefs import token_status
 
     status = token_status()
     if not status.get("token_configured"):
         return {"ok": False, "token_configured": False, "error": "No trade token configured"}
 
-    cached = _read_account_cache()
+    live = trade_account_session.status()
+    # Keep live session up whenever a token exists
+    if not live.get("want_running"):
+        try:
+            await trade_account_session.start()
+            live = trade_account_session.status()
+        except Exception:
+            pass
+
+    snap = trade_account_session.snapshot()
+    if snap.get("ok") and (live.get("live") or not force):
+        if force and live.get("live"):
+            # Stats only — never a second PAT session while live is up
+            try:
+                snap = await trade_account_session.refresh_stats() or snap
+            except Exception:
+                pass
+        return {
+            **snap,
+            **status,
+            "live": live.get("live", False),
+            "cached": not live.get("live"),
+            "update_source": snap.get("update_source"),
+            "session": live,
+            "message": (
+                "Live session — balance updates automatically from Deriv."
+                if live.get("live")
+                else None
+            ),
+        }
+
+    cached = read_account_cache()
     if cached and cached.get("ok") and not force:
-        if not refresh:
-            return {**cached, **status}
-        age = int(cached.get("cache_age_seconds") or 0)
-        if age < _ACCOUNT_CACHE_TTL_SECONDS:
+        if not refresh or live.get("live"):
+            # Live session owns updates — never open a second OTP for Refresh
             return {
                 **cached,
                 **status,
+                "live": live.get("live", False),
+                "session": live,
+                "cached": True,
+                "throttled": bool(refresh and live.get("live")),
+                "message": (
+                    "Live session connected — balance updates automatically."
+                    if live.get("live")
+                    else None
+                ),
+            }
+        age = int(cached.get("cache_age_seconds") or 0)
+        if age < ACCOUNT_CACHE_TTL_SECONDS:
+            return {
+                **cached,
+                **status,
+                "live": False,
+                "session": live,
                 "cached": True,
                 "throttled": True,
                 "message": (
@@ -323,19 +306,32 @@ async def get_trade_account(refresh: bool = False, force: bool = False) -> dict:
                 ),
             }
 
+    # Session down / no cache / force — one-shot fallback only
     summary = await _fetch_trade_account()
-    return {**summary, **status}
+    return {**summary, **status, "live": False, "session": trade_account_session.status()}
 
 
 @router.put("/trade-token")
 async def put_trade_token(body: TradeTokenBody) -> dict:
+    from app.deriv.account_cache import clear_account_cache
+    from app.deriv.trade_session import trade_account_session
+
     try:
         meta = save_trade_token(body.token)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    _clear_account_cache()
-    # Immediately authorize and return account details (one live call)
-    account = await _fetch_trade_account()
+    clear_account_cache()
+    await trade_account_session.restart()
+    # Wait briefly for live seed
+    account: dict = {"ok": False, "error": "Live session starting…"}
+    for _ in range(20):
+        await asyncio.sleep(0.5)
+        snap = trade_account_session.snapshot()
+        if snap.get("ok"):
+            account = {**snap, "live": trade_account_session.connected}
+            break
+    if not account.get("ok"):
+        account = await _fetch_trade_account()
     return {
         **meta,
         **load_trade_prefs(),
@@ -347,12 +343,16 @@ async def put_trade_token(body: TradeTokenBody) -> dict:
 
 @router.delete("/trade-token")
 async def delete_trade_token() -> dict:
+    from app.deriv.account_cache import clear_account_cache
+    from app.deriv.trade_session import trade_account_session
+
+    await trade_account_session.stop()
     clear_trade_token()
     # Hard safety: clearing token also disables auto-trade
     prefs = load_trade_prefs()
     if prefs.get("auto_trade_enabled"):
         prefs = save_trade_prefs({**prefs, "auto_trade_enabled": False})
-    _clear_account_cache()
+    clear_account_cache()
     return {
         "token_configured": False,
         "token_mask": None,
