@@ -3039,9 +3039,9 @@ function SetupView({ online }: { online: boolean }) {
         <div className="grid-2">
           <div className="form-group">
             <label className="form-label">Max signals / day</label>
-            <input type="number" className="form-input" min={0} max={10} value={ops.max_signals_per_day}
+            <input type="number" className="form-input" min={0} max={25} value={ops.max_signals_per_day}
               onChange={e => setOpsField('max_signals_per_day', Number(e.target.value))}/>
-            <div className="form-hint">{opsGuide.max_signals_per_day || 'Default 3 (Asia/Colombo day).'}</div>
+            <div className="form-hint">{opsGuide.max_signals_per_day || 'Default 3. Max 25 (Asia/Colombo day).'}</div>
           </div>
           <div className="form-group">
             <label className="form-label">Cooldown cooldown (seconds)</label>

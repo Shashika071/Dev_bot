@@ -29,7 +29,7 @@ class Settings(BaseSettings):
 
     # --- Application ---
     app_timezone: str = Field("Asia/Colombo", description="Timezone for daily signal cap reset")
-    max_signals_per_day: int = Field(3, ge=0, le=10)
+    max_signals_per_day: int = Field(3, ge=0, le=25)
     signal_cooldown_seconds: int = Field(
         3600, ge=0, description="Min seconds between signals (from last created_at); 3600 = 1h test rest"
     )

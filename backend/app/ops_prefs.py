@@ -50,7 +50,7 @@ _KEYS = set(_defaults().keys())
 def _clamp(prefs: dict[str, Any]) -> dict[str, Any]:
     out = _defaults()
     out.update({k: prefs[k] for k in prefs if k in _KEYS})
-    out["max_signals_per_day"] = max(0, min(10, int(out["max_signals_per_day"])))
+    out["max_signals_per_day"] = max(0, min(25, int(out["max_signals_per_day"])))
     out["signal_cooldown_seconds"] = max(0, min(7200, int(out["signal_cooldown_seconds"])))
     out["manual_min_confidence"] = max(0.5, min(0.99, float(out["manual_min_confidence"])))
     out["manual_min_margin_over_breakeven"] = max(

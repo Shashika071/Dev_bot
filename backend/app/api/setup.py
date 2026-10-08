@@ -27,7 +27,7 @@ router = APIRouter(prefix="/setup", tags=["setup"])
 
 
 class OpsPrefsBody(BaseModel):
-    max_signals_per_day: int = Field(3, ge=0, le=10)
+    max_signals_per_day: int = Field(3, ge=0, le=25)
     signal_cooldown_seconds: int = Field(3600, ge=0, le=7200)
     manual_min_confidence: float = Field(0.95, ge=0.5, le=0.99)
     manual_min_margin_over_breakeven: float = Field(0.03, ge=0.0, le=0.5)
