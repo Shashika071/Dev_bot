@@ -496,6 +496,30 @@ class SignalGenerator:
         if not passing:
             return None
 
+        # If EMA + recent return agree, do not buy the opposite side.
+        # Stops a saturated Upper model (p≈100%) from trading into a downtrend.
+        from app.signal_engine.trend_side import market_trend_side
+
+        trend_frame = None
+        if features_by_direction:
+            for frame in features_by_direction.values():
+                if frame is not None and not getattr(frame, "empty", True):
+                    trend_frame = frame
+                    break
+        if trend_frame is None:
+            trend_frame = features_df
+        trend_side = market_trend_side(trend_frame)
+        if trend_side:
+            aligned = [p for p in passing if p.get("direction") == trend_side]
+            if not aligned:
+                logger.info(
+                    "signal_blocked_against_trend",
+                    trend=trend_side,
+                    candidates=[p.get("direction") for p in passing],
+                )
+                return None
+            passing = aligned
+
         # Confidence/force: highest model probability; normal: best EV
         if force_no_edge or confidence_override or force_model_candles:
             best = max(passing, key=lambda x: x["cal_prob"])

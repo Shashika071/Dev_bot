@@ -614,6 +614,8 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
     meets_confidence?: boolean; confluence_met?: boolean;
     candle_confirm_met?: boolean; candle_confirm_score?: number;
     candle_source?: string;
+    trend_side?: string | null;
+    trend_ok?: boolean;
     selected_pipeline?: string; reason?: string;
   }>>([]);
   const [perf, setPerf] = useState<{
@@ -1345,6 +1347,11 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
                           : a.candle_source
                             ? <span className="text-dim"> · {a.candle_source}</span>
                             : null}
+                      {a.trend_side
+                        ? (a.trend_ok
+                          ? <span className="text-green"> · trend {a.trend_side}</span>
+                          : <span className="text-dim"> · against {a.trend_side} trend</span>)
+                        : <span className="text-dim"> · trend flat</span>}
                       {a.meets_confidence
                         ? <span className="text-green"> · READY</span>
                         : <span className="text-dim"> · below bar</span>}

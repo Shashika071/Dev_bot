@@ -521,8 +521,13 @@ async def generate_manual_signal(
         )
         candle_met = bool(candle.confirmed) if require_candle else True
 
+        from app.signal_engine.trend_side import market_trend_side
+
+        trend_side = market_trend_side(feat_df)
+        trend_ok = trend_side is None or trend_side == direction
+
         if use_force_gates:
-            meets = cal >= min_conf and candle_met
+            meets = cal >= min_conf and candle_met and trend_ok
             if cross_barrier and require_confluence_cross:
                 meets = meets and confluence_met
         else:
@@ -531,6 +536,7 @@ async def generate_manual_signal(
                 and margin >= min_margin
                 and (force_no_edge or confluence_met)
                 and candle_met
+                and trend_ok
             )
         analysis.append({
             "direction": direction,
@@ -551,6 +557,8 @@ async def generate_manual_signal(
             "candle_confirm_score": candle.score,
             "candle_confirm_explanation": candle.explanation,
             "candle_source": (candle.details or {}).get("source"),
+            "trend_side": trend_side,
+            "trend_ok": trend_ok,
             "spot": current_price,
             "mode": mode_label,
             "model_barrier": feature_barrier,
