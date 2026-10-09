@@ -1166,6 +1166,17 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
                 : dashTokenConfigured
                   ? <span className="badge badge-dim">offline</span>
                   : null}
+              {(() => {
+                const trend = analysisRows.find(r => r.trend_side)?.trend_side || null;
+                if (!analysisRows.some(r => r.ok) && !trend) return null;
+                if (trend === 'upper') {
+                  return <span className="badge badge-green" title="EMA and last 60 ticks are up — only Upper can trade">Trend UP</span>;
+                }
+                if (trend === 'lower') {
+                  return <span className="badge badge-amber" title="EMA and last 60 ticks are down — only Lower can trade">Trend DOWN</span>;
+                }
+                return <span className="badge badge-dim" title="Trend mixed — either side can trade if it passes">Trend FLAT</span>;
+              })()}
               <button
                 type="button"
                 className="btn btn-ghost"
