@@ -14,27 +14,42 @@ class MarketUnavailable(Exception):
     pass
 
 
+def _display_name(row: dict) -> str:
+    return str(row.get("display_name") or row.get("underlying_symbol_name") or "").strip()
+
+
+def _symbol_code(row: dict) -> str:
+    return str(row.get("symbol") or row.get("underlying_symbol") or "").strip()
+
+
+def _is_one_second(row: dict) -> bool:
+    symbol = _symbol_code(row)
+    name = _display_name(row).lower()
+    return symbol.upper().startswith("1HZ") or "(1s)" in name or name.endswith(" 1s index")
+
+
 def resolve_volatility_100(active_symbols: list[dict]) -> dict:
     matches = []
     for row in active_symbols:
-        name = str(row.get("display_name") or "").strip()
-        if name.lower() == EXPECTED_DISPLAY_NAME.lower():
+        if _is_one_second(row):
+            continue
+        if _display_name(row).lower() == EXPECTED_DISPLAY_NAME.lower():
             matches.append(row)
-    if len(matches) != 1:
+    symbols = {_symbol_code(row) for row in matches}
+    symbols.discard("")
+    if len(matches) != 1 or len(symbols) != 1:
         raise MarketUnavailable(
             "Volatility 100 Index was not uniquely available. "
             "No other instrument will be substituted."
         )
     row = matches[0]
-    symbol = str(row.get("symbol") or "")
-    if not symbol or symbol.upper().startswith("1HZ") or "1s" in symbol.lower():
-        raise MarketUnavailable("Refusing Volatility 100 (1s) or an unverified symbol")
+    symbol = _symbol_code(row)
     return {
         "symbol": symbol,
-        "display_name": str(row.get("display_name")),
+        "display_name": _display_name(row),
         "expected_legacy_symbol": EXPECTED_LEGACY_SYMBOL,
         "matches_legacy_symbol": symbol == EXPECTED_LEGACY_SYMBOL,
-        "pip": row.get("pip"),
+        "pip": row.get("pip") if row.get("pip") is not None else row.get("pip_size"),
     }
 
 

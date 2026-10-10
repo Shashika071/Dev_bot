@@ -488,3 +488,153 @@ class SqlStore:
         with self.Session() as session:
             session.add(DmDataset(**values))
             session.commit()
+
+    def saved_touch_count(self, symbol: str = "R_100") -> int:
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from app.models.tick import Tick
+
+        try:
+            with self.Session() as session:
+                return int(session.query(Tick).filter(Tick.symbol == symbol).count())
+        except SQLAlchemyError:
+            return 0
+
+    def import_saved_ticks(self, symbol: str = "R_100") -> dict:
+        """Copy the touch bot's saved R_100 ticks. Digits are rebuilt from the numeric quote and pip size."""
+        import uuid
+        from dataclasses import replace
+
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from app.digitmatch.digits import DigitError, decimal_places
+        from app.digitmatch.ingestion import normalize_observation
+        from app.models.tick import Tick
+
+        symbol = str(symbol or "").strip()
+        if symbol != "R_100":
+            raise ValueError("Only saved Volatility 100 Index ticks (R_100) can be copied. The 1-second index is not used.")
+
+        try:
+            with self.Session() as session:
+                raw = (
+                    session.query(Tick.epoch, Tick.quote, Tick.pip_size, Tick.is_gap, Tick.received_at, Tick.id)
+                    .filter(Tick.symbol == symbol)
+                    .order_by(Tick.epoch.asc(), Tick.id.asc())
+                    .all()
+                )
+        except SQLAlchemyError as exc:
+            raise RuntimeError("Saved touch-bot ticks could not be read") from exc
+
+        ingestion_id = uuid.uuid4().hex
+        previous_epoch = None
+        previous_precision = None
+        previous_quote = None
+        batch: list[dict] = []
+        unreadable = 0
+        inserter = pg_insert if self.engine.dialect.name == "postgresql" else sqlite_insert
+
+        def flush(session) -> None:
+            nonlocal batch
+            if not batch:
+                return
+            stmt = inserter(DmTick).values(batch)
+            if self.engine.dialect.name == "postgresql":
+                stmt = stmt.on_conflict_do_nothing(constraint="uq_dm_ticks_dedup")
+            else:
+                stmt = stmt.on_conflict_do_nothing(index_elements=["dedup_key"])
+            session.execute(stmt)
+            session.commit()
+            batch = []
+
+        with self.Session() as session:
+            before = session.query(DmTick).filter(DmTick.symbol == symbol, DmTick.source == "touch_bot").count()
+            for epoch, quote, pip_size, is_gap, received_at, _row_id in raw:
+                try:
+                    if pip_size is None:
+                        observation = normalize_observation(
+                            symbol=symbol,
+                            quote=quote,
+                            epoch=int(epoch),
+                            pip_size=None,
+                            source="touch_bot",
+                            ingestion_id=ingestion_id,
+                            broker_tick_id=None,
+                            received_at=received_at,
+                        )
+                    else:
+                        precision = decimal_places(pip_size)
+                        text = f"{float(quote):.{precision}f}"
+                        observation = normalize_observation(
+                            symbol=symbol,
+                            quote=text,
+                            epoch=int(epoch),
+                            pip_size=precision,
+                            source="touch_bot",
+                            ingestion_id=ingestion_id,
+                            broker_tick_id=None,
+                            received_at=received_at,
+                        )
+                except (DigitError, ValueError, TypeError):
+                    unreadable += 1
+                    continue
+                observation = replace(observation, flags=observation.flags + ("numeric_quote_reconstructed",))
+                quality = assess_tick(
+                    epoch=observation.broker_epoch,
+                    previous_epoch=previous_epoch,
+                    precision=observation.precision,
+                    previous_precision=previous_precision,
+                    expected_tick_seconds=settings.dm_expected_tick_seconds,
+                    quote_text=observation.quote_text,
+                    previous_quote_text=previous_quote,
+                )
+                flags = list(observation.flags)
+                if is_gap:
+                    flags.append("gap")
+                flags.extend(quality.flags)
+                batch.append(
+                    {
+                        "symbol": symbol,
+                        "broker_epoch": observation.broker_epoch,
+                        "received_at": _naive(observation.received_at),
+                        "quote_wire": observation.quote_wire,
+                        "quote_text": observation.quote_text,
+                        "precision": observation.precision,
+                        "last_digit": observation.last_digit,
+                        "digit_value": observation.digit_value,
+                        "source": "touch_bot",
+                        "ingestion_id": ingestion_id,
+                        "broker_tick_id": None,
+                        "dedup_key": f"touch:{symbol}:{observation.broker_epoch}",
+                        "quality_flags": ",".join(dict.fromkeys(flags)),
+                        "pip_size_raw": observation.pip_size_raw,
+                    }
+                )
+                previous_epoch = observation.broker_epoch
+                previous_precision = observation.precision
+                previous_quote = observation.quote_text
+                if len(batch) >= 2000:
+                    flush(session)
+            flush(session)
+            after = session.query(DmTick).filter(DmTick.symbol == symbol, DmTick.source == "touch_bot").count()
+
+        inserted = max(0, int(after) - int(before))
+        available = len(raw)
+        note = (
+            f"Copied {inserted} new ticks from {available} saved {symbol} rows. "
+            "Quotes were stored as numbers, so each last digit was rebuilt with that tick's pip size. "
+            "Volatility 100 (1s) was not copied."
+        )
+        self.record_dataset(name="touch-bot ticks", source="touch_bot", sha256=None, row_count=inserted, note=note)
+        self.audit("touch_ticks_import", note)
+        return {
+            "ok": True,
+            "symbol": symbol,
+            "available": available,
+            "inserted": inserted,
+            "already_copied": available - inserted - unreadable,
+            "unreadable": unreadable,
+            "note": note,
+        }

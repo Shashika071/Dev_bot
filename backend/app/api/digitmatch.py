@@ -266,6 +266,7 @@ def dashboard(_: None = Depends(_read_access)):
             "max_open_contracts": 1,
         },
         "ticks_stored": tick_count,
+        "touch_ticks_available": store.saved_touch_count("R_100"),
         "history_job": history_view,
         "train_job": train_view,
         "queued_history": history,
@@ -449,6 +450,18 @@ async def import_history(
     store.record_dataset(name=file.filename or "import.csv", source="csv", sha256=digest, row_count=count, note=note)
     store.audit("csv_import", note)
     return {"ok": True, "rows": count, "sha256": digest, "note": note}
+
+
+@router.post("/history/use-saved")
+def use_saved_ticks(_: None = Depends(_control_access)):
+    store = _store()
+    try:
+        result = store.import_saved_ticks("R_100")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return result
 
 
 @router.post("/train")

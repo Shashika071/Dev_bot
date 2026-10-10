@@ -218,6 +218,11 @@ def test_instrument_and_contract_are_not_substituted():
         [{"symbol": "R_100", "display_name": "Volatility 100 Index"}]
     )
     assert resolved["symbol"] == "R_100"
+    renamed = resolve_volatility_100(
+        [{"underlying_symbol": "R_100", "underlying_symbol_name": "Volatility 100 Index", "pip_size": 2}]
+    )
+    assert renamed["symbol"] == "R_100"
+    assert renamed["pip"] == 2
     with pytest.raises(MarketUnavailable):
         resolve_volatility_100([{"symbol": "1HZ100V", "display_name": "Volatility 100 (1s) Index"}])
     with pytest.raises(MarketUnavailable):
@@ -407,6 +412,48 @@ def test_conflicting_ticks_are_kept(tmp_path: Path):
     rows = store.series("R_100")
     assert len(rows) == 2
     assert all("conflict" in (row.quality_flags or "") for row in rows)
+
+
+def test_saved_touch_ticks_rebuild_the_last_digit(tmp_path: Path):
+    from app.models.tick import Tick
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'saved.db'}", poolclass=NullPool)
+    store = SqlStore(engine)
+    store.create_schema()
+    with store.Session() as session:
+        session.add_all(
+            [
+                Tick(
+                    id=1,
+                    symbol="R_100",
+                    epoch=100,
+                    tick_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    quote=123.4,
+                    pip_size=0.01,
+                    is_gap=0,
+                ),
+                Tick(
+                    id=2,
+                    symbol="1HZ100V",
+                    epoch=101,
+                    tick_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    quote=50.1,
+                    pip_size=0.01,
+                    is_gap=0,
+                ),
+            ]
+        )
+        session.commit()
+    first = store.import_saved_ticks("R_100")
+    second = store.import_saved_ticks("R_100")
+    rows = store.series("R_100")
+    assert first["inserted"] == 1
+    assert first["available"] == 1
+    assert second["inserted"] == 0
+    assert len(rows) == 1
+    assert rows[0].quote_text == "123.40"
+    assert rows[0].digit_value == 0
+    assert "numeric_quote_reconstructed" in (rows[0].quality_flags or "")
 
 
 def test_digitmatch_reuses_the_touch_bot_login(monkeypatch):

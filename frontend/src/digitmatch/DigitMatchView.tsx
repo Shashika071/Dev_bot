@@ -77,6 +77,7 @@ type Dashboard = {
     max_open_contracts: number;
   };
   ticks_stored: number;
+  touch_ticks_available?: number;
   history_job: { status: string; ticks_stored: number; target_ticks: number; note: string | null; error: string | null } | null;
   train_job: { status: string; progress: string; error: string | null; model_id: number | null } | null;
   reconciliation: { blocked: boolean; reason: string | null };
@@ -298,7 +299,8 @@ export default function DigitMatchView() {
           <p>{data?.instrument.resolved_display || data?.instrument.expected_display_name}</p>
           <p>Symbol: {data?.instrument.resolved_symbol || 'not resolved'} (legacy expected {data?.instrument.expected_legacy_symbol})</p>
           <p>{data?.contract.type} · {data?.contract.duration_ticks} ticks</p>
-          <p>Ticks stored: {data?.ticks_stored ?? '—'}</p>
+          <p>Digit Matches ticks: {data?.ticks_stored ?? '—'}</p>
+          <p>Saved by the touch bot: {(data?.touch_ticks_available ?? 0).toLocaleString()} R_100</p>
         </article>
         <article>
           <h2>Model</h2>
@@ -441,8 +443,9 @@ export default function DigitMatchView() {
         <article>
           <h2>History</h2>
           <p>{data?.history_job ? `${data.history_job.status} · ${data.history_job.ticks_stored}/${data.history_job.target_ticks}` : 'No download yet'}</p>
-          <p className="dm-note">{data?.history_job?.note || data?.history_job?.error || '100,000 ticks is a download goal, not proof of a sufficient sample.'}</p>
+          <p className="dm-note">{data?.history_job?.note || data?.history_job?.error || 'The touch bot ticks can be copied. A broker download is separate.'}</p>
           <div className="dm-actions">
+            <button type="button" onClick={() => post('/api/digitmatch/history/use-saved')}>Use saved ticks</button>
             <button type="button" onClick={() => post('/api/digitmatch/history/start', { target_ticks: 100000 })}>Download history</button>
             <button type="button" onClick={() => post('/api/digitmatch/history/cancel')}>Cancel</button>
             <a href={`${API}/api/digitmatch/history/export`}>Export CSV</a>
