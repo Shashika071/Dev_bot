@@ -59,9 +59,6 @@ def build_examples(
         raise ValueError("digits, prices, and usable must be aligned 1-d arrays")
     names = feature_names()
     n = len(digits)
-    rows: list[np.ndarray] = []
-    targets: list[int] = []
-    indexes: list[int] = []
     if n <= lookback + horizon:
         return {
             "schema": FEATURE_SCHEMA,
@@ -97,6 +94,11 @@ def build_examples(
     first = lookback - 1
     last = n - horizon
     span = max(0, last - first)
+    width = len(names)
+    features = np.empty((span, width), dtype=np.float64)
+    targets_arr = np.empty(span, dtype=np.int64)
+    indexes_arr = np.empty(span, dtype=np.int64)
+    filled = 0
     seen = 0
     for i in range(first, last):
         seen += 1
@@ -133,23 +135,24 @@ def build_examples(
         freq200 = cumulative[i] - cumulative[i - 200]
         parts.append(_entropy(freq50))
         parts.append(_entropy(freq200))
-        vector = np.asarray(parts, dtype=float)
-        if not np.isfinite(vector).all():
+        if len(parts) != width or not np.isfinite(parts).all():
             continue
-        rows.append(vector)
-        targets.append(int(digits[i + horizon]))
-        indexes.append(i)
+        features[filled] = parts
+        targets_arr[filled] = int(digits[i + horizon])
+        indexes_arr[filled] = i
+        filled += 1
 
     if on_progress is not None and span:
         on_progress(span, span)
 
-    x = np.vstack(rows) if rows else np.zeros((0, len(names)))
+    x = features[:filled].copy()
+    del features
     return {
         "schema": FEATURE_SCHEMA,
         "names": names,
         "X": x,
-        "y": np.asarray(targets, dtype=int),
-        "index": np.asarray(indexes, dtype=int),
+        "y": targets_arr[:filled].copy(),
+        "index": indexes_arr[:filled].copy(),
         "horizon": horizon,
         "target_note": "research_proxy_digit_at_t_plus_horizon",
     }

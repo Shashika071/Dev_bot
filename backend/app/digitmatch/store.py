@@ -308,6 +308,19 @@ class SqlStore:
             session.commit()
             return job.id
 
+    def abandon_running_trains(self) -> int:
+        with self.Session() as session:
+            result = session.execute(
+                update(DmTrainJob)
+                .where(DmTrainJob.status == "running")
+                .values(
+                    status="error",
+                    error="Trainer restarted before this job finished. Press Train again.",
+                )
+            )
+            session.commit()
+            return int(result.rowcount or 0)
+
     def active_train_job(self) -> dict | None:
         with self.Session() as session:
             row = (

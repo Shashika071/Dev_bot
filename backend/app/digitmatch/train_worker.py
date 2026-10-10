@@ -73,7 +73,8 @@ def main() -> None:
     store = SqlStore()
     store.create_schema()
     store.seed()
-    logger.info("dm_train_worker_started")
+    abandoned = store.abandon_running_trains()
+    logger.info("dm_train_worker_started", abandoned_running=abandoned)
     while True:
         job = store.next_job(DmTrainJob)
         if job is None:
