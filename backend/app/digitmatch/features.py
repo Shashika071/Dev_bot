@@ -49,6 +49,7 @@ def build_examples(
     *,
     horizon: int = HORIZON,
     lookback: int = LOOKBACK,
+    on_progress=None,
 ) -> dict:
     """Research examples. Target is the digit `horizon` ticks ahead."""
     digits = np.asarray(digits, dtype=int)
@@ -92,8 +93,16 @@ def build_examples(
     nz = prices[:-1] != 0
     returns[1:][nz] = np.diff(prices)[nz] / prices[:-1][nz]
 
-    for i in range(lookback - 1, n - horizon):
-        if not window_is_clean(usable.tolist(), i - (lookback - 1), i + horizon):
+    usable_flags = usable.tolist()
+    first = lookback - 1
+    last = n - horizon
+    span = max(0, last - first)
+    seen = 0
+    for i in range(first, last):
+        seen += 1
+        if on_progress is not None and seen % 8000 == 0:
+            on_progress(seen, span)
+        if not window_is_clean(usable_flags, i - (lookback - 1), i + horizon):
             continue
         parts: list[float] = []
         for lag in range(10):
@@ -130,6 +139,9 @@ def build_examples(
         rows.append(vector)
         targets.append(int(digits[i + horizon]))
         indexes.append(i)
+
+    if on_progress is not None and span:
+        on_progress(span, span)
 
     x = np.vstack(rows) if rows else np.zeros((0, len(names)))
     return {

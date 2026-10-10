@@ -1,10 +1,107 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  AlertTriangle, BarChart2, Brain, CheckCircle, Database, Hash, Loader2, RefreshCw,
+} from 'lucide-react';
+import {
   ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid, BarChart, Bar,
 } from 'recharts';
 import './digitmatch.css';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+const SKIP_REASON: Record<string, string> = {
+  stale_tick: 'The latest tick is too old, so no digit was chosen.',
+  no_tick: 'No tick has arrived yet.',
+  tick_clock_ahead: 'The tick clock is ahead of this server, so the check was skipped.',
+  fresh_tick: 'The tick is fresh.',
+  observe_mode: 'Mode is Off, so no demo buy is placed.',
+  no_model: 'No promoted model yet. Train one, then press Promote.',
+  model_expired: 'The promoted model is no longer valid.',
+  emergency_stop: 'Emergency stop is on.',
+  uncertain_purchase: 'An earlier buy is still uncertain, so new orders stay blocked.',
+  execution_lock_held: 'Another order is still open.',
+  stale_proposal: 'The price quote is too old.',
+  proposal_older_than_tick: 'A newer tick arrived before the quote could be used.',
+  proposal_missing_spot: 'The quote did not include a price.',
+  tick_arrived_before_submit: 'A newer tick arrived before the order was sent.',
+  purchase_rejected: 'The broker rejected the order.',
+  purchase_not_sent: 'The order was not sent.',
+  risk_unavailable: 'Risk limits could not be read.',
+  unknown_mode: 'The trading mode is not recognized.',
+};
+
+function decisionSentence(decision: { action: string; reason: string; digit: number | null } | null): string {
+  if (!decision) return 'Waiting for the first check.';
+  const detail = SKIP_REASON[decision.reason] || decision.reason.split('_').join(' ');
+  if (decision.action === 'buy') return `Bought digit ${decision.digit ?? '—'}.`;
+  return detail;
+}
+
+function estimateTrainSeconds(ticks: number): number {
+  return 2 * (2.9e-9 * ticks * ticks + 3.2e-5 * ticks + 40);
+}
+
+function formatTrainMinutes(seconds: number): string {
+  const minutes = Math.max(1, Math.round(seconds / 60));
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours} h ${rest} min` : `${hours} h`;
+}
+
+function trainTimeLabel(ticks: number, progress?: string): string {
+  if (ticks < 1050) return 'Need about 1,050 clean ticks before a train can start.';
+  let seconds = estimateTrainSeconds(ticks);
+  const feature = progress ? /Building features, (\d+) of (\d+)/.exec(progress) : null;
+  if (feature) {
+    const done = Number(feature[1]);
+    const total = Number(feature[2]);
+    const fraction = total > 0 ? Math.min(1, done / total) : 0;
+    seconds = Math.max(30, seconds * (1 - 0.7 * fraction));
+  } else if (progress && (progress.startsWith('Fitting') || progress.startsWith('Saving'))) {
+    seconds = Math.max(20, estimateTrainSeconds(ticks) * 0.2);
+  }
+  const low = formatTrainMinutes(seconds);
+  const high = formatTrainMinutes(seconds * 1.6);
+  const range = low === high ? low : `${low}–${high}`;
+  return progress ? `Estimated time left: about ${range}.` : `Estimated time: about ${range} for ${ticks.toLocaleString()} ticks.`;
+}
+
+function trainingBanner(
+  job: { status: string; progress: string; error: string | null; model_id: number | null } | null,
+  ticks: number,
+) {
+  if (!job) return null;
+  if (job.status === 'queued' || job.status === 'running') {
+    return (
+      <div className="alert alert-success">
+        <Loader2 size={14} className="spin" />
+        <div>
+          Training is running. {job.progress || 'Waiting for the trainer.'} {trainTimeLabel(ticks, job.progress)} You can leave this page. This line is still here when you come back.
+        </div>
+      </div>
+    );
+  }
+  if (job.status === 'done') {
+    return (
+      <div className="alert alert-success">
+        <CheckCircle size={14} />
+        <div>
+          Training finished{job.model_id ? ` as model #${job.model_id}` : ''}. It is saved, and the desk does not use it until you press Promote.
+        </div>
+      </div>
+    );
+  }
+  if (job.status === 'error') {
+    return (
+      <div className="alert alert-error">
+        <AlertTriangle size={14} />
+        <div>{job.error || 'Training stopped.'}</div>
+      </div>
+    );
+  }
+  return null;
+}
 
 type Dashboard = {
   demo_only: boolean;
@@ -185,7 +282,7 @@ export function DigitMatchDashControl() {
   const label = mode === 'demo_explore' ? 'ON' : mode === 'demo_filtered' ? 'ON if quote passes' : 'OFF';
 
   return (
-    <div className="glass dm-dash-control">
+    <div className="glass dash-account-bar dm-dash-control">
       <strong>Digit Matches</strong>
       <span className={mode === 'observe' ? 'badge badge-dim' : 'badge badge-green'}>{label}</span>
       {paused && <span className="badge badge-amber">Paused</span>}
@@ -258,7 +355,9 @@ export default function DigitMatchView() {
       });
       if (!response.ok) throw new Error(await readError(response));
       const payload = await response.json().catch(() => null) as { note?: string } | null;
-      setNotice({ ok: true, text: payload?.note || okText });
+      const text = (payload?.note || okText || '').trim();
+      if (text) setNotice({ ok: true, text });
+      else setNotice(null);
       setError(null);
       await load();
     } catch (err) {
@@ -266,7 +365,7 @@ export default function DigitMatchView() {
     }
   }
 
-  function press(label: string, run: () => void, opts?: { on?: boolean; tone?: 'warn' | 'danger' }) {
+  function press(label: string, run: () => void, opts?: { on?: boolean; tone?: 'warn' | 'danger'; disabled?: boolean }) {
     const selected = !!opts?.on;
     const danger = opts?.tone === 'danger';
     return (
@@ -275,6 +374,7 @@ export default function DigitMatchView() {
         className={`btn ${selected ? 'btn-primary' : 'btn-ghost'}`}
         style={danger && selected ? { background: 'var(--red)', color: '#fff' } : undefined}
         aria-pressed={selected}
+        disabled={!!opts?.disabled}
         onClick={run}
       >
         {label}
@@ -291,74 +391,149 @@ export default function DigitMatchView() {
       empirical: Number(bin.empirical_hit_rate?.toFixed(3)),
     }));
 
-  return (
-    <div className="dm-root">
-      <header className="glass page-header">
-        <div>
-          <div className="badge badge-amber">DEMO ONLY</div>
-          <h1 className="page-title">Digit Matches</h1>
-          <p className="page-subtitle">Volatility 100 Index · DIGITMATCH · 5 ticks · estimated probability, not a guarantee.</p>
-          <p className="page-subtitle">{STATE_COPY[state] || 'Loading the research desk.'}</p>
-        </div>
-      </header>
+  const trainingNow = data?.train_job?.status === 'queued' || data?.train_job?.status === 'running';
+  const trainAlert = trainingBanner(data?.train_job ?? null, data?.ticks_stored ?? 0);
+  const trades = data?.trades ?? [];
+  const wins = trades.filter((trade) => (trade.profit ?? 0) > 0).length;
+  const losses = trades.filter((trade) => (trade.profit ?? 0) < 0).length;
+  const settled = trades.filter((trade) => trade.profit != null).length;
+  const winRate = wins + losses > 0 ? `${Math.round((wins / (wins + losses)) * 100)}%` : '—';
+  const modeOn = data?.mode === 'demo_explore' || data?.mode === 'demo_filtered';
+  const modeLabel = data?.mode === 'demo_explore' ? 'ON' : data?.mode === 'demo_filtered' ? 'ON IF QUOTE PASSES' : 'OFF';
+  const online = data?.connection_status === 'online' && !!data?.demo_verified;
+  const symbol = data?.instrument.resolved_symbol || 'R_100';
+  const timezoneChoices = ['Asia/Colombo', 'UTC', 'Europe/London', 'America/New_York', 'Asia/Dubai', 'Asia/Singapore'];
+  if (timezone && !timezoneChoices.includes(timezone)) timezoneChoices.unshift(timezone);
+  const marginChoices = ['0', '0.01', '0.02', '0.05'];
+  if (margin && !marginChoices.includes(margin)) marginChoices.unshift(margin);
 
-      {notice && <div className={notice.ok ? 'alert alert-success' : 'alert alert-error'}>{notice.text}</div>}
-      {error && <div className="alert alert-error">{error}</div>}
-      {data?.last_error && <div className="alert alert-error">{data.last_error}</div>}
+  return (
+    <>
+      <div className="glass page-header" style={{ flexWrap: 'wrap', gap: '0.75rem' }}>
+        <div>
+          <h1 className="page-title">Digit Matches</h1>
+          <p className="page-subtitle">
+            Monitoring {symbol}
+            &nbsp;·&nbsp;live {(data?.ticks_stored ?? 0).toLocaleString()}
+            &nbsp;·&nbsp;DB {(data?.touch_ticks_available ?? 0).toLocaleString()} ticks saved
+          </p>
+        </div>
+        <div className="flex gap-3 items-center" style={{ flexWrap: 'wrap' }}>
+          <span className="badge badge-amber"><AlertTriangle size={11} />DEMO ONLY</span>
+          {press('Off', () => post('/api/digitmatch/mode', { mode: 'observe' }, 'Off. No demo buy will be placed.'), { on: (data?.mode || 'observe') === 'observe' })}
+          {press('On', () => post('/api/digitmatch/mode', { mode: 'demo_explore' }, 'On. Demo trades can be placed at the fixed stake.'), { on: data?.mode === 'demo_explore' })}
+          {press('On if quote passes', () => post('/api/digitmatch/mode', { mode: 'demo_filtered' }, 'On only when the live quote passes the filter.'), { on: data?.mode === 'demo_filtered' })}
+          {press(data?.paused ? 'Resume' : 'Pause', () => post(data?.paused ? '/api/digitmatch/resume' : '/api/digitmatch/pause', {}, data?.paused ? 'Pause cleared.' : 'Paused. New orders are blocked.'), { on: !!data?.paused })}
+          {press('Emergency stop', () => post('/api/digitmatch/emergency-stop', {}, 'Emergency stop is on. An open contract is not cancelled.'), { on: !!data?.emergency_stop, tone: 'danger' })}
+          {data?.emergency_stop && press('Clear stop', () => post('/api/digitmatch/emergency-stop/clear', {}, 'Emergency stop cleared.'))}
+          <button type="button" className="btn btn-ghost" onClick={() => void load()}>
+            <RefreshCw size={14} /> Refresh
+          </button>
+        </div>
+      </div>
+
+      {notice && !trainAlert && (
+        <div className={notice.ok ? 'alert alert-success' : 'alert alert-error'}>
+          {notice.ok ? <CheckCircle size={14} /> : <AlertTriangle size={14} />}
+          <div>{notice.text}</div>
+        </div>
+      )}
+      {trainAlert}
+      {error && <div className="alert alert-error"><AlertTriangle size={14} /><div>{error}</div></div>}
+      {data?.last_error && <div className="alert alert-error"><AlertTriangle size={14} /><div>{data.last_error}</div></div>}
       {data?.reconciliation.blocked && (
         <div className="alert alert-error">
-          Uncertain purchase. {data.reconciliation.reason || 'Match the broker statement before any new order.'}
-          New orders stay blocked. This screen does not retry the buy.
+          <AlertTriangle size={14} />
+          <div>
+            Uncertain purchase. {data.reconciliation.reason || 'Match the broker statement before any new order.'}
+            New orders stay blocked. This screen does not retry the buy.
+          </div>
         </div>
       )}
 
-      <section className="dm-grid">
-        <article className="glass">
-          <h2>Connection</h2>
-          <p>{data?.connection_status || '…'} · auth {data?.auth_status || '…'}</p>
-          <p>Demo verified: {data?.demo_verified ? 'yes' : 'no'}</p>
-          <p>Account: {data?.loginid || '—'}</p>
-          <p>
-            Login: {data?.credential_source === 'touch_bot'
-              ? 'same token as the touch bot'
-              : data?.credential_source === 'digitmatch_env'
-                ? 'Digit Matches token'
-                : 'not configured'}
-          </p>
-          <p>Balance: {money(data?.balance, data?.currency || null)}</p>
-          <p>Tick age: {data?.freshness.age_seconds == null ? '—' : `${data.freshness.age_seconds.toFixed(1)}s`}</p>
-        </article>
-        <article className="glass">
-          <h2>Contract</h2>
-          <p>{data?.instrument.resolved_display || data?.instrument.expected_display_name}</p>
-          <p>Symbol: {data?.instrument.resolved_symbol || 'not resolved'} (legacy expected {data?.instrument.expected_legacy_symbol})</p>
-          <p>{data?.contract.type} · {data?.contract.duration_ticks} ticks</p>
-          <p>Digit Matches ticks: {data?.ticks_stored ?? '—'}</p>
-          <p>Saved by the touch bot: <span className="dm-keep">{(data?.touch_ticks_available ?? 0).toLocaleString()} R_100</span></p>
-        </article>
-        <article className="glass">
-          <h2>Model</h2>
-          <p>{data?.model ? `${data.model.name} #${data.model.id}` : 'No promoted model'}</p>
-          <p>Edge claimed: no</p>
-          <p className="dm-note">{data?.evaluation?.edge_statement || data?.target_note}</p>
-        </article>
-        <article className="glass">
-          <h2>Mode</h2>
-          <p className="dm-mode">{data?.mode === 'demo_explore' ? 'ON' : data?.mode === 'demo_filtered' ? 'ON IF QUOTE PASSES' : 'OFF'}</p>
-          <div className="dm-actions">
-            {press('Off', () => post('/api/digitmatch/mode', { mode: 'observe' }, 'Off. No demo buy will be placed.'), { on: (data?.mode || 'observe') === 'observe' })}
-            {press('On', () => post('/api/digitmatch/mode', { mode: 'demo_explore' }, 'On. Demo trades can be placed at the fixed stake.'), { on: data?.mode === 'demo_explore' })}
-            {press('On if quote passes', () => post('/api/digitmatch/mode', { mode: 'demo_filtered' }, 'On only when the live quote passes the filter.'), { on: data?.mode === 'demo_filtered' })}
-            {press(data?.paused ? 'Resume' : 'Pause', () => post(data?.paused ? '/api/digitmatch/resume' : '/api/digitmatch/pause', {}, data?.paused ? 'Pause cleared.' : 'Paused. New orders are blocked.'), { on: !!data?.paused, tone: 'warn' })}
-            {press('Emergency stop', () => post('/api/digitmatch/emergency-stop', {}, 'Emergency stop is on. An open contract is not cancelled.'), { on: !!data?.emergency_stop, tone: 'danger' })}
-            {data?.emergency_stop && press('Clear stop', () => post('/api/digitmatch/emergency-stop/clear', {}, 'Emergency stop cleared.'), { tone: 'danger' })}
+      <div className="glass dash-account-bar">
+        <div className="dash-account-main">
+          <Database size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div className="flex items-center gap-2" style={{ flexWrap: 'wrap', marginBottom: 4 }}>
+              <strong className="text-sm">Trade account</strong>
+              {modeOn
+                ? <span className="badge badge-green">{modeLabel}</span>
+                : <span className="badge badge-dim">OFF</span>}
+              {online
+                ? <span className="badge badge-green">LIVE</span>
+                : <span className="badge badge-dim">{data?.connection_status || 'offline'}</span>}
+              {data?.demo_verified && <span className="badge badge-amber">DEMO</span>}
+              {data?.paused && <span className="badge badge-amber">Paused</span>}
+              {data?.emergency_stop && <span className="badge badge-amber">Emergency stop</span>}
+            </div>
+            <div className="font-mono text-xs dash-account-grid">
+              <span>
+                {data?.loginid || 'No account yet'}
+                <span className="text-dim">
+                  {' '}· {data?.credential_source === 'touch_bot' ? 'same token as the touch bot' : data?.credential_source === 'digitmatch_env' ? 'Digit Matches token' : 'not configured'}
+                </span>
+              </span>
+              <span>
+                Balance{' '}
+                <strong className="text-primary">{money(data?.balance, data?.currency || null)}</strong>
+              </span>
+            </div>
+            <p className="text-xs text-dim" style={{ marginTop: 6 }}>{STATE_COPY[state] || 'Loading the research desk.'}</p>
+            <div className="dash-trade-stats">
+              <div className="dash-stat">
+                <div className="dash-stat-label">Won</div>
+                <div className="dash-stat-value text-green">{wins}</div>
+                <div className="dash-stat-sub">saved trades</div>
+              </div>
+              <div className="dash-stat">
+                <div className="dash-stat-label">Lost</div>
+                <div className="dash-stat-value" style={{ color: 'var(--red)' }}>{losses}</div>
+                <div className="dash-stat-sub">saved trades</div>
+              </div>
+              <div className="dash-stat">
+                <div className="dash-stat-label">Settled</div>
+                <div className="dash-stat-value">{settled}</div>
+                <div className="dash-stat-sub">open {data?.active_contract ? 1 : 0}</div>
+              </div>
+              <div className="dash-stat">
+                <div className="dash-stat-label">Win rate</div>
+                <div className="dash-stat-value">{winRate}</div>
+                <div className="dash-stat-sub">
+                  Today P/L{' '}
+                  <strong style={{ color: (data?.pnl.daily ?? 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                    {(data?.pnl.daily ?? 0) >= 0 ? '+' : ''}{(data?.pnl.daily ?? 0).toFixed(2)}
+                  </strong>
+                </div>
+              </div>
+              <div className="dash-stat">
+                <div className="dash-stat-label">Recent P/L</div>
+                <div className="dash-stat-value" style={{ color: (data?.pnl.cumulative ?? 0) >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                  {(data?.pnl.cumulative ?? 0) >= 0 ? '+' : ''}{(data?.pnl.cumulative ?? 0).toFixed(2)}
+                </div>
+                <div className="dash-stat-sub">{data?.currency || 'USD'}</div>
+              </div>
+            </div>
           </div>
-          <p className="dm-note">{data?.stop_note}</p>
-        </article>
-      </section>
+        </div>
+      </div>
 
-      <section className="glass">
-        <h2>{data?.probability_label || 'Estimated probability'}</h2>
+      <div className="alert alert-warning">
+        <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+        <div>
+          <div className="text-sm">{decisionSentence(data?.decision ?? null)}</div>
+          <div className="text-xs font-mono text-dim" style={{ marginTop: 4 }}>
+            {data?.instrument.resolved_display || data?.instrument.expected_display_name}
+            {' · '}{data?.contract.type} · {data?.contract.duration_ticks} ticks
+            {' · '}tick age {data?.freshness.age_seconds == null ? '—' : `${data.freshness.age_seconds.toFixed(1)}s`}
+          </div>
+        </div>
+      </div>
+
+      <div className="glass chart-panel">
+        <div className="section-header">
+          <h3 className="section-title"><Hash size={16} />Estimated probability</h3>
+        </div>
         {probs && probs.length === 10 ? (
           <div className="dm-bars">
             {probs.map((value, digit) => (
@@ -370,38 +545,61 @@ export default function DigitMatchView() {
             ))}
           </div>
         ) : (
-          <p>No live probability vector yet. The desk does not fill this with placeholder numbers.</p>
+          <p className="text-sm text-secondary">No live percentages yet. These boxes stay blank until a fresh tick and a promoted model are both available.</p>
         )}
-        <div className="dm-decision">
-          <p>Selected digit: {data?.decision?.digit ?? '—'}</p>
-          <p>Break-even probability: {data?.decision?.break_even == null ? '—' : data.decision.break_even.toFixed(4)}</p>
-          <p>Model-implied expected value: {data?.decision?.expected_value == null ? '—' : data.decision.expected_value.toFixed(4)} (net of stake, using the current total payout)</p>
-          <p>Ask / total payout: {data?.decision?.ask_price ?? '—'} / {data?.decision?.total_payout ?? '—'}</p>
-          <p>Why: {data?.decision ? `${data.decision.action} — ${data.decision.reason}` : 'No decision recorded yet.'}</p>
+        <div className="dash-trade-stats">
+          <div className="dash-stat">
+            <div className="dash-stat-label">Selected digit</div>
+            <div className="dash-stat-value">{data?.decision?.digit ?? '—'}</div>
+          </div>
+          <div className="dash-stat">
+            <div className="dash-stat-label">Break-even</div>
+            <div className="dash-stat-value">{data?.decision?.break_even == null ? '—' : `${(data.decision.break_even * 100).toFixed(1)}%`}</div>
+          </div>
+          <div className="dash-stat">
+            <div className="dash-stat-label">Expected value</div>
+            <div className="dash-stat-value">{data?.decision?.expected_value == null ? '—' : data.decision.expected_value.toFixed(3)}</div>
+            <div className="dash-stat-sub">Net of stake</div>
+          </div>
+          <div className="dash-stat">
+            <div className="dash-stat-label">Ask</div>
+            <div className="dash-stat-value">{data?.decision?.ask_price ?? '—'}</div>
+          </div>
+          <div className="dash-stat">
+            <div className="dash-stat-label">Total payout</div>
+            <div className="dash-stat-value">{data?.decision?.total_payout ?? '—'}</div>
+          </div>
         </div>
-      </section>
+        <p className="text-xs text-dim" style={{ marginTop: 8 }}>{decisionSentence(data?.decision ?? null)}</p>
+      </div>
 
-      <section className="dm-grid">
-        <article className="glass">
-          <h2>Active contract</h2>
+      <div className="grid-2">
+        <div className="glass">
+          <div className="section-header">
+            <h3 className="section-title"><Hash size={16} />Active contract</h3>
+          </div>
           {data?.active_contract ? (
-            <>
+            <div className="font-mono text-sm">
               <p>Broker id {data.active_contract.broker_contract_id}</p>
               <p>Digit {data.active_contract.digit} · {data.active_contract.status}</p>
               <p>Stake paid {money(data.active_contract.buy_price, data.currency)} · total payout {money(data.active_contract.total_payout, data.currency)}</p>
-            </>
-          ) : <p>No open bot contract.</p>}
-        </article>
-        <article className="glass">
-          <h2>Demo P/L</h2>
-          <p>Today ({data?.risk.reset_timezone}): {money(data?.pnl.daily, data?.currency || null)}</p>
-          <p>Cumulative settled: {money(data?.pnl.cumulative, data?.currency || null)}</p>
-          <p className="dm-note">These figures come from stored broker settlement profits. They are not assumed-payout simulations.</p>
-        </article>
-      </section>
+            </div>
+          ) : <p className="text-sm text-secondary">No open bot contract.</p>}
+        </div>
+        <div className="glass">
+          <div className="section-header">
+            <h3 className="section-title"><Brain size={16} />Model</h3>
+          </div>
+          <p className="text-sm">{data?.model ? `${data.model.name} #${data.model.id}` : 'No promoted model'}</p>
+          <p className="text-xs text-dim">{data?.evaluation?.edge_statement || data?.target_note}</p>
+          <p className="text-xs text-dim">Edge claimed: no</p>
+        </div>
+      </div>
 
-      <section className="glass">
-        <h2>Equity and drawdown</h2>
+      <div className="glass chart-panel">
+        <div className="section-header">
+          <h3 className="section-title"><BarChart2 size={16} />Equity and drawdown</h3>
+        </div>
         {data && data.equity.length > 0 ? (
           <div className="dm-chart">
             <ResponsiveContainer width="100%" height={240}>
@@ -415,12 +613,14 @@ export default function DigitMatchView() {
               </AreaChart>
             </ResponsiveContainer>
           </div>
-        ) : <p>No settled demo trades yet, so there is no equity curve.</p>}
-      </section>
+        ) : <p className="text-sm text-secondary">No settled demo trades yet, so there is no equity curve.</p>}
+      </div>
 
-      <section className="glass">
-        <h2>Historical evaluation</h2>
-        <p className="dm-note">{data?.evaluation?.comparison_to_uniform || 'Train a candidate to see held-out log loss. That result is not a trading profit.'}</p>
+      <div className="glass">
+        <div className="section-header">
+          <h3 className="section-title"><BarChart2 size={16} />Historical evaluation</h3>
+        </div>
+        <p className="text-sm text-secondary">{data?.evaluation?.comparison_to_uniform || 'Train a candidate to see held-out log loss. That result is not a trading profit.'}</p>
         {data?.evaluation?.final_test && (
           <p>
             Test rows {data.evaluation.final_test.count ?? '—'} · log loss {data.evaluation.final_test.log_loss?.toFixed(4) ?? '—'} · Brier {data.evaluation.final_test.brier?.toFixed(4) ?? '—'} · top-choice hit {data.evaluation.final_test.top_hit_rate?.toFixed(3) ?? '—'}
@@ -439,20 +639,22 @@ export default function DigitMatchView() {
               </BarChart>
             </ResponsiveContainer>
           </div>
-        ) : <p>No calibration bins yet.</p>}
+        ) : <p className="text-sm text-secondary">No calibration bins yet.</p>}
         {data?.evaluation?.walk_forward && data.evaluation.walk_forward.length > 0 && (
-          <ul>
+          <ul className="dm-folds">
             {data.evaluation.walk_forward.map((fold) => (
               <li key={fold.fold}>Fold {fold.fold}: log loss {fold.log_loss.toFixed(4)} on {fold.validation_rows} pre-test rows</li>
             ))}
           </ul>
         )}
-      </section>
+      </div>
 
-      <section className="glass">
-        <h2>Trade history</h2>
+      <div className="glass">
+        <div className="section-header">
+          <h3 className="section-title"><Database size={16} />Trade history</h3>
+        </div>
         {data && data.trades.length > 0 ? (
-          <table>
+          <table className="dm-table">
             <thead>
               <tr><th>Contract</th><th>Digit</th><th>Status</th><th>Ask</th><th>Total payout</th><th>Profit</th><th>Mode</th></tr>
             </thead>
@@ -470,47 +672,71 @@ export default function DigitMatchView() {
               ))}
             </tbody>
           </table>
-        ) : <p>No demo contracts recorded.</p>}
-      </section>
+        ) : <p className="text-sm text-secondary">No demo contracts recorded.</p>}
+      </div>
 
-      <section className="dm-grid">
-        <article className="glass">
-          <h2>History</h2>
-          <p>{data?.history_job ? `${data.history_job.status} · ${data.history_job.ticks_stored}/${data.history_job.target_ticks}` : 'No download yet'}</p>
-          <p className="dm-note">{data?.history_job?.note || data?.history_job?.error || 'The touch bot ticks can be copied. A broker download is separate.'}</p>
-          <div className="dm-actions">
+      <div className="grid-2">
+        <div className="glass">
+          <div className="section-header">
+            <h3 className="section-title"><Database size={16} />History</h3>
+          </div>
+          <p className="font-mono text-sm">{data?.history_job ? `${data.history_job.status} · ${data.history_job.ticks_stored}/${data.history_job.target_ticks}` : 'No download yet'}</p>
+          <p className="text-xs text-dim">{data?.history_job?.note || data?.history_job?.error || 'The touch bot ticks can be copied. A broker download is separate.'}</p>
+          <div className="flex gap-2" style={{ flexWrap: 'wrap', marginTop: 12 }}>
             {press('Use saved ticks', () => post('/api/digitmatch/history/use-saved', {}, 'Copy started. The History line shows the count.'))}
             {press('Download history', () => post('/api/digitmatch/history/start', { target_ticks: 100000 }, 'History download started.'))}
             {press('Cancel download', () => post('/api/digitmatch/history/cancel', {}, 'Download cancel requested.'))}
             <a className="btn btn-ghost" href={`${API}/api/digitmatch/history/export`}>Export CSV</a>
           </div>
-        </article>
-        <article className="glass">
-          <h2>Training</h2>
-          <p>{data?.train_job ? `${data.train_job.status} · ${data.train_job.progress}` : 'Idle'}</p>
-          <p className="dm-note">{data?.train_job?.error || 'A finished train stays a candidate until you promote it.'}</p>
-          <div className="dm-actions">
-            {press('Train candidate', () => post('/api/digitmatch/train', { enable_mlp: false }, 'Training started. It stays a candidate until you promote it.'))}
+        </div>
+        <div className="glass">
+          <div className="section-header">
+            <h3 className="section-title"><Brain size={16} />Training</h3>
           </div>
-          <ul>
+          <p className="font-mono text-sm">{data?.train_job ? `${data.train_job.status} · ${data.train_job.progress}` : 'Idle'}</p>
+          <p className="text-sm">{trainTimeLabel(data?.ticks_stored ?? 0, trainingNow ? data?.train_job?.progress : undefined)}</p>
+          <p className="text-xs text-dim">
+            {data?.train_job?.status === 'error'
+              ? data.train_job.error || 'Training stopped.'
+              : trainingNow
+                ? 'This step updates while the job runs. The button stays off until it finishes.'
+                : data?.train_job?.status === 'done'
+                  ? 'Finished and saved. Press Promote on the model you want the desk to use.'
+                  : 'Press Train candidate once. A second press does nothing while this job is running.'}
+          </p>
+          <div className="flex gap-2" style={{ flexWrap: 'wrap', marginTop: 12 }}>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={trainingNow}
+              onClick={() => post('/api/digitmatch/train', { enable_mlp: false }, '')}
+            >
+              {trainingNow ? <Loader2 size={14} className="spin" /> : <Brain size={14} />}
+              Train candidate
+            </button>
+          </div>
+          <ul className="dm-folds">
             {models.map((model) => (
               <li key={model.id}>
-                #{model.id} {model.name} {model.is_active ? '(active)' : ''}
+                <span className="font-mono text-sm">#{model.id} {model.name} {model.is_active ? '(active)' : ''}</span>
                 {!model.is_active && (
                   <button type="button" className="btn btn-ghost" onClick={() => post(`/api/digitmatch/models/${model.id}/promote`, {}, `Model #${model.id} promoted for live scoring.`)}>
                     Promote
                   </button>
                 )}
+                {model.is_active && <span className="badge badge-green">Active</span>}
               </li>
             ))}
           </ul>
-        </article>
-      </section>
+        </div>
+      </div>
 
-      <section className="glass">
-        <h2>Risk · reset timezone {data?.risk.reset_timezone}</h2>
+      <div className="glass">
+        <div className="section-header">
+          <h3 className="section-title">Risk limits</h3>
+          <span className="badge badge-dim">{data?.risk.reset_timezone}</span>
+        </div>
         <form
-          className="dm-form"
           onSubmit={(event) => {
             event.preventDefault();
             void post('/api/digitmatch/risk', {
@@ -524,18 +750,45 @@ export default function DigitMatchView() {
             }, 'Limits saved.');
           }}
         >
-          <label className="form-label">Stake<input className="form-input" value={stake} onChange={(event) => setStake(event.target.value)} /></label>
-          <label className="form-label">Cooldown seconds<input className="form-input" value={cooldown} onChange={(event) => setCooldown(event.target.value)} /></label>
-          <label className="form-label">Max trades / day<input className="form-input" value={maxTrades} onChange={(event) => setMaxTrades(event.target.value)} /></label>
-          <label className="form-label">Daily loss limit<input className="form-input" value={lossLimit} onChange={(event) => setLossLimit(event.target.value)} /></label>
-          <label className="form-label">Daily profit stop<input className="form-input" value={profitStop} onChange={(event) => setProfitStop(event.target.value)} /></label>
-          <label className="form-label">Margin above break-even<input className="form-input" value={margin} onChange={(event) => setMargin(event.target.value)} /></label>
-          <label className="form-label">Reset timezone<input className="form-input" value={timezone} onChange={(event) => setTimezone(event.target.value)} /></label>
+          <div className="grid-2">
+            <div className="form-group">
+              <label className="form-label">Stake</label>
+              <input className="form-input" value={stake} onChange={(event) => setStake(event.target.value)} />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Cooldown seconds</label>
+              <input className="form-input" value={cooldown} onChange={(event) => setCooldown(event.target.value)} />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Max trades / day</label>
+              <input className="form-input" value={maxTrades} onChange={(event) => setMaxTrades(event.target.value)} />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Daily loss limit</label>
+              <input className="form-input" value={lossLimit} onChange={(event) => setLossLimit(event.target.value)} />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Daily profit stop</label>
+              <input className="form-input" value={profitStop} onChange={(event) => setProfitStop(event.target.value)} />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Margin above break-even</label>
+              <select className="form-select" value={margin} onChange={(event) => setMargin(event.target.value)}>
+                {marginChoices.map((choice) => <option key={choice} value={choice}>{choice}</option>)}
+              </select>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Reset timezone</label>
+              <select className="form-select" value={timezone} onChange={(event) => setTimezone(event.target.value)}>
+                {timezoneChoices.map((choice) => <option key={choice} value={choice}>{choice}</option>)}
+              </select>
+            </div>
+          </div>
           <button type="submit" className="btn btn-primary">Save limits</button>
         </form>
-        <p className="dm-note">Maximum simultaneous bot contracts stays at 1. Stake is not increased after a loss.</p>
-        <p className="dm-note">{data?.freshness_policy}</p>
-      </section>
-    </div>
+        <p className="text-xs text-dim" style={{ marginTop: 12 }}>Maximum simultaneous bot contracts stays at 1. Stake is not increased after a loss.</p>
+        <p className="text-xs text-dim">{data?.stop_note}</p>
+      </div>
+    </>
   );
 }

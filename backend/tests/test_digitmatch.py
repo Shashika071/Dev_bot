@@ -26,6 +26,7 @@ from app.digitmatch.risk import RiskSnapshot, assess
 from app.digitmatch.splits import chronological_split
 from app.digitmatch.state import resolve_ui_state
 from app.digitmatch.store import SqlStore
+from app.models.digitmatch import DmTrainJob
 from app.digitmatch.training import run_training, select_best
 from app.models.digitmatch import DmContract
 
@@ -497,3 +498,17 @@ def test_migration_revision_is_importable():
     scripts = ScriptDirectory.from_config(cfg)
     revisions = {revision.revision: revision.down_revision for revision in scripts.walk_revisions()}
     assert revisions["002_digitmatch"] == "001_hardening"
+
+
+def test_a_running_train_blocks_a_second_one(tmp_path: Path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'train.db'}", poolclass=NullPool)
+    store = SqlStore(engine)
+    store.create_schema()
+    first = store.enqueue_train(False)
+    active = store.active_train_job()
+    assert active is not None
+    assert active["id"] == first
+    assert store.active_train_job()["status"] == "queued"
+    store.save_job(DmTrainJob, first, status="done", progress="saved")
+    assert store.active_train_job() is None
+

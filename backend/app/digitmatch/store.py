@@ -303,10 +303,22 @@ class SqlStore:
 
     def enqueue_train(self, enable_mlp: bool) -> int:
         with self.Session() as session:
-            job = DmTrainJob(status="queued", enable_mlp=enable_mlp, progress="queued")
+            job = DmTrainJob(status="queued", enable_mlp=enable_mlp, progress="Waiting for the trainer")
             session.add(job)
             session.commit()
             return job.id
+
+    def active_train_job(self) -> dict | None:
+        with self.Session() as session:
+            row = (
+                session.query(DmTrainJob)
+                .filter(DmTrainJob.status.in_(("queued", "running")))
+                .order_by(DmTrainJob.id.desc())
+                .first()
+            )
+            if row is None:
+                return None
+            return {"id": int(row.id), "status": row.status, "progress": row.progress}
 
     def save_model_row(self, meta: dict) -> int:
         with self.Session() as session:

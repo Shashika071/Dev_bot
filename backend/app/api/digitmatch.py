@@ -498,9 +498,23 @@ def use_saved_ticks(_: None = Depends(_control_access)):
 @router.post("/train")
 def start_train(body: TrainBody, _: None = Depends(_control_access)):
     store = _store()
+    active = store.active_train_job()
+    if active is not None:
+        return {
+            "ok": True,
+            "job_id": active["id"],
+            "already_running": True,
+            "promoted": False,
+            "note": "Training is already running. The Training card keeps the step, including after you leave this page.",
+        }
     job_id = store.enqueue_train(body.enable_mlp)
     store.audit("train_queued", str(job_id))
-    return {"ok": True, "job_id": job_id, "promoted": False}
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "promoted": False,
+        "note": "Training is running. The Training card keeps the step, including after you leave this page.",
+    }
 
 
 @router.get("/models")

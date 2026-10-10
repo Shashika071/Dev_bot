@@ -37,14 +37,25 @@ def _load(store: SqlStore, symbol: str):
     )
 
 
-def run_once(store: SqlStore, symbol: str, enable_mlp: bool) -> int:
+def run_once(store: SqlStore, symbol: str, enable_mlp: bool, job_id: int | None = None) -> int:
+    def progress(text: str) -> None:
+        if job_id is not None:
+            store.save_job(DmTrainJob, job_id, status="running", progress=text)
+
+    progress("Loading ticks")
     loaded = _load(store, symbol)
     if loaded is None:
         raise RuntimeError("no ticks are stored for training")
     digits, prices, usable, epochs = loaded
-    examples = build_examples(digits, prices, usable)
+    progress(f"Building features from {len(digits)} ticks")
+
+    def on_progress(done: int, total: int) -> None:
+        progress(f"Building features, {done} of {total} ticks")
+
+    examples = build_examples(digits, prices, usable, on_progress=on_progress)
     if len(examples["y"]) < 40:
         raise RuntimeError("not enough clean five-tick examples to allocate train, calibration, selection, and test")
+    progress(f"Fitting models on {len(examples['y'])} examples")
     bundle = run_training(
         digits=digits,
         examples=examples,
@@ -53,6 +64,7 @@ def run_once(store: SqlStore, symbol: str, enable_mlp: bool) -> int:
         enable_mlp=enable_mlp,
         default_margin=settings.dm_default_margin,
     )
+    progress("Saving the candidate")
     meta = save_bundle(bundle)
     return store.save_model_row(meta)
 
@@ -67,14 +79,14 @@ def main() -> None:
         if job is None:
             time.sleep(2)
             continue
-        store.save_job(DmTrainJob, job["id"], status="running", progress="training")
+        store.save_job(DmTrainJob, job["id"], status="running", progress="Starting")
         runtime = store.runtime()
         symbol = runtime.resolved_symbol or "R_100"
         try:
             if job.get("cancel_requested"):
                 store.save_job(DmTrainJob, job["id"], status="cancelled")
                 continue
-            model_id = run_once(store, symbol, bool(job.get("enable_mlp")))
+            model_id = run_once(store, symbol, bool(job.get("enable_mlp")), job_id=int(job["id"]))
             store.save_job(
                 DmTrainJob,
                 job["id"],
