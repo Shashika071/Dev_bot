@@ -500,6 +500,27 @@ def test_migration_revision_is_importable():
     assert revisions["002_digitmatch"] == "001_hardening"
 
 
+def test_transition_scores_the_latest_tick_without_waiting_for_five_more():
+    from app.digitmatch.modeling import fit_transition
+    from app.digitmatch.prediction import probabilities_for
+
+    digits = np.arange(30) % 10
+    model = fit_transition(np.arange(10), digits, horizon=5)
+    bundle = {
+        "selected_model": "transition",
+        "models": {"transition": model},
+        "selector": None,
+        "ensemble": None,
+    }
+    prices = np.linspace(100.0, 101.0, len(digits))
+    usable = np.ones(len(digits), dtype=bool)
+    usable[3] = False
+    probs = probabilities_for(bundle, digits, prices, usable)
+    assert probs is not None
+    assert probs.shape == (10,)
+    assert abs(float(probs.sum()) - 1.0) < 1e-6
+
+
 def test_a_running_train_blocks_a_second_one(tmp_path: Path):
     engine = create_engine(f"sqlite:///{tmp_path / 'train.db'}", poolclass=NullPool)
     store = SqlStore(engine)

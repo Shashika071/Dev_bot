@@ -84,8 +84,10 @@ async def run_cycle(broker, state: CycleState, now: datetime) -> dict:
     if state.mode == "observe":
         return _record(state, "skip", "observe_mode", **scored)
 
-    if not state.features_ready or not state.model_ready or state.probabilities is None:
+    if not state.model_ready:
         return _record(state, "skip", "no_model")
+    if not state.features_ready or state.probabilities is None:
+        return _record(state, "skip", "window_not_clean")
     if state.model_expired:
         return _record(state, "skip", "model_expired", **scored)
 

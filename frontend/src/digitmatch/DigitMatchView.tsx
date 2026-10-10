@@ -17,6 +17,7 @@ const SKIP_REASON: Record<string, string> = {
   fresh_tick: 'The tick is fresh.',
   observe_mode: 'Mode is Off, so no demo buy is placed.',
   no_model: 'No promoted model yet. Train one, then press Promote.',
+  window_not_clean: 'The model is active, but the latest ticks are not a clean run, so no digit was scored.',
   model_expired: 'The promoted model is no longer valid.',
   emergency_stop: 'Emergency stop is on.',
   uncertain_purchase: 'An earlier buy is still uncertain, so new orders stay blocked.',

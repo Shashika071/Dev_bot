@@ -4,30 +4,43 @@ from __future__ import annotations
 
 import numpy as np
 
-from app.digitmatch.calibration import apply_temperature
-from app.digitmatch.features import LOOKBACK, build_examples
+from app.digitmatch.features import LOOKBACK, feature_names, live_feature_row
 from app.digitmatch.probability import as_simplex
 from app.digitmatch.registry import load_bundle
 from app.digitmatch.training import _predict_matrix
 
 
-def predict_latest(bundle_path: str, digits: np.ndarray, prices: np.ndarray, usable: np.ndarray) -> np.ndarray | None:
-    if len(digits) < LOOKBACK:
+def _needs_features(model) -> bool:
+    return getattr(model, "kind", "") == "ml"
+
+
+def probabilities_for(bundle: dict, digits: np.ndarray, prices: np.ndarray, usable: np.ndarray) -> np.ndarray | None:
+    """Score the latest tick. A transition or frequency model does not need the next five digits."""
+    digits = np.asarray(digits)
+    prices = np.asarray(prices, dtype=float)
+    usable = np.asarray(usable, dtype=bool)
+    if len(digits) == 0 or not bool(usable[-1]):
         return None
-    tail = slice(-(LOOKBACK + 5), None)
-    examples = build_examples(digits[tail], prices[tail], usable[tail])
-    if len(examples["index"]) == 0:
-        return None
-    if int(examples["index"][-1]) != len(digits[tail]) - 1 - int(examples["horizon"]):
-        return None
-    bundle = load_bundle(bundle_path)
     name = bundle["selected_model"]
+    row = live_feature_row(digits, prices, usable) if len(digits) >= LOOKBACK else None
+    if name == "ensemble":
+        ensemble = bundle["ensemble"]
+        left = bundle["models"][ensemble["left"]]
+        right = bundle["models"][ensemble["right"]]
+        if row is None and (_needs_features(left) or _needs_features(right)):
+            return None
+    else:
+        model = bundle["models"][name]
+        if row is None and _needs_features(model):
+            return None
+    if row is None:
+        row = np.zeros(len(feature_names()), dtype=np.float32)
+    index = len(digits) - 1
     last = {
-        "X": examples["X"][-1:],
-        "y": examples["y"][-1:],
-        "index": np.asarray([int(examples["index"][-1])]),
+        "X": np.asarray(row, dtype=np.float32).reshape(1, -1),
+        "y": np.asarray([int(digits[index])]),
+        "index": np.asarray([index]),
     }
-    full_digits = digits[tail]
     if name == "ensemble":
         ensemble = bundle["ensemble"]
         left = bundle["models"][ensemble["left"]]
@@ -41,8 +54,8 @@ def predict_latest(bundle_path: str, digits: np.ndarray, prices: np.ndarray, usa
             right_x = dict(last)
             right_x["X"] = bundle["selector"].transform(last["X"])
         probs = as_simplex(
-            ensemble["weight_left"] * _predict_matrix(left, examples, left_x, full_digits)
-            + (1.0 - ensemble["weight_left"]) * _predict_matrix(right, examples, right_x, full_digits)
+            ensemble["weight_left"] * _predict_matrix(left, {}, left_x, digits)
+            + (1.0 - ensemble["weight_left"]) * _predict_matrix(right, {}, right_x, digits)
         )
         return probs[0]
     model = bundle["models"][name]
@@ -50,5 +63,8 @@ def predict_latest(bundle_path: str, digits: np.ndarray, prices: np.ndarray, usa
     if model.kind == "ml":
         part = dict(last)
         part["X"] = bundle["selector"].transform(last["X"])
-    raw = _predict_matrix(model, examples, part, full_digits)
-    return apply_temperature(raw, 1.0)[0] if model.temperature == 1 else raw[0]
+    return _predict_matrix(model, {}, part, digits)[0]
+
+
+def predict_latest(bundle_path: str, digits: np.ndarray, prices: np.ndarray, usable: np.ndarray) -> np.ndarray | None:
+    return probabilities_for(load_bundle(bundle_path), digits, prices, usable)
