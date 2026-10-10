@@ -49,27 +49,32 @@ function formatTrainMinutes(seconds: number): string {
   return rest ? `${hours} h ${rest} min` : `${hours} h`;
 }
 
-function trainTimeLabel(ticks: number, progress?: string): string {
-  if (ticks < 1050) return 'Need about 1,050 clean ticks before a train can start.';
-  let seconds = estimateTrainSeconds(ticks);
+function trainTimeLabel(ticks: number, progress?: string, cap = 200000): string {
+  const used = Math.min(ticks, cap);
+  if (used < 1050) return 'Need about 1,050 clean ticks before a train can start.';
+  let seconds = estimateTrainSeconds(used);
   const feature = progress ? /Building features, (\d+) of (\d+)/.exec(progress) : null;
   if (feature) {
     const done = Number(feature[1]);
     const total = Number(feature[2]);
     const fraction = total > 0 ? Math.min(1, done / total) : 0;
     seconds = Math.max(30, seconds * (1 - 0.7 * fraction));
-  } else if (progress && (progress.startsWith('Fitting') || progress.startsWith('Saving'))) {
-    seconds = Math.max(20, estimateTrainSeconds(ticks) * 0.2);
+  } else if (progress && (progress.startsWith('Fitting') || progress.startsWith('Saving') || progress.startsWith('Using the latest'))) {
+    seconds = Math.max(20, estimateTrainSeconds(used) * (progress.startsWith('Fitting') || progress.startsWith('Saving') ? 0.2 : 1));
   }
   const low = formatTrainMinutes(seconds);
   const high = formatTrainMinutes(seconds * 1.6);
   const range = low === high ? low : `${low}–${high}`;
-  return progress ? `Estimated time left: about ${range}.` : `Estimated time: about ${range} for ${ticks.toLocaleString()} ticks.`;
+  const capped = ticks > cap ? ` The latest ${cap.toLocaleString()} of ${ticks.toLocaleString()} ticks are used.` : '';
+  return progress
+    ? `Estimated time left: about ${range}.${capped}`
+    : `Estimated time: about ${range} for ${used.toLocaleString()} ticks.${capped}`;
 }
 
 function trainingBanner(
   job: { status: string; progress: string; error: string | null; model_id: number | null } | null,
   ticks: number,
+  cap = 200000,
 ) {
   if (!job) return null;
   if (job.status === 'queued' || job.status === 'running') {
@@ -77,7 +82,7 @@ function trainingBanner(
       <div className="alert alert-success">
         <Loader2 size={14} className="spin" />
         <div>
-          Training is running. {job.progress || 'Waiting for the trainer.'} {trainTimeLabel(ticks, job.progress)} You can leave this page. This line is still here when you come back.
+          Training is running. {job.progress || 'Waiting for the trainer.'} {trainTimeLabel(ticks, job.progress, cap)} You can leave this page. This line is still here when you come back.
         </div>
       </div>
     );
@@ -174,6 +179,7 @@ type Dashboard = {
     max_open_contracts: number;
   };
   ticks_stored: number;
+  train_tick_limit?: number;
   touch_ticks_available?: number;
   history_job: { status: string; ticks_stored: number; target_ticks: number; note: string | null; error: string | null } | null;
   train_job: { status: string; progress: string; error: string | null; model_id: number | null } | null;
@@ -392,7 +398,7 @@ export default function DigitMatchView() {
     }));
 
   const trainingNow = data?.train_job?.status === 'queued' || data?.train_job?.status === 'running';
-  const trainAlert = trainingBanner(data?.train_job ?? null, data?.ticks_stored ?? 0);
+  const trainAlert = trainingBanner(data?.train_job ?? null, data?.ticks_stored ?? 0, data?.train_tick_limit ?? 200000);
   const trades = data?.trades ?? [];
   const wins = trades.filter((trade) => (trade.profit ?? 0) > 0).length;
   const losses = trades.filter((trade) => (trade.profit ?? 0) < 0).length;
@@ -701,7 +707,7 @@ export default function DigitMatchView() {
               : 'Idle'}
           </p>
           {data?.train_job?.status !== 'error' && (
-            <p className="text-sm">{trainTimeLabel(data?.ticks_stored ?? 0, trainingNow ? data?.train_job?.progress : undefined)}</p>
+            <p className="text-sm">{trainTimeLabel(data?.ticks_stored ?? 0, trainingNow ? data?.train_job?.progress : undefined, data?.train_tick_limit ?? 200000)}</p>
           )}
           <p className="text-xs text-dim">
             {data?.train_job?.status === 'error'

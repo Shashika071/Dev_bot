@@ -269,6 +269,7 @@ def dashboard(_: None = Depends(_read_access)):
             "max_open_contracts": 1,
         },
         "ticks_stored": tick_count,
+        "train_tick_limit": int(settings.dm_train_max_ticks),
         "touch_ticks_available": store.saved_touch_count("R_100"),
         "history_job": history_view,
         "train_job": train_view,

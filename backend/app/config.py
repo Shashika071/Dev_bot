@@ -144,6 +144,11 @@ class Settings(BaseSettings):
     dm_session_secret: str = Field("dev-only-change-me-digitmatch")
     dm_cookie_secure: bool = False
     dm_train_seed: int = Field(42)
+    dm_train_max_ticks: int = Field(
+        200_000,
+        ge=2000,
+        description="Latest ticks used for a train. Sized to stay inside the 2 GB trainer limit.",
+    )
 
     @property
     def deriv_ws_full_url(self) -> str:

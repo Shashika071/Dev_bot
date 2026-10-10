@@ -47,6 +47,14 @@ def run_once(store: SqlStore, symbol: str, enable_mlp: bool, job_id: int | None 
     if loaded is None:
         raise RuntimeError("no ticks are stored for training")
     digits, prices, usable, epochs = loaded
+    stored = len(digits)
+    cap = int(settings.dm_train_max_ticks)
+    if stored > cap:
+        digits = digits[-cap:]
+        prices = prices[-cap:]
+        usable = usable[-cap:]
+        epochs = epochs[-cap:]
+        progress(f"Using the latest {cap} of {stored} ticks so this stays inside 2 GB")
     progress(f"Building features from {len(digits)} ticks")
 
     def on_progress(done: int, total: int) -> None:
