@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import csv
+import json
 import hashlib
 import hmac
 import io
+import math
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
+
+import structlog
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
@@ -32,8 +36,31 @@ from app.digitmatch.store import SqlStore
 from app.models.digitmatch import DmIngestJob, DmTrainJob
 
 router = APIRouter(prefix="/api/digitmatch", tags=["digitmatch"])
+logger = structlog.get_logger(__name__)
 _copy_guard = threading.Lock()
 _copy_running = False
+
+
+def _json_safe(value):
+    """Drop values Starlette refuses to encode, so one bad number cannot 500 the page."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _load_json(text: str | None, fallback):
+    if not text:
+        return fallback
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return fallback
 
 
 class ModeBody(BaseModel):
@@ -135,6 +162,69 @@ def health():
 
 @router.get("/dashboard")
 def dashboard(_: None = Depends(_read_access)):
+    try:
+        return _json_safe(_dashboard())
+    except Exception as exc:
+        logger.exception("dm_dashboard_failed")
+        return _blank_dashboard(f"{type(exc).__name__}: {exc}")
+
+
+def _blank_dashboard(message: str) -> dict:
+    return {
+        "demo_only": True,
+        "credentials_configured": False,
+        "credential_source": "missing",
+        "ui_state": "disconnected",
+        "connection_status": "offline",
+        "auth_status": "unconfigured",
+        "demo_verified": False,
+        "loginid": None,
+        "balance": None,
+        "currency": "USD",
+        "instrument": {
+            "expected_legacy_symbol": EXPECTED_LEGACY_SYMBOL,
+            "expected_display_name": EXPECTED_DISPLAY_NAME,
+            "resolved_symbol": EXPECTED_LEGACY_SYMBOL,
+            "resolved_display": EXPECTED_DISPLAY_NAME,
+            "matches_legacy_symbol": True,
+        },
+        "contract": {"type": CONTRACT_TYPE, "duration_ticks": DURATION_TICKS, "ready": False, "error": None},
+        "freshness": {"age_seconds": None, "stale": True, "last_epoch": None},
+        "mode": "observe",
+        "paused": False,
+        "emergency_stop": False,
+        "model": None,
+        "probabilities": None,
+        "decision": None,
+        "active_contract": None,
+        "trades": [],
+        "equity": [],
+        "pnl": {"daily": 0.0, "cumulative": 0.0},
+        "risk": {
+            "stake": 1,
+            "cooldown_seconds": 30,
+            "max_trades_per_day": 50,
+            "trades_today": 0,
+            "daily_loss_limit": 20,
+            "daily_profit_stop": 20,
+            "pnl_today": 0,
+            "reset_timezone": "Asia/Colombo",
+            "margin": 0.02,
+            "broker_min_stake": None,
+            "max_open_contracts": 1,
+        },
+        "ticks_stored": 0,
+        "train_tick_limit": 200000,
+        "touch_ticks_available": 0,
+        "history_job": None,
+        "train_job": None,
+        "reconciliation": {"blocked": False, "reason": None},
+        "last_error": message[:300],
+        "evaluation": None,
+    }
+
+
+def _dashboard() -> dict:
     store = _store()
     runtime = store.runtime()
     now = datetime.now(timezone.utc)
@@ -281,7 +371,7 @@ def dashboard(_: None = Depends(_read_access)):
         },
         "last_error": runtime.last_error,
         "audit": store.list_audit(20),
-        "evaluation": None if active is None else __import__("json").loads(active.metrics_json or "{}"),
+        "evaluation": None if active is None else _load_json(active.metrics_json, {}),
     }
 
 

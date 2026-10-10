@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import create_engine, or_, select, update
@@ -28,6 +29,29 @@ from app.models.digitmatch import (
 )
 
 _ENGINE = None
+
+
+def _plain_json(value):
+    if isinstance(value, dict):
+        return {str(key): _plain_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_json(item) for item in value]
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        return _plain_json(tolist())
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
+def _load_json_list(text: str | None):
+    if not text:
+        return None
+    try:
+        loaded = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return loaded
 
 
 def _contract_dict(row: DmContract) -> dict:
@@ -297,7 +321,7 @@ class SqlStore:
 
     def record_decision(self, **values) -> None:
         if "probabilities" in values:
-            values["probabilities_json"] = json.dumps(values.pop("probabilities"))
+            values["probabilities_json"] = json.dumps(_plain_json(values.pop("probabilities")), allow_nan=False)
         with self.Session() as session:
             session.add(DmDecision(**values))
             session.commit()
@@ -477,7 +501,7 @@ class SqlStore:
                     "expected_value": row.expected_value,
                     "ask_price": row.ask_price,
                     "total_payout": row.total_payout,
-                    "probabilities": json.loads(row.probabilities_json) if row.probabilities_json else None,
+                    "probabilities": _load_json_list(row.probabilities_json),
                 }
                 for row in rows
             ]

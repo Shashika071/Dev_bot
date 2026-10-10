@@ -334,7 +334,10 @@ export default function DigitMatchView() {
   const load = useCallback(async () => {
     try {
       const response = await fetch(`${API}/api/digitmatch/dashboard`);
-      if (!response.ok) throw new Error(`Dashboard HTTP ${response.status}`);
+      if (!response.ok) {
+        const detail = (await response.text()).slice(0, 240);
+        throw new Error(detail || `Dashboard HTTP ${response.status}`);
+      }
       const body = await response.json() as Dashboard;
       setData(body);
       setError(null);
