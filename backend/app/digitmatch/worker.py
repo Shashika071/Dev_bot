@@ -364,11 +364,12 @@ async def run() -> None:
                 elif arrays is not None and len(arrays[0]) < LOOKBACK:
                     features_ready = False
                 latest = store.latest_tick(symbol)
-                received = None
-                if latest is not None and latest.received_at is not None:
+                runtime = store.runtime()
+                received = runtime.last_tick_received_at
+                if received is None and latest is not None:
                     received = latest.received_at
-                    if received.tzinfo is None:
-                        received = received.replace(tzinfo=timezone.utc)
+                if received is not None and received.tzinfo is None:
+                    received = received.replace(tzinfo=timezone.utc)
                 state = CycleState(
                     mode=runtime.mode,
                     probabilities=None if probabilities is None else probabilities.tolist(),
@@ -392,11 +393,19 @@ async def run() -> None:
                         continue
                 try:
                     result = await run_cycle(broker, state, datetime.now(timezone.utc))
+                except Exception as exc:
+                    logger.warning("dm_cycle_failed", error=type(exc).__name__)
+                    result = {
+                        "action": "skip",
+                        "reason": "cycle_failed",
+                        "probabilities": state.probabilities,
+                        "digit": None if not state.probabilities else int(max(range(10), key=lambda index: state.probabilities[index])),
+                    }
                 finally:
                     if locked:
                         store.release_lock(owner)
                 interesting = result.get("action") != "skip"
-                signature = f"{result.get('action')}:{result.get('reason')}:{result.get('digit')}"
+                signature = f"{result.get('action')}:{result.get('reason')}:{result.get('digit')}:{state.latest_tick_epoch}"
                 now_s = time.time()
                 if interesting or signature != last_skip or now_s - last_skip_at > 15:
                     _persist(store, state, result)

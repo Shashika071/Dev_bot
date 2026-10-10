@@ -11,6 +11,7 @@ const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 const SKIP_REASON: Record<string, string> = {
   stale_tick: 'The latest tick is too old, so no digit was chosen.',
+  cycle_failed: 'The check failed before a digit could be sent. The percentages below are still from the model.',
   no_tick: 'No tick has arrived yet.',
   tick_clock_ahead: 'The tick clock is ahead of this server, so the check was skipped.',
   fresh_tick: 'The tick is fresh.',
@@ -82,6 +83,7 @@ function trainingBanner(
   job: { status: string; progress: string; error: string | null; model_id: number | null } | null,
   ticks: number,
   cap = 200000,
+  activeModelId: number | null = null,
 ) {
   if (!job) return null;
   if (job.status === 'queued' || job.status === 'running') {
@@ -95,11 +97,14 @@ function trainingBanner(
     );
   }
   if (job.status === 'done') {
+    const live = job.model_id != null && job.model_id === activeModelId;
     return (
       <div className="alert alert-success">
         <CheckCircle size={14} />
         <div>
-          Training finished{job.model_id ? ` as model #${job.model_id}` : ''}. It is saved, and the desk does not use it until you press Promote.
+          {live
+            ? `Training finished as model #${job.model_id}. It is already active, so the desk is using it.`
+            : `Training finished${job.model_id ? ` as model #${job.model_id}` : ''}. It is saved, and the desk does not use it until you press Promote.`}
         </div>
       </div>
     );
@@ -405,7 +410,8 @@ export default function DigitMatchView() {
     }));
 
   const trainingNow = data?.train_job?.status === 'queued' || data?.train_job?.status === 'running';
-  const trainAlert = trainingBanner(data?.train_job ?? null, data?.ticks_stored ?? 0, data?.train_tick_limit ?? 200000);
+  const activeModelId = models.find((model) => model.is_active)?.id ?? data?.model?.id ?? null;
+  const trainAlert = trainingBanner(data?.train_job ?? null, data?.ticks_stored ?? 0, data?.train_tick_limit ?? 200000, activeModelId);
   const trades = data?.trades ?? [];
   const wins = trades.filter((trade) => (trade.profit ?? 0) > 0).length;
   const losses = trades.filter((trade) => (trade.profit ?? 0) < 0).length;
@@ -710,7 +716,9 @@ export default function DigitMatchView() {
             {data?.train_job
               ? data.train_job.status === 'error'
                 ? `error · ${data.train_job.error || 'Training stopped.'}`
-                : `${data.train_job.status} · ${data.train_job.progress}`
+                : data.train_job.status === 'done' && data.train_job.model_id != null && data.train_job.model_id === activeModelId
+                  ? `done · model #${data.train_job.model_id} is active`
+                  : `${data.train_job.status} · ${data.train_job.progress}`
               : 'Idle'}
           </p>
           {data?.train_job?.status !== 'error' && (
@@ -721,8 +729,10 @@ export default function DigitMatchView() {
               ? data.train_job.error || 'Training stopped.'
               : trainingNow
                 ? 'This step updates while the job runs. The button stays off until it finishes.'
-                : data?.train_job?.status === 'done'
-                  ? 'Finished and saved. Press Promote on the model you want the desk to use.'
+                : data?.train_job?.status === 'done' && data.train_job.model_id != null && data.train_job.model_id === activeModelId
+                  ? 'This model is already the one the desk uses. Promote appears only on a model that is not active.'
+                  : data?.train_job?.status === 'done'
+                    ? 'Finished and saved. Press Promote on the model you want the desk to use.'
                   : 'Press Train candidate once. A second press does nothing while this job is running.'}
           </p>
           <div className="flex gap-2" style={{ flexWrap: 'wrap', marginTop: 12 }}>

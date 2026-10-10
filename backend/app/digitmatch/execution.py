@@ -47,6 +47,13 @@ class CycleState:
             self.lock_owner = None
 
 
+def _scored(state: CycleState) -> dict:
+    if not state.probabilities:
+        return {}
+    top = max(range(len(state.probabilities)), key=lambda index: state.probabilities[index])
+    return {"probabilities": state.probabilities, "digit": top}
+
+
 def _record(state: CycleState, action: str, reason: str, **extra) -> dict:
     row = {"action": action, "reason": reason, "mode": state.mode, "policy": FRESHNESS_POLICY, **extra}
     state.decisions.append(row)
@@ -70,20 +77,21 @@ async def run_cycle(broker, state: CycleState, now: datetime) -> dict:
         now=now,
         max_age_seconds=state.max_tick_age_seconds,
     )
+    scored = _scored(state)
     if not fresh.ok:
-        return _record(state, "skip", fresh.reason)
+        return _record(state, "skip", fresh.reason, **scored)
 
     if state.mode == "observe":
-        return _record(state, "skip", "observe_mode", probabilities=state.probabilities)
+        return _record(state, "skip", "observe_mode", **scored)
 
     if not state.features_ready or not state.model_ready or state.probabilities is None:
         return _record(state, "skip", "no_model")
     if state.model_expired:
-        return _record(state, "skip", "model_expired")
+        return _record(state, "skip", "model_expired", **scored)
 
     gate = assess(risk, now, next_loss=risk.stake)
     if not gate.allowed:
-        return _record(state, "skip", gate.reason)
+        return _record(state, "skip", gate.reason, **scored)
 
     epoch_before = state.latest_tick_epoch
     quotes = []
