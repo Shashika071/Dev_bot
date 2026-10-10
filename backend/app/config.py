@@ -113,6 +113,38 @@ class Settings(BaseSettings):
     parquet_data_dir: str = Field("/app/data/parquet", description="Path for Parquet files")
     model_dir: str = Field("/app/data/models", description="Path for saved ML models")
 
+    # --- Digit Matches research (separate from the touch bot) ---
+    # Classic WebSocket v3 + API-token authorize only. Not PAT/OAuth.
+    dm_deriv_app_id: Optional[str] = Field(None, description="Deriv app_id for the classic v3 socket")
+    dm_deriv_api_token: Optional[str] = Field(None, description="Classic demo API token. Never a pat_ token.")
+    dm_deriv_ws_url: str = Field(
+        "wss://ws.derivws.com/websockets/v3",
+        description="Classic Deriv WebSocket v3 base URL",
+    )
+    dm_target_ticks: int = Field(100_000, ge=1)
+    dm_history_page_size: int = Field(5000, ge=1, le=5000)
+    dm_expected_tick_seconds: float = Field(2.0, gt=0)
+    dm_max_tick_age_seconds: float = Field(5.0, gt=0)
+    dm_max_proposal_age_seconds: float = Field(3.0, gt=0)
+    dm_stake: float = Field(1.0, gt=0)
+    dm_cooldown_seconds: int = Field(30, ge=0)
+    dm_max_trades_per_day: int = Field(50, ge=0)
+    dm_daily_loss_limit: float = Field(20.0, ge=0)
+    dm_daily_profit_stop: float = Field(20.0, ge=0)
+    dm_reset_timezone: str = Field("Asia/Colombo")
+    dm_model_max_age_hours: int = Field(168, ge=1)
+    dm_default_margin: float = Field(0.02, ge=0)
+    dm_enable_mlp: bool = Field(False, description="Optional feed-forward network. Off by default.")
+    dm_require_app_auth: bool = Field(False, description="Require app password when not localhost-only")
+    dm_allow_demo_control: bool = Field(
+        False,
+        description="Allow mode and risk changes without the app password. Keep false on any public host.",
+    )
+    dm_app_password: Optional[str] = None
+    dm_session_secret: str = Field("dev-only-change-me-digitmatch")
+    dm_cookie_secure: bool = False
+    dm_train_seed: int = Field(42)
+
     @property
     def deriv_ws_full_url(self) -> str:
         if self.deriv_app_id and "websockets/v3" in self.deriv_ws_url:

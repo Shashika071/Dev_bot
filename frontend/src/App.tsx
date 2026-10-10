@@ -4,12 +4,13 @@ import {
   Activity, ShieldCheck, Zap, AlertTriangle, Settings,
   RefreshCw, BarChart2, Brain, CheckCircle, XCircle,
   Loader2, Wifi, WifiOff, Clock, Database, TrendingUp,
-  ChevronRight, Info, Signal, Cpu, Volume2, Trash2
+  ChevronRight, Info, Signal, Cpu, Volume2, Trash2, Hash
 } from 'lucide-react';
 import {
   ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid,
 } from 'recharts';
 import { playSignalAlertSound, unlockSignalAudio } from './signalAlert';
+import DigitMatchView, { DigitMatchDashControl } from './digitmatch/DigitMatchView';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -175,7 +176,7 @@ interface DownloadStatus {
   target_ticks?: number | null;
 }
 interface DailyStatus { signals_today: number; max_signals: number; cooldown_active: boolean; timezone: string; }
-type Tab = 'dashboard' | 'train' | 'setup';
+type Tab = 'dashboard' | 'train' | 'setup' | 'digits';
 
 function hoursBetween(oldest?: string, newest?: string): number | null {
   if (!oldest || !newest) return null;
@@ -436,6 +437,7 @@ export default function App() {
 
   const navItems: { id: Tab; label: string; icon: JSX.Element }[] = [
     { id: 'dashboard', label: 'Dashboard',    icon: <Activity size={16}/> },
+    { id: 'digits',    label: 'Digit Matches', icon: <Hash size={16}/> },
     { id: 'train',     label: 'Train Model',  icon: <Brain size={16}/>    },
     { id: 'setup',     label: 'Configuration',icon: <Settings size={16}/> },
   ];
@@ -518,6 +520,7 @@ export default function App() {
       {/* ── Main ── */}
       <main className="main-content">
         {tab === 'dashboard' && <DashboardView apiStatus={status} />}
+        {tab === 'digits'    && <DigitMatchView />}
         {tab === 'train'     && <TrainView />}
         {tab === 'setup'     && <SetupView online={online} />}
       </main>
@@ -1300,6 +1303,8 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
           </div>
         </div>
       </div>
+
+      <DigitMatchDashControl />
 
       {(analyzeMsg || analysisRows.length > 0 || tradeResultMsg || analyzeWatching) && (
         <div className={`analyze-status-box ${analyzeOk ? 'alert-success' : 'alert-warning'}`}>

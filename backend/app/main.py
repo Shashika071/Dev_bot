@@ -6,7 +6,7 @@ import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import setup, signals, train, ws
+from app.api import digitmatch, setup, signals, train, ws
 from app.config import settings
 from app.database import init_db
 
@@ -14,7 +14,7 @@ logger = structlog.get_logger(__name__)
 
 app = FastAPI(
     title="Deriv Touch Signal Bot",
-    description="Quantitative ML-powered signal bot (No auto-trading).",
+    description="Touch signals plus a separate demo-only Digit Matches research desk.",
     version="1.1.0",
 )
 
@@ -30,6 +30,7 @@ app.include_router(setup.router)
 app.include_router(signals.router)
 app.include_router(ws.router)
 app.include_router(train.router)
+app.include_router(digitmatch.router)
 
 
 @app.on_event("startup")

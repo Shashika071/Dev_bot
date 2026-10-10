@@ -28,6 +28,20 @@ def _token_path() -> str:
     return os.path.join(settings.model_dir, "deriv_trade_token.enc")
 
 
+def _repo_models_dir() -> str:
+    """Host copy of the Docker /app/data/models mount."""
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "models"))
+
+
+def _read_path(filename: str) -> Optional[str]:
+    """Prefer MODEL_DIR, then the repo data/models folder used on this PC."""
+    for folder in (settings.model_dir, _repo_models_dir()):
+        path = os.path.join(folder, filename)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
 def _fernet() -> Fernet:
     # Derive a stable 32-byte Fernet key from SECRET_KEY
     digest = hashlib.sha256(settings.secret_key.encode("utf-8")).digest()
@@ -96,7 +110,7 @@ def resolve_deriv_app_id() -> str:
 
 def load_trade_prefs() -> dict[str, Any]:
     base = _defaults()
-    path = _prefs_path()
+    path = _read_path("trade_ui_prefs.json") or _prefs_path()
     try:
         if os.path.isfile(path):
             with open(path, encoding="utf-8") as f:
@@ -147,8 +161,8 @@ def clear_trade_token() -> None:
 
 
 def get_trade_token() -> Optional[str]:
-    path = _token_path()
-    if not os.path.isfile(path):
+    path = _read_path("deriv_trade_token.enc")
+    if not path:
         return None
     try:
         with open(path, "rb") as f:
@@ -163,8 +177,11 @@ def get_trade_token() -> Optional[str]:
 
 
 def token_status() -> dict[str, Any]:
-    meta_path = os.path.join(settings.model_dir, "deriv_trade_token_meta.json")
-    configured = os.path.isfile(_token_path())
+    token_file = _read_path("deriv_trade_token.enc")
+    meta_path = _read_path("deriv_trade_token_meta.json") or os.path.join(
+        settings.model_dir, "deriv_trade_token_meta.json"
+    )
+    configured = token_file is not None
     mask = None
     if configured and os.path.isfile(meta_path):
         try:

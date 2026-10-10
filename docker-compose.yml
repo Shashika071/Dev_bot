@@ -42,7 +42,7 @@ services:
       dockerfile: Dockerfile
     env_file: .env
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./backend:/app
       - ./data:/app/data
@@ -68,12 +68,38 @@ services:
         condition: service_started
     command: python -m app.worker
 
+  digitmatch-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file: .env
+    volumes:
+      - ./backend:/app
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: python -m app.digitmatch.worker
+
+  digitmatch-trainer:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file: .env
+    volumes:
+      - ./backend:/app
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: python -m app.digitmatch.train_worker
+
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "5173:5173"
+      - "127.0.0.1:5173:5173"
     volumes:
       - ./frontend/src:/app/src
     environment:

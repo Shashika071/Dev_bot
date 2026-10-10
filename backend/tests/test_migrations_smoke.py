@@ -13,3 +13,4 @@ def test_alembic_script_directory_loads():
     scripts = ScriptDirectory.from_config(cfg)
     revs = list(scripts.walk_revisions())
     assert any(r.revision == "001_hardening" for r in revs)
+    assert any(r.revision == "002_digitmatch" for r in revs)
