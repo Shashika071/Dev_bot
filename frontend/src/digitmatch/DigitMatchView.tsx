@@ -138,7 +138,7 @@ export function DigitMatchDashControl() {
   const [paused, setPaused] = useState(false);
   const [stopped, setStopped] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const response = await fetch(`${API}/api/digitmatch/dashboard`);
@@ -155,8 +155,8 @@ export function DigitMatchDashControl() {
     return () => window.clearInterval(timer);
   }, [load]);
 
-  async function post(path: string, body?: unknown) {
-    setBusy(true);
+  async function post(path: string, body: unknown, key: string) {
+    setBusyKey(key);
     setError(null);
     try {
       const response = await fetch(`${API}${path}`, {
@@ -169,8 +169,23 @@ export function DigitMatchDashControl() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Request failed');
     } finally {
-      setBusy(false);
+      setBusyKey(null);
     }
+  }
+
+  function modeButton(id: string, label: string, path: string, body: unknown, pressed: boolean) {
+    const busy = busyKey === id;
+    return (
+      <button
+        type="button"
+        className={`btn ${pressed ? 'btn-primary' : 'btn-ghost'}`}
+        aria-pressed={pressed}
+        disabled={busyKey !== null}
+        onClick={() => post(path, body, id)}
+      >
+        {busy ? 'Working…' : pressed ? `Selected · ${label}` : label}
+      </button>
+    );
   }
 
   const label = mode === 'demo_explore' ? 'ON' : mode === 'demo_filtered' ? 'ON if quote passes' : 'OFF';
@@ -181,10 +196,12 @@ export function DigitMatchDashControl() {
       <span className={mode === 'observe' ? 'badge badge-dim' : 'badge badge-green'}>{label}</span>
       {paused && <span className="badge badge-amber">Paused</span>}
       {stopped && <span className="badge badge-amber">Emergency stop</span>}
-      <button type="button" className={mode === 'observe' ? 'btn btn-primary' : 'btn btn-ghost'} disabled={busy} onClick={() => post('/api/digitmatch/mode', { mode: 'observe' })}>Off</button>
-      <button type="button" className={mode === 'demo_explore' ? 'btn btn-primary' : 'btn btn-ghost'} disabled={busy} onClick={() => post('/api/digitmatch/mode', { mode: 'demo_explore' })}>On</button>
-      <button type="button" className={mode === 'demo_filtered' ? 'btn btn-primary' : 'btn btn-ghost'} disabled={busy} onClick={() => post('/api/digitmatch/mode', { mode: 'demo_filtered' })}>On if quote passes</button>
-      <button type="button" className="btn btn-ghost" disabled={busy} onClick={() => post(paused ? '/api/digitmatch/resume' : '/api/digitmatch/pause')}>{paused ? 'Resume' : 'Pause'}</button>
+      {modeButton('off', 'Off', '/api/digitmatch/mode', { mode: 'observe' }, mode === 'observe')}
+      {modeButton('on', 'On', '/api/digitmatch/mode', { mode: 'demo_explore' }, mode === 'demo_explore')}
+      {modeButton('filter', 'On if quote passes', '/api/digitmatch/mode', { mode: 'demo_filtered' }, mode === 'demo_filtered')}
+      <button type="button" className={`btn ${paused ? 'btn-primary' : 'btn-ghost'}`} aria-pressed={paused} disabled={busyKey !== null} onClick={() => post(paused ? '/api/digitmatch/resume' : '/api/digitmatch/pause', {}, 'pause')}>
+        {busyKey === 'pause' ? 'Working…' : paused ? 'Selected · Paused' : 'Pause'}
+      </button>
       {error && <span className="text-xs" style={{ color: 'var(--red)' }}>{error}</span>}
     </div>
   );
@@ -201,6 +218,8 @@ export default function DigitMatchView() {
   const [profitStop, setProfitStop] = useState('20');
   const [maxTrades, setMaxTrades] = useState('50');
   const [cooldown, setCooldown] = useState('30');
+  const [busyKey, setBusyKey] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
   const formReady = useRef(false);
 
   const load = useCallback(async () => {
@@ -236,18 +255,41 @@ export default function DigitMatchView() {
     return () => window.clearInterval(timer);
   }, [load]);
 
-  async function post(path: string, body?: unknown) {
+  async function post(path: string, body: unknown, key: string, okText: string) {
+    setBusyKey(key);
+    setNotice(null);
     try {
       const response = await fetch(`${API}${path}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: body === undefined ? '{}' : JSON.stringify(body),
+        body: JSON.stringify(body ?? {}),
       });
       if (!response.ok) throw new Error(await readError(response));
+      const payload = await response.json().catch(() => null) as { note?: string } | null;
+      setNotice({ ok: true, text: payload?.note || okText });
+      setError(null);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Request failed');
+      setNotice({ ok: false, text: err instanceof Error ? err.message : 'Request failed' });
+    } finally {
+      setBusyKey(null);
     }
+  }
+
+  function press(id: string, label: string, run: () => void, opts?: { on?: boolean; tone?: 'warn' | 'danger' }) {
+    const busy = busyKey === id;
+    const tone = opts?.tone === 'warn' ? 'is-warn' : opts?.tone === 'danger' ? 'is-danger' : '';
+    return (
+      <button
+        type="button"
+        className={`dm-btn ${opts?.on ? 'is-on' : ''} ${tone} ${busy ? 'is-busy' : ''}`}
+        aria-pressed={!!opts?.on}
+        disabled={busyKey !== null}
+        onClick={run}
+      >
+        {busy ? 'Working…' : opts?.on ? `✓ ${label}` : label}
+      </button>
+    );
   }
 
   const state = data?.ui_state || 'loading';
@@ -270,7 +312,9 @@ export default function DigitMatchView() {
         <div className="dm-state">{STATE_COPY[state] || 'Loading the research desk.'}</div>
       </header>
 
+      {notice && <div className={notice.ok ? 'dm-ok' : 'dm-alert'}>{notice.text}</div>}
       {error && <div className="dm-alert">{error}</div>}
+      {data?.last_error && <div className="dm-alert">{data.last_error}</div>}
       {data?.reconciliation.blocked && (
         <div className="dm-alert">
           Uncertain purchase. {data.reconciliation.reason || 'Match the broker statement before any new order.'}
@@ -300,7 +344,7 @@ export default function DigitMatchView() {
           <p>Symbol: {data?.instrument.resolved_symbol || 'not resolved'} (legacy expected {data?.instrument.expected_legacy_symbol})</p>
           <p>{data?.contract.type} · {data?.contract.duration_ticks} ticks</p>
           <p>Digit Matches ticks: {data?.ticks_stored ?? '—'}</p>
-          <p>Saved by the touch bot: {(data?.touch_ticks_available ?? 0).toLocaleString()} R_100</p>
+          <p>Saved by the touch bot: <span className="dm-keep">{(data?.touch_ticks_available ?? 0).toLocaleString()} R_100</span></p>
         </article>
         <article>
           <h2>Model</h2>
@@ -310,14 +354,14 @@ export default function DigitMatchView() {
         </article>
         <article>
           <h2>Mode</h2>
-          <p className="dm-mode">{data?.mode === 'demo_explore' ? 'ON' : data?.mode === 'demo_filtered' ? 'ON if quote passes' : 'OFF'}</p>
-          <div className="dm-actions">
-            <button type="button" className={data?.mode === 'observe' ? 'active' : ''} onClick={() => post('/api/digitmatch/mode', { mode: 'observe' })}>Off</button>
-            <button type="button" className={data?.mode === 'demo_explore' ? 'active' : ''} onClick={() => post('/api/digitmatch/mode', { mode: 'demo_explore' })}>On</button>
-            <button type="button" className={data?.mode === 'demo_filtered' ? 'active' : ''} onClick={() => post('/api/digitmatch/mode', { mode: 'demo_filtered' })}>On if quote passes</button>
-            <button type="button" className={data?.paused ? 'active' : ''} onClick={() => post(data?.paused ? '/api/digitmatch/resume' : '/api/digitmatch/pause')}>{data?.paused ? 'Resume' : 'Pause'}</button>
-            <button type="button" className="danger" onClick={() => post('/api/digitmatch/emergency-stop')}>Emergency stop</button>
-            <button type="button" onClick={() => post('/api/digitmatch/emergency-stop/clear')}>Clear stop</button>
+          <p className="dm-mode">{data?.mode === 'demo_explore' ? 'ON' : data?.mode === 'demo_filtered' ? 'ON IF QUOTE PASSES' : 'OFF'}</p>
+          <div className="dm-actions stack">
+            {press('off', 'Off', () => post('/api/digitmatch/mode', { mode: 'observe' }, 'off', 'Off. No demo buy will be placed.'), { on: (data?.mode || 'observe') === 'observe' })}
+            {press('on', 'On', () => post('/api/digitmatch/mode', { mode: 'demo_explore' }, 'on', 'On. Demo trades can be placed at the fixed stake.'), { on: data?.mode === 'demo_explore' })}
+            {press('filter', 'On if quote passes', () => post('/api/digitmatch/mode', { mode: 'demo_filtered' }, 'filter', 'On only when the live quote passes the filter.'), { on: data?.mode === 'demo_filtered' })}
+            {press('pause', data?.paused ? 'Paused' : 'Pause', () => post(data?.paused ? '/api/digitmatch/resume' : '/api/digitmatch/pause', {}, 'pause', data?.paused ? 'Pause cleared.' : 'Paused. New orders are blocked.'), { on: !!data?.paused, tone: 'warn' })}
+            {press('stop', 'Emergency stop', () => post('/api/digitmatch/emergency-stop', {}, 'stop', 'Emergency stop is on. An open contract is not cancelled.'), { on: !!data?.emergency_stop, tone: 'danger' })}
+            {data?.emergency_stop && press('clear', 'Clear stop', () => post('/api/digitmatch/emergency-stop/clear', {}, 'clear', 'Emergency stop cleared.'), { tone: 'danger' })}
           </div>
           <p className="dm-note">{data?.stop_note}</p>
         </article>
@@ -445,9 +489,9 @@ export default function DigitMatchView() {
           <p>{data?.history_job ? `${data.history_job.status} · ${data.history_job.ticks_stored}/${data.history_job.target_ticks}` : 'No download yet'}</p>
           <p className="dm-note">{data?.history_job?.note || data?.history_job?.error || 'The touch bot ticks can be copied. A broker download is separate.'}</p>
           <div className="dm-actions">
-            <button type="button" onClick={() => post('/api/digitmatch/history/use-saved')}>Use saved ticks</button>
-            <button type="button" onClick={() => post('/api/digitmatch/history/start', { target_ticks: 100000 })}>Download history</button>
-            <button type="button" onClick={() => post('/api/digitmatch/history/cancel')}>Cancel</button>
+            {press('saved', 'Use saved ticks', () => post('/api/digitmatch/history/use-saved', {}, 'saved', 'Saved ticks copied.'))}
+            {press('download', 'Download history', () => post('/api/digitmatch/history/start', { target_ticks: 100000 }, 'download', 'History download started.'))}
+            {press('cancel', 'Cancel download', () => post('/api/digitmatch/history/cancel', {}, 'cancel', 'Download cancel requested.'))}
             <a href={`${API}/api/digitmatch/history/export`}>Export CSV</a>
           </div>
         </article>
@@ -456,14 +500,16 @@ export default function DigitMatchView() {
           <p>{data?.train_job ? `${data.train_job.status} · ${data.train_job.progress}` : 'Idle'}</p>
           <p className="dm-note">{data?.train_job?.error || 'A finished train stays a candidate until you promote it.'}</p>
           <div className="dm-actions">
-            <button type="button" onClick={() => post('/api/digitmatch/train', { enable_mlp: false })}>Train candidate</button>
+            {press('train', 'Train candidate', () => post('/api/digitmatch/train', { enable_mlp: false }, 'train', 'Training started. It stays a candidate until you promote it.'))}
           </div>
           <ul>
             {models.map((model) => (
               <li key={model.id}>
                 #{model.id} {model.name} {model.is_active ? '(active)' : ''}
                 {!model.is_active && (
-                  <button type="button" onClick={() => post(`/api/digitmatch/models/${model.id}/promote`)}>Promote</button>
+                  <button type="button" className="dm-btn" disabled={busyKey !== null} onClick={() => post(`/api/digitmatch/models/${model.id}/promote`, {}, `promote-${model.id}`, `Model #${model.id} promoted for live scoring.`)}>
+                    {busyKey === `promote-${model.id}` ? 'Working…' : 'Promote'}
+                  </button>
                 )}
               </li>
             ))}
@@ -485,7 +531,7 @@ export default function DigitMatchView() {
               daily_profit_stop: Number(profitStop),
               reset_timezone: timezone,
               margin: Number(margin),
-            });
+            }, 'risk', 'Limits saved.');
           }}
         >
           <label>Stake<input value={stake} onChange={(event) => setStake(event.target.value)} /></label>
@@ -495,11 +541,10 @@ export default function DigitMatchView() {
           <label>Daily profit stop<input value={profitStop} onChange={(event) => setProfitStop(event.target.value)} /></label>
           <label>Margin above break-even<input value={margin} onChange={(event) => setMargin(event.target.value)} /></label>
           <label>Reset timezone<input value={timezone} onChange={(event) => setTimezone(event.target.value)} /></label>
-          <button type="submit">Save limits</button>
+          <button type="submit" className="dm-btn" disabled={busyKey !== null}>{busyKey === 'risk' ? 'Working…' : 'Save limits'}</button>
         </form>
         <p className="dm-note">Maximum simultaneous bot contracts stays at 1. Stake is not increased after a loss.</p>
         <p className="dm-note">{data?.freshness_policy}</p>
-        {data?.last_error && <p className="dm-alert">{data.last_error}</p>}
       </section>
     </div>
   );
