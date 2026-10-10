@@ -19,7 +19,7 @@ def probabilities_for(bundle: dict, digits: np.ndarray, prices: np.ndarray, usab
     digits = np.asarray(digits)
     prices = np.asarray(prices, dtype=float)
     usable = np.asarray(usable, dtype=bool)
-    if len(digits) == 0 or not bool(usable[-1]):
+    if len(digits) == 0:
         return None
     name = bundle["selected_model"]
     row = live_feature_row(digits, prices, usable) if len(digits) >= LOOKBACK else None

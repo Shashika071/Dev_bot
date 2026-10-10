@@ -515,10 +515,14 @@ def test_transition_scores_the_latest_tick_without_waiting_for_five_more():
     prices = np.linspace(100.0, 101.0, len(digits))
     usable = np.ones(len(digits), dtype=bool)
     usable[3] = False
+    usable[-1] = False
     probs = probabilities_for(bundle, digits, prices, usable)
     assert probs is not None
     assert probs.shape == (10,)
     assert abs(float(probs.sum()) - 1.0) < 1e-6
+    blocked = probabilities_for(bundle, digits, prices, np.zeros(len(digits), dtype=bool))
+    assert blocked is not None
+    assert blocked.shape == (10,)
 
 
 def test_a_running_train_blocks_a_second_one(tmp_path: Path):

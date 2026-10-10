@@ -301,6 +301,7 @@ async def run() -> None:
                 last_error=None,
             )
             symbol = resolved["symbol"]
+            known_pip = resolved.get("pip")
 
             async def on_tick(tick: dict) -> None:
                 if tick.get("symbol") and tick.get("symbol") != symbol:
@@ -309,7 +310,7 @@ async def run() -> None:
                     symbol=symbol,
                     quote=tick["quote"],
                     epoch=tick["epoch"],
-                    pip_size=tick.get("pip_size"),
+                    pip_size=tick.get("pip_size") if tick.get("pip_size") is not None else known_pip,
                     source="live",
                     ingestion_id="live",
                     broker_tick_id=tick.get("id"),
