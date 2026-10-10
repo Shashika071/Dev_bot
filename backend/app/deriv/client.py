@@ -387,7 +387,6 @@ class DerivWSClient:
         """Fetch available instruments."""
         return await self.send({
             "active_symbols": product_type,
-            "product_type": product_type,
         })
 
     async def get_contracts_for(self, symbol: str) -> dict:
@@ -395,7 +394,6 @@ class DerivWSClient:
         return await self.send({
             "contracts_for": symbol,
             "currency": "USD",
-            "product_type": "basic",
         })
 
     async def get_ticks_history(

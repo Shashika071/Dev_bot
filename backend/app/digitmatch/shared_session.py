@@ -125,14 +125,14 @@ class DigitMatchSession(DerivTradeClient):
         return data
 
     async def active_symbols(self) -> list[dict]:
-        data = await self.send({"active_symbols": "brief", "product_type": "basic"})
+        data = await self.send({"active_symbols": "brief"})
         rows = data.get("active_symbols")
         if not isinstance(rows, list):
             raise RuntimeError("active_symbols missing")
         return rows
 
     async def contracts_for(self, symbol: str, currency: str) -> dict:
-        data = await self.send({"contracts_for": symbol, "currency": currency, "product_type": "basic"})
+        data = await self.send({"contracts_for": symbol, "currency": currency})
         body = data.get("contracts_for")
         if not isinstance(body, dict):
             raise RuntimeError("contracts_for missing")

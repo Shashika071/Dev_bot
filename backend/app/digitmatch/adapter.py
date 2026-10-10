@@ -176,7 +176,7 @@ class DerivV3Adapter:
         return auth
 
     async def active_symbols(self) -> list[dict]:
-        data = await self.request({"active_symbols": "brief", "product_type": "basic"})
+        data = await self.request({"active_symbols": "brief"})
         rows = data.get("active_symbols")
         if not isinstance(rows, list):
             raise DerivCallError("bad_symbols", "active_symbols missing")
@@ -184,7 +184,7 @@ class DerivV3Adapter:
 
     async def contracts_for(self, symbol: str, currency: str) -> dict:
         data = await self.request(
-            {"contracts_for": symbol, "currency": currency, "product_type": "basic"}
+            {"contracts_for": symbol, "currency": currency}
         )
         body = data.get("contracts_for")
         if not isinstance(body, dict):
