@@ -6,6 +6,7 @@ import csv
 import hashlib
 import hmac
 import io
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -31,6 +32,8 @@ from app.digitmatch.store import SqlStore
 from app.models.digitmatch import DmIngestJob, DmTrainJob
 
 router = APIRouter(prefix="/api/digitmatch", tags=["digitmatch"])
+_copy_guard = threading.Lock()
+_copy_running = False
 
 
 class ModeBody(BaseModel):
@@ -454,14 +457,42 @@ async def import_history(
 
 @router.post("/history/use-saved")
 def use_saved_ticks(_: None = Depends(_control_access)):
-    store = _store()
-    try:
-        result = store.import_saved_ticks("R_100")
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return result
+    global _copy_running
+    with _copy_guard:
+        if _copy_running:
+            return {
+                "ok": True,
+                "note": "Copy is already running. The History line updates the count. The page stays usable.",
+            }
+        store = _store()
+        job_id = store.open_touch_copy_job()
+        _copy_running = True
+
+    def _run() -> None:
+        global _copy_running
+        worker_store = _store()
+        try:
+            result = worker_store.import_saved_ticks("R_100", progress_job_id=job_id)
+            worker_store.save_job(
+                DmIngestJob,
+                job_id,
+                status="done",
+                ticks_stored=int(result["available"]),
+                target_ticks=int(result["available"]),
+                note=result["note"],
+                error=None,
+            )
+        except Exception as exc:
+            worker_store.save_job(DmIngestJob, job_id, status="error", error=str(exc)[:500])
+        finally:
+            with _copy_guard:
+                _copy_running = False
+
+    threading.Thread(target=_run, name="dm-touch-copy", daemon=True).start()
+    return {
+        "ok": True,
+        "note": "Copy started. The History line shows the count. You can keep using this page.",
+    }
 
 
 @router.post("/train")

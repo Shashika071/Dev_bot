@@ -500,7 +500,22 @@ class SqlStore:
         except SQLAlchemyError:
             return 0
 
-    def import_saved_ticks(self, symbol: str = "R_100") -> dict:
+    def open_touch_copy_job(self) -> int:
+        import uuid
+
+        with self.Session() as session:
+            job = DmIngestJob(
+                ingestion_id=uuid.uuid4().hex,
+                symbol="R_100",
+                target_ticks=self.saved_touch_count("R_100"),
+                status="copying",
+                note="Copying saved touch-bot ticks. This page keeps updating the count.",
+            )
+            session.add(job)
+            session.commit()
+            return int(job.id)
+
+    def import_saved_ticks(self, symbol: str = "R_100", progress_job_id: int | None = None) -> dict:
         """Copy the touch bot's saved R_100 ticks. Digits are rebuilt from the numeric quote and pip size."""
         import uuid
         from dataclasses import replace
@@ -533,13 +548,15 @@ class SqlStore:
         previous_precision = None
         previous_quote = None
         batch: list[dict] = []
+        copied = 0
         unreadable = 0
         inserter = pg_insert if self.engine.dialect.name == "postgresql" else sqlite_insert
 
         def flush(session) -> None:
-            nonlocal batch
+            nonlocal batch, copied
             if not batch:
                 return
+            copied += len(batch)
             stmt = inserter(DmTick).values(batch)
             if self.engine.dialect.name == "postgresql":
                 stmt = stmt.on_conflict_do_nothing(constraint="uq_dm_ticks_dedup")
@@ -548,6 +565,14 @@ class SqlStore:
             session.execute(stmt)
             session.commit()
             batch = []
+            if progress_job_id is not None:
+                self.save_job(
+                    DmIngestJob,
+                    progress_job_id,
+                    ticks_stored=copied,
+                    target_ticks=len(raw),
+                    status="copying",
+                )
 
         with self.Session() as session:
             before = session.query(DmTick).filter(DmTick.symbol == symbol, DmTick.source == "touch_bot").count()
