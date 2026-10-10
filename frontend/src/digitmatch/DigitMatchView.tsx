@@ -37,6 +37,13 @@ function decisionSentence(decision: { action: string; reason: string; digit: num
   return detail;
 }
 
+function shownDecision(data: Dashboard | null): string {
+  if (data?.decision?.reason === 'stale_tick' && data.freshness?.stale === false) {
+    return 'A new tick is in. The next check can choose a digit.';
+  }
+  return decisionSentence(data?.decision ?? null);
+}
+
 function estimateTrainSeconds(ticks: number): number {
   return 2 * (2.9e-9 * ticks * ticks + 3.2e-5 * ticks + 40);
 }
@@ -527,7 +534,7 @@ export default function DigitMatchView() {
       <div className="alert alert-warning">
         <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 2 }} />
         <div>
-          <div className="text-sm">{decisionSentence(data?.decision ?? null)}</div>
+          <div className="text-sm">{shownDecision(data)}</div>
           <div className="text-xs font-mono text-dim" style={{ marginTop: 4 }}>
             {data?.instrument.resolved_display || data?.instrument.expected_display_name}
             {' · '}{data?.contract.type} · {data?.contract.duration_ticks} ticks
@@ -576,7 +583,7 @@ export default function DigitMatchView() {
             <div className="dash-stat-value">{data?.decision?.total_payout ?? '—'}</div>
           </div>
         </div>
-        <p className="text-xs text-dim" style={{ marginTop: 8 }}>{decisionSentence(data?.decision ?? null)}</p>
+        <p className="text-xs text-dim" style={{ marginTop: 8 }}>{shownDecision(data)}</p>
       </div>
 
       <div className="grid-2">

@@ -223,6 +223,19 @@ class SqlStore:
                 session.expunge(row)
             return row
 
+    def series_tail(self, symbol: str, limit: int) -> list[DmTick]:
+        with self.Session() as session:
+            rows = (
+                session.query(DmTick)
+                .filter(DmTick.symbol == symbol)
+                .order_by(DmTick.broker_epoch.desc(), DmTick.id.desc())
+                .limit(limit)
+                .all()
+            )
+            session.expunge_all()
+        rows.reverse()
+        return rows
+
     def series(self, symbol: str) -> list[DmTick]:
         with self.Session() as session:
             rows = (

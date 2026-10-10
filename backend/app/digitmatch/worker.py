@@ -16,6 +16,7 @@ from app.digitmatch.credentials import resolve_digitmatch_credentials
 from app.digitmatch.shared_session import DigitMatchSession
 from app.digitmatch.errors import DerivCallError
 from app.digitmatch.execution import CycleState, apply_settlement, reconcile_unknown, run_cycle
+from app.digitmatch.features import LOOKBACK
 from app.digitmatch.ingestion import normalize_observation
 from app.digitmatch.instrument import MarketUnavailable, resolve_volatility_100, validate_digitmatch_five_ticks
 from app.digitmatch.prediction import predict_latest
@@ -229,8 +230,8 @@ async def _reconcile(adapter: DigitMatchSession, store: SqlStore) -> None:
     store.update_runtime(uncertain_block=False, uncertain_reason=None)
 
 
-def _series_arrays(store: SqlStore, symbol: str):
-    rows = store.series(symbol)
+def _series_arrays(store: SqlStore, symbol: str, limit: int | None = None):
+    rows = store.series_tail(symbol, limit) if limit else store.series(symbol)
     if not rows:
         return None
     digits = []
@@ -332,31 +333,35 @@ async def run() -> None:
             await adapter.subscribe_ticks(symbol, on_tick)
             await _reconcile(adapter, store)
             broker = LiveBroker(adapter, symbol, auth)
+            live_tail = LOOKBACK + 200
             while adapter.connected:
                 await _history_once(adapter, store, symbol)
                 await _monitor(adapter, store)
                 runtime = store.runtime()
-                arrays = _series_arrays(store, symbol)
+                active = store.active_model()
+                model_path = None if active is None else active.path
+                created_at = None if active is None else active.created_at
+                arrays = await asyncio.to_thread(_series_arrays, store, symbol, live_tail)
                 probabilities = None
                 features_ready = False
                 model_ready = False
                 model_expired = False
-                active = store.active_model()
-                if arrays is not None and active is not None:
+                if arrays is not None and model_path:
                     age_hours = 0
-                    if active.created_at is not None:
-                        created = active.created_at
-                        if created.tzinfo is None:
-                            created = created.replace(tzinfo=timezone.utc)
-                        age_hours = (datetime.now(timezone.utc) - created).total_seconds() / 3600
+                    if created_at is not None:
+                        if created_at.tzinfo is None:
+                            created_at = created_at.replace(tzinfo=timezone.utc)
+                        age_hours = (datetime.now(timezone.utc) - created_at).total_seconds() / 3600
                     model_expired = age_hours > settings.dm_model_max_age_hours
                     try:
-                        probabilities = predict_latest(active.path, arrays[0], arrays[1], arrays[2])
+                        probabilities = await asyncio.to_thread(
+                            predict_latest, model_path, arrays[0], arrays[1], arrays[2]
+                        )
                         features_ready = probabilities is not None
                         model_ready = True
                     except Exception as exc:
                         logger.warning("dm_predict_failed", error=type(exc).__name__)
-                elif arrays is not None and len(arrays[0]) < 1000:
+                elif arrays is not None and len(arrays[0]) < LOOKBACK:
                     features_ready = False
                 latest = store.latest_tick(symbol)
                 received = None
