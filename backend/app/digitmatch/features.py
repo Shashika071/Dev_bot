@@ -72,9 +72,7 @@ def build_examples(
 
     one_hot = np.eye(10, dtype=float)[digits]
     cumulative = np.cumsum(one_hot, axis=0)
-    pair = digits[:-1] * 10 + digits[1:]
-    pair_hot = np.eye(100, dtype=float)[pair]
-    pair_cum = np.cumsum(pair_hot, axis=0)
+    pair_ids = (digits[:-1] * 10 + digits[1:]).astype(np.int16)
 
     last_seen = np.full(10, -1, dtype=int)
     since = np.zeros((n, 10), dtype=float)
@@ -100,8 +98,20 @@ def build_examples(
     indexes_arr = np.empty(span, dtype=np.int64)
     filled = 0
     seen = 0
+    trans = np.zeros(100, dtype=float)
+    prime_end = first - 2
+    if prime_end >= 0:
+        begin = max(0, prime_end - 199)
+        primed = np.bincount(pair_ids[begin : prime_end + 1], minlength=100)
+        trans[: len(primed)] = primed
     for i in range(first, last):
         seen += 1
+        end_pair = i - 1
+        if end_pair >= 0:
+            trans[pair_ids[end_pair]] += 1.0
+            drop = end_pair - 200
+            if drop >= 0:
+                trans[pair_ids[drop]] -= 1.0
         if on_progress is not None and seen % 8000 == 0:
             on_progress(seen, span)
         if not window_is_clean(usable_flags, i - (lookback - 1), i + horizon):
@@ -117,13 +127,7 @@ def build_examples(
         parts.append(float(repetition[i]))
         parts.extend(since[i].tolist())
         # Transitions that have already happened: pairs ending at i.
-        end_pair = i - 1
-        start_pair = end_pair - 200
-        if end_pair < 0:
-            counts = np.zeros(100)
-        else:
-            counts = pair_cum[end_pair] - (pair_cum[start_pair] if start_pair >= 0 else 0)
-        row = counts[digits[i] * 10 : (digits[i] + 1) * 10]
+        row = trans[int(digits[i]) * 10 : (int(digits[i]) + 1) * 10]
         smoothed = (row + 1.0) / (row.sum() + 10.0)
         parts.extend(smoothed.tolist())
         for lag in (1, 5, 10):
@@ -145,14 +149,22 @@ def build_examples(
     if on_progress is not None and span:
         on_progress(span, span)
 
-    x = features[:filled].copy()
-    del features
+    del one_hot, cumulative, since, pair_ids, trans
+    if filled == span:
+        x = features
+        y = targets_arr
+        index = indexes_arr
+    else:
+        x = features[:filled].copy()
+        y = targets_arr[:filled].copy()
+        index = indexes_arr[:filled].copy()
+        del features, targets_arr, indexes_arr
     return {
         "schema": FEATURE_SCHEMA,
         "names": names,
         "X": x,
-        "y": targets_arr[:filled].copy(),
-        "index": indexes_arr[:filled].copy(),
+        "y": y,
+        "index": index,
         "horizon": horizon,
         "target_note": "research_proxy_digit_at_t_plus_horizon",
     }
