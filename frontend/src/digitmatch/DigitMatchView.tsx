@@ -693,8 +693,16 @@ export default function DigitMatchView() {
           <div className="section-header">
             <h3 className="section-title"><Brain size={16} />Training</h3>
           </div>
-          <p className="font-mono text-sm">{data?.train_job ? `${data.train_job.status} · ${data.train_job.progress}` : 'Idle'}</p>
-          <p className="text-sm">{trainTimeLabel(data?.ticks_stored ?? 0, trainingNow ? data?.train_job?.progress : undefined)}</p>
+          <p className="font-mono text-sm">
+            {data?.train_job
+              ? data.train_job.status === 'error'
+                ? `error · ${data.train_job.error || 'Training stopped.'}`
+                : `${data.train_job.status} · ${data.train_job.progress}`
+              : 'Idle'}
+          </p>
+          {data?.train_job?.status !== 'error' && (
+            <p className="text-sm">{trainTimeLabel(data?.ticks_stored ?? 0, trainingNow ? data?.train_job?.progress : undefined)}</p>
+          )}
           <p className="text-xs text-dim">
             {data?.train_job?.status === 'error'
               ? data.train_job.error || 'Training stopped.'

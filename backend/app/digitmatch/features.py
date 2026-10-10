@@ -93,7 +93,7 @@ def build_examples(
     last = n - horizon
     span = max(0, last - first)
     width = len(names)
-    features = np.empty((span, width), dtype=np.float64)
+    features = np.empty((span, width), dtype=np.float32)
     targets_arr = np.empty(span, dtype=np.int64)
     indexes_arr = np.empty(span, dtype=np.int64)
     filled = 0

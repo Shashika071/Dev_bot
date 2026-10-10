@@ -111,7 +111,7 @@ services:
       postgres:
         condition: service_healthy
     command: python -m app.digitmatch.train_worker
-    mem_limit: 1536m
+    mem_limit: 2048m
     networks:
       - deriv_net
 

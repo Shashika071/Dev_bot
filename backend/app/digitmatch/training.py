@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import gc
 import json
 import platform
 from importlib.metadata import version as pkg_version
@@ -172,6 +173,7 @@ def run_training(
 ) -> dict:
     assert_lstm_disabled()
     fractions = fractions or SplitFractions()
+    examples["X"] = np.ascontiguousarray(examples["X"], dtype=np.float32)
     split = chronological_split(examples["index"], fractions=fractions, horizon=int(examples["horizon"]))
     train = _slice(examples, split["train"])
     calibration = _slice(examples, split["calibration"])
@@ -193,6 +195,8 @@ def run_training(
     calibration_x = transform(calibration)
     selection_x = transform(selection)
     test_x = transform(test)
+    train.pop("X", None)
+    gc.collect()
 
     models: dict[str, FittedModel] = {
         "uniform": uniform_model(),
@@ -258,6 +262,9 @@ def run_training(
     )
 
     pretest = np.concatenate([split["train"], split["calibration"], split["selection"]])
+    for part in (calibration, selection, train_x, calibration_x, selection_x):
+        part.pop("X", None)
+    gc.collect()
     folds = walk_forward(digits, examples, pretest, seed)
 
     # Final test is evaluated once, after the choices above are fixed.
