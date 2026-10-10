@@ -393,7 +393,6 @@ class DerivWSClient:
         """Fetch available contract types for a symbol."""
         return await self.send({
             "contracts_for": symbol,
-            "currency": "USD",
         })
 
     async def get_ticks_history(

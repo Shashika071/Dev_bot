@@ -183,9 +183,8 @@ class DerivV3Adapter:
         return rows
 
     async def contracts_for(self, symbol: str, currency: str) -> dict:
-        data = await self.request(
-            {"contracts_for": symbol, "currency": currency}
-        )
+        del currency
+        data = await self.request({"contracts_for": symbol})
         body = data.get("contracts_for")
         if not isinstance(body, dict):
             raise DerivCallError("bad_contracts", "contracts_for missing")

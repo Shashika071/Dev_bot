@@ -132,7 +132,9 @@ class DigitMatchSession(DerivTradeClient):
         return rows
 
     async def contracts_for(self, symbol: str, currency: str) -> dict:
-        data = await self.send({"contracts_for": symbol, "currency": currency})
+        # The options API rejects currency on this call. Stake currency is sent on proposal.
+        del currency
+        data = await self.send({"contracts_for": symbol})
         body = data.get("contracts_for")
         if not isinstance(body, dict):
             raise RuntimeError("contracts_for missing")
