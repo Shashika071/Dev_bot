@@ -10,9 +10,13 @@ def resolve_ui_state(snapshot: dict) -> str:
         return "emergency_stop"
     if snapshot.get("auth_status") == "real_rejected":
         return "real_account_rejected"
-    if snapshot.get("auth_status") in {None, "unconfigured"} or not snapshot.get("credentials_configured"):
+    if not snapshot.get("credentials_configured"):
         return "credentials_missing"
-    if snapshot.get("connection_status") != "online" or not snapshot.get("demo_verified"):
+    if (
+        snapshot.get("auth_status") in {None, "unconfigured"}
+        or snapshot.get("connection_status") != "online"
+        or not snapshot.get("demo_verified")
+    ):
         return "disconnected"
     if snapshot.get("instrument_error") or snapshot.get("contract_error"):
         return "contract_unavailable"

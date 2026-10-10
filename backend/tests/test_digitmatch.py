@@ -389,6 +389,14 @@ def test_ui_state_prefers_uncertain_purchase():
     assert resolve_ui_state(
         {
             "credentials_configured": True,
+            "auth_status": "unconfigured",
+            "connection_status": "reconnecting",
+            "demo_verified": False,
+        }
+    ) == "disconnected"
+    assert resolve_ui_state(
+        {
+            "credentials_configured": True,
             "connection_status": "online",
             "demo_verified": True,
             "stale": True,

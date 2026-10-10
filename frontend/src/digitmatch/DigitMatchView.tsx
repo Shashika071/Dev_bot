@@ -100,8 +100,8 @@ type Dashboard = {
 };
 
 const STATE_COPY: Record<string, string> = {
-  credentials_missing: 'Classic API token and app id are not configured. Nothing here is simulated.',
-  disconnected: 'The classic Deriv socket is not connected, or the demo flag has not been confirmed.',
+  credentials_missing: 'No Deriv token is saved. Add it in Configuration. Nothing here is simulated.',
+  disconnected: 'The saved Deriv login is not connected yet. The message at the bottom is the reason.',
   real_account_rejected: 'The authorized account is not a verified demo account. Purchases are blocked.',
   contract_unavailable: 'Volatility 100 Index or a 5-tick Digit Matches contract is unavailable. No substitute is used.',
   warming_up: 'Collecting ticks. Features need 1,000 clean ticks before a live row can be built.',
