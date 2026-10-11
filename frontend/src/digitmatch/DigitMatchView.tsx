@@ -37,6 +37,7 @@ const SKIP_REASON: Record<string, string> = {
   flat_prediction: 'Every digit is equally likely, so no digit is kept.',
   mode_changed: 'The mode changed before the order was sent.',
   intent_not_durable: 'The order could not be saved before it was sent, so it was skipped.',
+  recovery_stake_capped: 'The stake needed to cover the losses is above the daily loss room, so this trade was skipped.',
 };
 
 function decisionSentence(decision: { action: string; reason: string; digit: number | null } | null): string {
@@ -258,6 +259,24 @@ function money(value: number | null | undefined, currency: string | null) {
   return `${value.toFixed(2)} ${currency || ''}`.trim();
 }
 
+function plannedStake(
+  risk: Dashboard['risk'] | undefined,
+  quote: { ask_price: number | null; total_payout: number | null } | null | undefined,
+): { base: number; loss: number; next: number | null; fromQuote: boolean } {
+  const base = risk?.stake ?? 0.35;
+  const loss = risk?.recovery_loss ?? 0;
+  const target = risk?.win_profit_target ?? 1;
+  const quoted = quote?.ask_price != null && quote.total_payout != null && quote.total_payout > quote.ask_price;
+  const ask = quoted ? quote.ask_price! : 0.35;
+  const payout = quoted ? quote.total_payout! : 2.92;
+  const profitPerStake = (payout - ask) / ask;
+  const room = Math.min(20, (risk?.daily_loss_limit ?? 20) + (risk?.pnl_today ?? 0));
+  if (profitPerStake <= 0 || base <= 0 || room < base) return { base, loss, next: null, fromQuote: quoted };
+  const raw = (Math.max(0, loss) + Math.max(0, target)) / profitPerStake;
+  const next = Math.max(base, Math.ceil(raw * 100 - 1e-9) / 100);
+  return { base, loss, next: next > room + 1e-9 ? null : next, fromQuote: quoted };
+}
+
 async function readError(response: Response) {
   const text = await response.text();
   try {
@@ -341,7 +360,7 @@ export default function DigitMatchView() {
   const [data, setData] = useState<Dashboard | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [models, setModels] = useState<Array<{ id: number; name: string; is_active: boolean; checksum: string }>>([]);
-  const [stake, setStake] = useState('1');
+  const [stake, setStake] = useState('0.35');
   const [margin, setMargin] = useState('0.02');
   const [timezone, setTimezone] = useState('Asia/Colombo');
   const [lossLimit, setLossLimit] = useState('20');
@@ -350,6 +369,7 @@ export default function DigitMatchView() {
   const [cooldown, setCooldown] = useState('30');
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
   const formReady = useRef(false);
+  const stakeEdited = useRef(false);
 
   const load = useCallback(async () => {
     try {
@@ -370,6 +390,8 @@ export default function DigitMatchView() {
         setMaxTrades(String(body.risk.max_trades_per_day));
         setCooldown(String(body.risk.cooldown_seconds));
         formReady.current = true;
+      } else if (!stakeEdited.current) {
+        setStake(String(body.risk.stake));
       }
       const modelResponse = await fetch(`${API}/api/digitmatch/models`);
       if (modelResponse.ok) {
@@ -445,6 +467,14 @@ export default function DigitMatchView() {
   const modeLabel = data?.mode === 'demo_explore' ? 'ON' : data?.mode === 'demo_filtered' ? 'ON IF QUOTE PASSES' : 'OFF';
   const online = data?.connection_status === 'online' && !!data?.demo_verified;
   const symbol = data?.instrument.resolved_symbol || 'R_100';
+  const plan = plannedStake(data?.risk, data?.decision);
+  const planText = plan.next == null
+    ? 'Stake plan is on, but the next stake would pass the daily loss room, so that trade is skipped.'
+    : plan.loss <= 0
+      ? 'Stake plan is on. No losses to cover yet, so the next trade uses the base stake.'
+      : plan.next > plan.base + 0.001
+        ? 'Stake plan is on. The next trade rises so a win can cover the losses and leave about $1.'
+        : 'Stake plan is on. The base stake still covers the losses and about $1, so the next trade stays there.';
   const timezoneChoices = ['Asia/Colombo', 'UTC', 'Europe/London', 'America/New_York', 'Asia/Dubai', 'Asia/Singapore'];
   if (timezone && !timezoneChoices.includes(timezone)) timezoneChoices.unshift(timezone);
   const marginChoices = ['0', '0.01', '0.02', '0.05'];
@@ -464,7 +494,7 @@ export default function DigitMatchView() {
         <div className="flex gap-3 items-center" style={{ flexWrap: 'wrap' }}>
           <span className="badge badge-amber"><AlertTriangle size={11} />DEMO ONLY</span>
           {press('Off', () => post('/api/digitmatch/mode', { mode: 'observe' }, 'Off. No demo buy will be placed.'), { on: (data?.mode || 'observe') === 'observe' })}
-          {press('On', () => post('/api/digitmatch/mode', { mode: 'demo_explore' }, 'On. Demo trades can be placed at the fixed stake.'), { on: data?.mode === 'demo_explore' })}
+          {press('On', () => post('/api/digitmatch/mode', { mode: 'demo_explore' }, 'On. Demo trades use the base stake, then rise only to cover losses.'), { on: data?.mode === 'demo_explore' })}
           {press('On if quote passes', () => post('/api/digitmatch/mode', { mode: 'demo_filtered' }, 'On only when the live quote passes the filter.'), { on: data?.mode === 'demo_filtered' })}
           {press(data?.paused ? 'Resume' : 'Pause', () => post(data?.paused ? '/api/digitmatch/resume' : '/api/digitmatch/pause', {}, data?.paused ? 'Pause cleared.' : 'Paused. New orders are blocked.'), { on: !!data?.paused })}
           {press('Emergency stop', () => post('/api/digitmatch/emergency-stop', {}, 'Emergency stop is on. An open contract is not cancelled.'), { on: !!data?.emergency_stop, tone: 'danger' })}
@@ -819,8 +849,27 @@ export default function DigitMatchView() {
       <div className="glass">
         <div className="section-header">
           <h3 className="section-title">Risk limits</h3>
+          <span className="badge badge-green">Stake plan on</span>
           <span className="badge badge-dim">{data?.risk.reset_timezone}</span>
         </div>
+        <div className="dash-trade-stats" style={{ marginBottom: 12 }}>
+          <div className="dash-stat">
+            <div className="dash-stat-label">Base stake</div>
+            <div className="dash-stat-value">{money(plan.base, data?.currency || null)}</div>
+            <div className="dash-stat-sub">Saved on the bot</div>
+          </div>
+          <div className="dash-stat">
+            <div className="dash-stat-label">Losses to cover</div>
+            <div className="dash-stat-value">{money(plan.loss, data?.currency || null)}</div>
+            <div className="dash-stat-sub">Clears after a win</div>
+          </div>
+          <div className="dash-stat">
+            <div className="dash-stat-label">Next stake</div>
+            <div className="dash-stat-value">{plan.next == null ? 'Skip' : money(plan.next, data?.currency || null)}</div>
+            <div className="dash-stat-sub">{plan.fromQuote ? 'From the latest quote' : 'Using 834.29% until a quote arrives'}</div>
+          </div>
+        </div>
+        <p className="text-sm text-secondary" style={{ marginBottom: 12 }}>{planText}</p>
         <form
           onSubmit={(event) => {
             event.preventDefault();
@@ -838,7 +887,7 @@ export default function DigitMatchView() {
           <div className="grid-2">
             <div className="form-group">
               <label className="form-label">Base stake</label>
-              <input className="form-input" value={stake} onChange={(event) => setStake(event.target.value)} />
+              <input className="form-input" value={stake} onChange={(event) => { stakeEdited.current = true; setStake(event.target.value); }} />
               <p className="text-xs text-dim" style={{ marginTop: 6 }}>
                 Starts here, normally 0.35. After losses, the next demo stake rises only enough for a win to cover those losses and leave about $1. A win sets it back to this base. It will not rise past the daily loss room.
               </p>
