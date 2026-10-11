@@ -758,6 +758,17 @@ export default function DigitMatchView() {
       <div className="glass">
         <div className="section-header">
           <h3 className="section-title"><Database size={16} />Trade history</h3>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            style={{ color: 'var(--red)', borderColor: 'var(--red)' }}
+            onClick={() => {
+              if (!window.confirm('Delete all saved trades? Tick history stays. An open contract at the broker is not cancelled.')) return;
+              post('/api/digitmatch/trades/delete', {}, 'Trade history deleted.');
+            }}
+          >
+            Delete trades
+          </button>
         </div>
         {data && data.trades.length > 0 ? (
           <>
@@ -798,6 +809,17 @@ export default function DigitMatchView() {
         <div className="glass">
           <div className="section-header">
             <h3 className="section-title"><Database size={16} />History</h3>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ color: 'var(--red)', borderColor: 'var(--red)' }}
+              onClick={() => {
+                if (!window.confirm('Delete all saved Digit Matches ticks? Trades and models stay.')) return;
+                post('/api/digitmatch/history/delete', {}, 'Saved tick history deleted.');
+              }}
+            >
+              Delete all history
+            </button>
           </div>
           <p className="font-mono text-sm">{data?.history_job ? `${data.history_job.status} · ${data.history_job.ticks_stored}/${data.history_job.target_ticks}` : 'No download yet'}</p>
           <p className="text-xs text-dim">{data?.history_job?.note || data?.history_job?.error || 'The touch bot ticks can be copied. A broker download is separate.'}</p>
@@ -805,10 +827,6 @@ export default function DigitMatchView() {
             {press('Use saved ticks', () => post('/api/digitmatch/history/use-saved', {}, 'Copy started. The History line shows the count.'))}
             {press('Download history', () => post('/api/digitmatch/history/start', { target_ticks: 100000 }, 'History download started.'))}
             {press('Cancel download', () => post('/api/digitmatch/history/cancel', {}, 'Download cancel requested.'))}
-            {press('Delete all history', () => {
-              if (!window.confirm('Delete all saved Digit Matches ticks? Trades and models stay.')) return;
-              post('/api/digitmatch/history/delete', {}, 'Saved tick history deleted.');
-            })}
             <a className="btn btn-ghost" href={`${API}/api/digitmatch/history/export`}>Export CSV</a>
           </div>
         </div>

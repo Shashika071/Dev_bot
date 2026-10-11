@@ -751,6 +751,13 @@ class SqlStore:
                 return None
             return int(row.digit)
 
+    def delete_trades(self) -> int:
+        with self.Session() as session:
+            removed = session.query(DmContract).delete(synchronize_session=False)
+            session.commit()
+        self.update_runtime(recovery_loss=0)
+        return int(removed)
+
     def delete_history(self, symbol: str) -> int:
         with self.Session() as session:
             session.query(DmIngestJob).filter(

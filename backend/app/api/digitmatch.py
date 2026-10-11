@@ -511,6 +511,14 @@ def cancel_history(_: None = Depends(_control_access)):
         return {"ok": True, "cancelled": True, "job_id": row.id}
 
 
+@router.post("/trades/delete")
+def delete_trades(_: None = Depends(_control_access)):
+    store = _store()
+    removed = store.delete_trades()
+    store.audit("trades_delete", f"removed {removed} trades")
+    return {"ok": True, "removed": removed}
+
+
 @router.post("/history/delete")
 def delete_history(_: None = Depends(_control_access)):
     store = _store()

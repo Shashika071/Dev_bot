@@ -918,6 +918,10 @@ def test_history_delete_removes_ticks_and_trade_profit_adds_up(tmp_path: Path):
     assert rows[0]["broker_contract_id"] == "b"
     assert rows[0]["running_profit"] == pytest.approx(2.22)
     assert rows[1]["running_profit"] == pytest.approx(-0.35)
+    store.apply_recovery(-1.75)
+    assert store.delete_trades() == 2
+    assert store.list_trades() == []
+    assert store.runtime().recovery_loss == pytest.approx(0)
 
 
 @pytest.mark.asyncio
