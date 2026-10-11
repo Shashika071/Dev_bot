@@ -73,7 +73,7 @@ def leading_digit(probabilities: list[float]) -> int | None:
 
 
 def most_shown_digit(digits: list[int] | None, avoid: int | None = None) -> int | None:
-    """Most common digit in the last 100. The previous pick is skipped when another digit exists."""
+    """Most common digit in the last 100. A digit to avoid is not returned."""
     if not digits:
         return None
     window: list[int] = []
@@ -96,17 +96,17 @@ def most_shown_digit(digits: list[int] | None, avoid: int | None = None) -> int 
         if avoid is not None and digit == int(avoid):
             continue
         return digit
-    top = order[0]
-    return top if counts[top] else None
+    return None
 
 
 def chosen_digit(state: CycleState) -> int | None:
     if not state.probabilities:
         return None
     leader = leading_digit(list(state.probabilities))
-    if leader is not None:
+    avoid = state.last_chosen_digit
+    if leader is not None and (avoid is None or leader != avoid):
         return leader
-    return most_shown_digit(state.recent_digits, state.last_chosen_digit)
+    return most_shown_digit(state.recent_digits, avoid)
 
 
 def _scored(state: CycleState) -> dict:
@@ -160,11 +160,12 @@ async def run_cycle(broker, state: CycleState, now: datetime) -> dict:
     if not gate.allowed:
         return _record(state, "skip", gate.reason, **scored)
 
-    forced = None
-    if state.probabilities is not None and leading_digit(list(state.probabilities)) is None:
-        forced = most_shown_digit(state.recent_digits, state.last_chosen_digit)
-        if forced is None:
-            return _record(state, "skip", "flat_prediction", probabilities=state.probabilities)
+    picked = chosen_digit(state) if state.probabilities is not None else None
+    leader = leading_digit(list(state.probabilities)) if state.probabilities is not None else None
+    if state.probabilities is not None and picked is None:
+        reason = "flat_prediction" if leader is None else "won_digit_held"
+        return _record(state, "skip", reason, probabilities=state.probabilities)
+    forced = picked if picked is not None and picked != leader else None
 
     if state.feature_epoch is not None and state.latest_tick_epoch != state.feature_epoch:
         return _record(state, "skip", "prediction_overtaken", **scored)
@@ -271,11 +272,13 @@ async def run_cycle(broker, state: CycleState, now: datetime) -> dict:
     except (TypeError, ValueError, KeyError):
         return _record(state, "skip", "proposal_changed", digit=best["digit"])
     if (
-        confirmed.get("id") != best["proposal_id"]
-        or abs(confirmed_ask - best["ask_price"]) > 1e-9
+        abs(confirmed_ask - best["ask_price"]) > 1e-9
         or abs(confirmed_payout - best["total_payout"]) > 1e-9
     ):
         return _record(state, "skip", "proposal_changed", digit=best["digit"])
+    best["proposal_id"] = confirmed.get("id")
+    best["ask_price"] = confirmed_ask
+    best["total_payout"] = confirmed_payout
 
     _refresh_live(state)
     if state.feature_epoch is not None and state.latest_tick_epoch != state.feature_epoch:

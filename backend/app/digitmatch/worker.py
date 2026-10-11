@@ -478,7 +478,7 @@ async def run() -> None:
                     fresh_risk=lambda: store.risk_snapshot(datetime.now(timezone.utc)),
                     commit_intent=store.commit_intent,
                     recent_digits=_recent_digits(arrays),
-                    last_chosen_digit=store.latest_decision_digit(),
+                    last_chosen_digit=store.latest_winning_digit(),
                 )
                 try:
                     result = await run_cycle(broker, state, datetime.now(timezone.utc))

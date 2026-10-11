@@ -35,6 +35,7 @@ const SKIP_REASON: Record<string, string> = {
   proposal_unreadable: 'The quote price or payout could not be checked.',
   filtered_evidence_missing: 'Filtered mode is off until a separate evidence check is recorded. Estimated value is not that evidence.',
   flat_prediction: 'Every digit is equally likely, and there are not yet 100 last digits to choose from.',
+  won_digit_held: 'The last trade won, so that digit is skipped until another digit can be chosen from the last 100 ticks.',
   recent_digit: 'Every digit is equally likely, so the digit is the one that showed up most in the last 100 ticks.',
   mode_changed: 'The mode changed before the order was sent.',
   intent_not_durable: 'The order could not be saved before it was sent, so it was skipped.',
@@ -656,7 +657,7 @@ export default function DigitMatchView() {
           <div className="dash-stat">
             <div className="dash-stat-label">Selected digit</div>
             <div className="dash-stat-value">{data?.decision?.digit ?? '—'}</div>
-            <div className="dash-stat-sub">{data?.decision?.digit == null ? 'Needs one digit ahead, or 100 last digits' : 'From this check. A tie uses the most common of the last 100, skipping the previous pick.'}</div>
+            <div className="dash-stat-sub">{data?.decision?.digit == null ? 'Needs one digit ahead, or 100 last digits' : 'After a win, the next trade skips that digit.'}</div>
           </div>
           <div className="dash-stat">
             <div className="dash-stat-label">Break-even</div>

@@ -863,7 +863,35 @@ async def test_a_flat_model_does_not_keep_the_same_digit():
     assert broker.buys == []
 
 
-def test_equal_probabilities_use_the_most_common_recent_digit_then_the_next():
+@pytest.mark.asyncio
+async def test_a_win_does_not_buy_the_same_digit_again():
+    broker = FakeBroker()
+    state = _state(
+        mode="demo_explore",
+        probabilities=[0.01] * 9 + [0.91],
+        recent_digits=[9] * 60 + [2] * 40,
+        last_chosen_digit=9,
+    )
+    result = await run_cycle(broker, state, datetime.now(timezone.utc))
+    assert result["action"] == "buy"
+    assert result["digit"] == 2
+    assert broker.buys[0]["proposal_id"].startswith("prop-2")
+
+
+def test_only_a_winning_trade_blocks_the_next_digit(tmp_path: Path):
+    store = _sqlite_store(tmp_path, "winner.db")
+    with store.Session() as session:
+        session.add(DmContract(broker_contract_id="loss", digit=9, status="lost", profit=-0.35, mode="demo_explore"))
+        session.commit()
+    assert store.latest_winning_digit() is None
+    with store.Session() as session:
+        session.add(DmContract(broker_contract_id="win", digit=9, status="won", profit=2.57, mode="demo_explore"))
+        session.commit()
+    assert store.latest_winning_digit() == 9
+    with store.Session() as session:
+        session.add(DmContract(broker_contract_id="after", digit=2, status="lost", profit=-0.35, mode="demo_explore"))
+        session.commit()
+    assert store.latest_winning_digit() is None
     window = [4] * 60 + [8] * 40
     assert most_shown_digit(window, None) == 4
     assert most_shown_digit(window, 4) == 8

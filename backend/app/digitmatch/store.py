@@ -739,6 +739,19 @@ class SqlStore:
         stamped.reverse()
         return stamped[:limit]
 
+    def latest_winning_digit(self) -> int | None:
+        """Digit of the latest settled trade, only when that trade won."""
+        with self.Session() as session:
+            row = (
+                session.query(DmContract)
+                .filter(DmContract.profit.is_not(None))
+                .order_by(DmContract.id.desc())
+                .first()
+            )
+            if row is None or row.profit is None or float(row.profit) <= 0:
+                return None
+            return int(row.digit)
+
     def latest_decision_digit(self) -> int | None:
         with self.Session() as session:
             row = (
