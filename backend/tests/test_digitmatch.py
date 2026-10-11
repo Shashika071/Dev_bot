@@ -501,12 +501,19 @@ def test_migration_revision_is_importable():
 
 
 def test_dashboard_numbers_that_are_not_finite_do_not_break_json():
-    from app.api.digitmatch import _json_safe
+    import json
+
+    from app.api.digitmatch import _encode_dashboard, _json_safe
     from app.digitmatch.store import _plain_json
 
     cleaned = _json_safe({"age": float("nan"), "ev": float("inf"), "ok": 0.1})
     assert cleaned == {"age": None, "ev": None, "ok": 0.1}
     assert _plain_json([float("nan"), 0.2]) == [None, 0.2]
+    response = _encode_dashboard({"balance": float("nan"), "probs": [0.1, float("inf")]})
+    assert response.status_code == 200
+    body = json.loads(response.body)
+    assert body["balance"] is None
+    assert body["probs"][1] is None
 
 
 def test_transition_scores_the_latest_tick_without_waiting_for_five_more():

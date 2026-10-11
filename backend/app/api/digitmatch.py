@@ -42,16 +42,38 @@ _copy_running = False
 
 
 def _json_safe(value):
-    """Drop values Starlette refuses to encode, so one bad number cannot 500 the page."""
+    """Plain JSON values only. Starlette turns NaN into a 500 after the handler returns."""
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, int):
+        return value
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, dict):
         return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, (list, tuple, set)):
         return [_json_safe(item) for item in value]
     if isinstance(value, (bytes, bytearray)):
         return value.decode("utf-8", errors="replace")
-    return value
+    tolist = getattr(value, "tolist", None)
+    if callable(tolist):
+        return _json_safe(tolist())
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        try:
+            return isoformat()
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+def _encode_dashboard(payload: dict) -> Response:
+    safe = _json_safe(payload)
+    try:
+        body = json.dumps(safe, allow_nan=False)
+    except (TypeError, ValueError):
+        body = json.dumps(_blank_dashboard("Dashboard data could not be encoded."))
+    return Response(content=body, media_type="application/json")
 
 
 def _load_json(text: str | None, fallback):
@@ -163,10 +185,10 @@ def health():
 @router.get("/dashboard")
 def dashboard(_: None = Depends(_read_access)):
     try:
-        return _json_safe(_dashboard())
+        return _encode_dashboard(_dashboard())
     except Exception as exc:
         logger.exception("dm_dashboard_failed")
-        return _blank_dashboard(f"{type(exc).__name__}: {exc}")
+        return _encode_dashboard(_blank_dashboard(f"{type(exc).__name__}: {exc}"))
 
 
 def _blank_dashboard(message: str) -> dict:
