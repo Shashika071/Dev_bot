@@ -269,6 +269,24 @@ def test_daily_loss_persists_across_a_new_store(tmp_path: Path):
     again = SqlStore(engine)
     snapshot = again.risk_snapshot(datetime.now(timezone.utc))
     assert snapshot.pnl_today == pytest.approx(-19)
+    aware = datetime.now(timezone.utc)
+    with again.Session() as session:
+        session.add(
+            DmContract(
+                broker_contract_id="c2",
+                digit=4,
+                status="lost",
+                buy_price=1,
+                total_payout=8,
+                profit=-1,
+                purchase_time=aware,
+                sell_time=aware,
+                mode="demo_explore",
+            )
+        )
+        session.commit()
+    mixed = again.risk_snapshot(aware)
+    assert mixed.pnl_today == pytest.approx(-20)
     decision = assess(snapshot, datetime.now(timezone.utc), next_loss=2)
     assert decision.allowed is False
     assert decision.reason == "daily_loss_limit"

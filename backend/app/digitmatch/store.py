@@ -292,13 +292,14 @@ class SqlStore:
         for contract in copied:
             if contract["status"] == "open":
                 open_count += 1
-            sold = contract["sell_time"] or contract["purchase_time"]
+            sold = _naive(contract["sell_time"] or contract["purchase_time"])
             if contract["status"] != "open" and sold is not None and start_n <= sold < end_n:
                 trades_today += 1
                 if contract["profit"] is not None:
                     pnl_today += float(contract["profit"])
-            if contract["sell_time"] is not None and (last_settled is None or contract["sell_time"] > last_settled):
-                last_settled = contract["sell_time"]
+            settled = _naive(contract["sell_time"])
+            if settled is not None and (last_settled is None or settled > last_settled):
+                last_settled = settled
         if last_settled is not None and last_settled.tzinfo is None:
             last_settled = last_settled.replace(tzinfo=timezone.utc)
         return RiskSnapshot(
