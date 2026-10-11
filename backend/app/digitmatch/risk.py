@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -24,6 +25,8 @@ class RiskSnapshot:
     paused: bool
     uncertain: bool
     broker_min_stake: float | None = None
+    recovery_loss: float = 0.0
+    win_profit_target: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -41,6 +44,12 @@ def trading_day_bounds(now: datetime, timezone_name: str) -> tuple[datetime, dat
 
 
 def assess(snapshot: RiskSnapshot, now: datetime, next_loss: float) -> RiskDecision:
+    if not math.isfinite(next_loss) or next_loss < 0:
+        return RiskDecision(False, "invalid_loss")
+    if not math.isfinite(snapshot.stake) or snapshot.stake <= 0:
+        return RiskDecision(False, "invalid_stake")
+    if not math.isfinite(snapshot.daily_loss_limit) or snapshot.daily_loss_limit < 0:
+        return RiskDecision(False, "invalid_loss_limit")
     if snapshot.emergency_stop:
         return RiskDecision(False, "emergency_stop")
     if snapshot.paused:
@@ -63,6 +72,4 @@ def assess(snapshot: RiskSnapshot, now: datetime, next_loss: float) -> RiskDecis
         elapsed = (now - snapshot.last_settled_at).total_seconds()
         if elapsed < snapshot.cooldown_seconds:
             return RiskDecision(False, "cooldown")
-    if next_loss < 0:
-        return RiskDecision(False, "invalid_loss")
     return RiskDecision(True, "within_limits")

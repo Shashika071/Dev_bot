@@ -158,6 +158,38 @@ docker compose exec -T postgres psql -U deriv -d deriv_bot < deriv_bot.sql
 
 Stop the workers before restoring so a live purchase cannot overlap the restore.
 
+## Order recovery
+
+A demo purchase is written to `dm_intents` before the buy message is sent.
+
+| Stored status | Meaning | After a restart |
+| --- | --- | --- |
+| `reserved` | Saved, buy not sent | Marked `not_sent`. Exposure is released. A later cycle may place a new order. |
+| `submitting` | The buy may have reached the broker | Marked `uncertain`. New orders stay blocked. |
+| `uncertain` | The response was lost or the match is ambiguous | Stays blocked. Amount alone is not enough to match a statement row. |
+| `accepted` | Broker contract id was stored | The open contract is recreated if the contract row was missing. |
+| `rejected` / `not_sent` | The broker refused it, or it was never sent | No exposure. |
+
+Restart recovery runs only when no other worker still holds an unexpired execution lock. A pending or uncertain intent keeps its exposure after the lock expires, so a second worker cannot buy over it. A local request id is not treated as a broker idempotency key.
+
+`GET /api/digitmatch/ready` reports the database, worker connection, feed age, model checksum, and unresolved orders. `GET /api/digitmatch/health` only says the process is up.
+
+## Filtered execution evidence
+
+OBSERVE is the default. DEMO EXPLORE is an explicitly labeled demo experiment and does not require an edge. DEMO FILTERED does not buy unless the active model has `execution_eligible` stored as true.
+
+Training never sets that flag. Promotion only selects the model used for research and for DEMO EXPLORE. Estimated value (`calibrated probability × total payout − ask price`) is not a demonstrated edge. Break-even is `ask price / total payout`.
+
+This release does not mark any model eligible. A model would need, outside this automatic path, a checksum-verified artifact, the `dm-features-v1` schema, chronological purged splits, a test result that beats the uniform, frequency, rolling-frequency, and transition baselines, and a payout-adjusted evaluation that uses real quotes rather than an assumed payout. The block-bootstrap interval on log loss uses blocks of 20 overlapping labels so the interval is not an iid claim, and it is not a profit interval.
+
+Historical t+5 labels are a research proxy. Broker-settled five-tick contracts are stored separately. Assumed-payout simulations are not shown as trading returns.
+
+Software that passes these checks is still not evidence of profitability. The current trained model is a research candidate, not a claim of an edge.
+
+## Model artifacts
+
+Each training run is stored under its dataset directory. The directory name is a hash of the feature schema, the normalized digit series, the horizon, and the seed. A different series does not overwrite that file. The file is written to a temporary name and then replaced. Loading checks the checksum, the feature schema, and the dataset id. Old model files are left in place.
+
 ## Logs
 
 Workers use structured logs. Authorize payloads, tokens, and password fields are redacted. If you still see a secret, treat it as a bug and rotate the token.

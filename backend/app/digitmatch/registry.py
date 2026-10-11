@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import joblib
@@ -35,9 +36,21 @@ def save_bundle(bundle: dict, directory: Path | None = None) -> dict:
         "seed": bundle["seed"],
         "dataset_version": bundle["dataset_version"],
     }
-    path = directory / f"{bundle['dataset_version']}-{bundle['selected_model']}.joblib"
-    joblib.dump(payload, path)
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    run_dir = directory / str(bundle["dataset_version"])
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / f"{bundle['selected_model']}.joblib"
+    temporary = path.with_suffix(".joblib.tmp")
+    joblib.dump(payload, temporary)
+    digest = hashlib.sha256(temporary.read_bytes()).hexdigest()
+    if path.exists():
+        existing = hashlib.sha256(path.read_bytes()).hexdigest()
+        temporary.unlink(missing_ok=True)
+        if existing != digest:
+            raise FileExistsError(
+                f"Refusing to overwrite {path.name} for dataset {bundle['dataset_version']}"
+            )
+    else:
+        os.replace(temporary, path)
     meta = {
         "path": str(path),
         "checksum": digest,
@@ -63,9 +76,28 @@ def save_bundle(bundle: dict, directory: Path | None = None) -> dict:
         "assumed_payout_simulation": bundle["assumed_payout_simulation"],
         "promoted": False,
     }
-    path.with_suffix(".json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    meta_path = path.with_suffix(".json")
+    temporary_meta = meta_path.with_suffix(".json.tmp")
+    temporary_meta.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    os.replace(temporary_meta, meta_path)
     return meta
 
 
-def load_bundle(path: str) -> dict:
-    return joblib.load(path)
+def load_bundle(path: str, *, expected_schema: str = "dm-features-v1") -> dict:
+    file = Path(path)
+    raw = file.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    meta_path = file.with_suffix(".json")
+    if not meta_path.exists():
+        raise ValueError("model metadata missing")
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    if meta.get("checksum") != digest:
+        raise ValueError("model checksum mismatch")
+    if expected_schema and meta.get("schema") != expected_schema:
+        raise ValueError("model schema mismatch")
+    payload = joblib.load(file)
+    if payload.get("schema") != meta.get("schema"):
+        raise ValueError("model schema mismatch")
+    if payload.get("dataset_version") != meta.get("dataset_version"):
+        raise ValueError("model dataset mismatch")
+    return payload

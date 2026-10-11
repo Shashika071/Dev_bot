@@ -302,10 +302,9 @@ def run_training(
             test["y"], test_probs, ask=assumed_ask, total_payout=assumed_payout, margin=margin
         )
 
-    first = int(examples["index"][0]) if len(examples["index"]) else 0
-    last = int(examples["index"][-1]) if len(examples["index"]) else 0
+    content = hashlib.sha256(np.ascontiguousarray(digits).tobytes()).hexdigest()
     dataset_version = hashlib.sha256(
-        f"{FEATURE_SCHEMA}:{len(digits)}:{first}:{last}:{seed}".encode()
+        f"{FEATURE_SCHEMA}:{content}:{seed}:{int(examples['horizon'])}".encode()
     ).hexdigest()[:16]
 
     return {

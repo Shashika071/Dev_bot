@@ -17,7 +17,8 @@ import structlog
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from zoneinfo import ZoneInfo
 
 from app.config import settings
 from app.digitmatch import (
@@ -97,6 +98,19 @@ class RiskBody(BaseModel):
     daily_profit_stop: float = Field(ge=0, le=100000)
     reset_timezone: str = Field(min_length=1, max_length=64)
     margin: float = Field(ge=0, le=0.5)
+
+    @field_validator("stake", "daily_loss_limit", "daily_profit_stop", "margin")
+    @classmethod
+    def _finite(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("must be a finite number")
+        return value
+
+    @field_validator("reset_timezone")
+    @classmethod
+    def _timezone(cls, value: str) -> str:
+        ZoneInfo(value)
+        return value
 
 
 class LoginBody(BaseModel):
@@ -182,6 +196,13 @@ def health():
     return {"status": "ok", "service": "digitmatch", "api_family": API_FAMILY}
 
 
+@router.get("/ready")
+def ready(_: None = Depends(_read_access)):
+    report = _store().readiness()
+    report["status"] = "ready" if report["database"] else "not_ready"
+    return report
+
+
 @router.get("/dashboard")
 def dashboard(_: None = Depends(_read_access)):
     try:
@@ -234,7 +255,10 @@ def _blank_dashboard(message: str) -> dict:
             "margin": 0.02,
             "broker_min_stake": None,
             "max_open_contracts": 1,
+            "open_exposure": 0,
         },
+        "unresolved_orders": 0,
+        "readiness": None,
         "ticks_stored": 0,
         "train_tick_limit": 200000,
         "touch_ticks_available": 0,
@@ -359,6 +383,7 @@ def _dashboard() -> dict:
             "checksum": active.checksum,
             "created_at": None if active.created_at is None else active.created_at.isoformat(),
             "has_demonstrated_edge": False,
+            "execution_eligible": bool(active.execution_eligible),
         },
         "probabilities": probabilities,
         "probability_label": "estimated probability",
@@ -378,8 +403,13 @@ def _dashboard() -> dict:
             "reset_timezone": risk.timezone_name,
             "margin": runtime.margin,
             "broker_min_stake": risk.broker_min_stake,
+            "recovery_loss": risk.recovery_loss,
+            "win_profit_target": risk.win_profit_target,
             "max_open_contracts": 1,
+            "open_exposure": risk.open_contracts,
         },
+        "unresolved_orders": store.unresolved_intent_count(),
+        "readiness": store.readiness(),
         "ticks_stored": tick_count,
         "train_tick_limit": int(settings.dm_train_max_ticks),
         "touch_ticks_available": store.saved_touch_count("R_100"),

@@ -15,7 +15,7 @@ from app.digitmatch.account import AccountRejected, require_trade_scope, verify_
 from app.digitmatch.credentials import resolve_digitmatch_credentials
 from app.digitmatch.shared_session import DigitMatchSession
 from app.digitmatch.errors import DerivCallError
-from app.digitmatch.execution import CycleState, apply_settlement, reconcile_unknown, run_cycle
+from app.digitmatch.execution import CycleState, apply_settlement, leading_digit, reconcile_unknown, run_cycle
 from app.digitmatch.features import LOOKBACK
 from app.digitmatch.ingestion import normalize_observation
 from app.digitmatch.instrument import MarketUnavailable, resolve_volatility_100, validate_digitmatch_five_ticks
@@ -48,6 +48,23 @@ class LiveBroker:
         return await self.adapter.buy(proposal_id, price)
 
 
+def _latest_epoch(store: SqlStore, symbol: str) -> int | None:
+    latest = store.latest_tick(symbol)
+    if latest is None:
+        return None
+    return int(latest.broker_epoch)
+
+
+def _live_controls(store: SqlStore) -> dict:
+    runtime = store.runtime()
+    return {
+        "mode": runtime.mode,
+        "paused": bool(runtime.paused),
+        "emergency_stop": bool(runtime.emergency_stop),
+        "uncertain": bool(runtime.uncertain_block),
+    }
+
+
 def _persist(store: SqlStore, state: CycleState, result: dict) -> None:
     probs = result.get("probabilities")
     store.record_decision(
@@ -65,21 +82,7 @@ def _persist(store: SqlStore, state: CycleState, result: dict) -> None:
     if state.uncertain:
         store.update_runtime(uncertain_block=True, uncertain_reason=state.uncertain_reason)
     for intent in state.intents:
-        with store.Session() as session:
-            session.add(
-                DmIntent(
-                    client_key=intent["id"],
-                    status=intent["status"],
-                    digit=int(intent["digit"]),
-                    stake=float(intent["ask_price"]),
-                    proposal_id=intent.get("proposal_id"),
-                    ask_price=intent.get("ask_price"),
-                    total_payout=intent.get("total_payout"),
-                    contract_id=None if intent.get("contract_id") is None else str(intent.get("contract_id")),
-                    error=intent.get("error"),
-                )
-            )
-            session.commit()
+        store.commit_intent(intent)
     for contract in state.contracts:
         with store.Session() as session:
             session.add(
@@ -93,6 +96,48 @@ def _persist(store: SqlStore, state: CycleState, result: dict) -> None:
                 )
             )
             session.commit()
+
+
+def _save_live_tick(store: SqlStore, observation, previous_epoch, previous_precision, previous_quote, replay: bool) -> None:
+    store.add_tick(
+        observation,
+        previous_epoch=previous_epoch,
+        previous_precision=previous_precision,
+        previous_quote=previous_quote,
+        replay=replay,
+    )
+    store.update_runtime(last_tick_epoch=observation.broker_epoch, last_tick_received_at=observation.received_at)
+
+
+def _save_history_page(store: SqlStore, symbol: str, ordered: list[dict], ingestion_id: str) -> int:
+    """Save one history page off the price-socket task so ping replies can still be read."""
+    predecessor = store.tick_before(symbol, int(ordered[0]["epoch"]))
+    previous_epoch = None if predecessor is None else predecessor.broker_epoch
+    previous_precision = None if predecessor is None else predecessor.precision
+    previous_quote = None if predecessor is None else predecessor.quote_text
+    inserted = 0
+    for item in ordered:
+        observation = normalize_observation(
+            symbol=symbol,
+            quote=item["quote"],
+            epoch=int(item["epoch"]),
+            pip_size=item.get("pip_size"),
+            source="history",
+            ingestion_id=ingestion_id,
+            broker_tick_id=item.get("id"),
+        )
+        result = store.add_tick(
+            observation,
+            previous_epoch=previous_epoch,
+            previous_precision=previous_precision,
+            previous_quote=previous_quote,
+        )
+        previous_epoch = observation.broker_epoch
+        previous_precision = observation.precision
+        previous_quote = observation.quote_text
+        if result != "duplicate":
+            inserted += 1
+    return inserted
 
 
 async def _history_once(adapter: DigitMatchSession, store: SqlStore, symbol: str) -> None:
@@ -125,29 +170,14 @@ async def _history_once(adapter: DigitMatchSession, store: SqlStore, symbol: str
             if not rows:
                 note += " Broker returned no further ticks."
                 break
-            previous = store.latest_tick(symbol)
             ordered = sorted(rows, key=lambda item: int(item["epoch"]))
-            if previous is not None and ordered and int(ordered[-1]["epoch"]) == previous.broker_epoch and str(ordered[-1]["quote"]) == previous.quote_wire:
-                ordered = ordered[:-1]
             if not ordered:
                 break
-            for item in ordered:
-                observation = normalize_observation(
-                    symbol=symbol,
-                    quote=item["quote"],
-                    epoch=int(item["epoch"]),
-                    pip_size=item.get("pip_size"),
-                    source="history",
-                    ingestion_id=job["ingestion_id"],
-                    broker_tick_id=item.get("id"),
-                )
-                prev = store.latest_tick(symbol)
-                store.add_tick(
-                    observation,
-                    previous_epoch=None if prev is None else prev.broker_epoch,
-                    previous_precision=None if prev is None else prev.precision,
-                    previous_quote=None if prev is None else prev.quote_text,
-                )
+            inserted = await asyncio.to_thread(
+                _save_history_page, store, symbol, ordered, job["ingestion_id"]
+            )
+            if inserted == 0:
+                break
             oldest = min(int(item["epoch"]) for item in ordered)
             end = oldest - 1
             pages += 1
@@ -159,6 +189,7 @@ async def _history_once(adapter: DigitMatchSession, store: SqlStore, symbol: str
                 checkpoint_end=str(end),
                 note=note,
             )
+        await asyncio.to_thread(store.recompute_order_flags, symbol)
         store.save_job(
             DmIngestJob,
             job["id"],
@@ -189,15 +220,19 @@ async def _monitor(adapter: DigitMatchSession, store: SqlStore) -> None:
             "exit_spot": None if update.get("exit_tick") is None else str(update.get("exit_tick")),
             "longcode": update.get("longcode"),
         }
+        closed_profit = None
         if current["status"] != "open":
             profit = update.get("profit")
             values["profit"] = None if profit is None else float(profit)
             values["sell_time"] = datetime.now(timezone.utc)
+            closed_profit = values["profit"]
         with store.Session() as session:
             from sqlalchemy import update as sql_update
 
             session.execute(sql_update(DmContract).where(DmContract.id == row_id).values(**values))
             session.commit()
+        if closed_profit is not None:
+            store.apply_recovery(float(closed_profit))
 
 
 async def _reconcile(adapter: DigitMatchSession, store: SqlStore) -> None:
@@ -210,6 +245,10 @@ async def _reconcile(adapter: DigitMatchSession, store: SqlStore) -> None:
                 "digit": row.digit,
                 "ask_price": row.ask_price,
                 "total_payout": row.total_payout,
+                "symbol": row.symbol or "R_100",
+                "duration_ticks": row.duration_ticks or 5,
+                "feature_epoch": row.feature_epoch,
+                "mode": row.mode or "demo_explore",
             }
             for row in pending
         ]
@@ -224,9 +263,30 @@ async def _reconcile(adapter: DigitMatchSession, store: SqlStore) -> None:
         return
     result = reconcile_unknown(state, statement)
     store.audit("reconcile", result["status"])
+    for intent in state.intents:
+        store.commit_intent(intent)
     if result["status"] != "reconciled":
         store.update_runtime(uncertain_block=True, uncertain_reason="purchase outcome is still uncertain")
         return
+    for contract in state.contracts:
+        with store.Session() as session:
+            exists = (
+                session.query(DmContract)
+                .filter_by(broker_contract_id=str(contract["broker_contract_id"]))
+                .one_or_none()
+            )
+            if exists is None:
+                session.add(
+                    DmContract(
+                        broker_contract_id=str(contract["broker_contract_id"]),
+                        digit=int(contract["digit"]),
+                        status=contract.get("status") or "open",
+                        buy_price=contract.get("buy_price"),
+                        total_payout=contract.get("total_payout"),
+                        mode=contract.get("mode") or "demo_explore",
+                    )
+                )
+                session.commit()
     store.update_runtime(uncertain_block=False, uncertain_reason=None)
 
 
@@ -302,6 +362,7 @@ async def run() -> None:
             )
             symbol = resolved["symbol"]
             known_pip = resolved.get("pip")
+            store.recover_if_unowned(datetime.now(timezone.utc))
 
             async def on_tick(tick: dict) -> None:
                 if tick.get("symbol") and tick.get("symbol") != symbol:
@@ -322,14 +383,15 @@ async def run() -> None:
                     and prev.quote_text == observation.quote_text
                     and not observation.broker_tick_id
                 )
-                store.add_tick(
+                await asyncio.to_thread(
+                    _save_live_tick,
+                    store,
                     observation,
-                    previous_epoch=None if prev is None else prev.broker_epoch,
-                    previous_precision=None if prev is None else prev.precision,
-                    previous_quote=None if prev is None else prev.quote_text,
-                    replay=replay,
+                    None if prev is None else prev.broker_epoch,
+                    None if prev is None else prev.precision,
+                    None if prev is None else prev.quote_text,
+                    replay,
                 )
-                store.update_runtime(last_tick_epoch=observation.broker_epoch, last_tick_received_at=observation.received_at)
 
             await adapter.subscribe_ticks(symbol, on_tick)
             await _reconcile(adapter, store)
@@ -343,6 +405,9 @@ async def run() -> None:
                 model_path = None if active is None else active.path
                 created_at = None if active is None else active.created_at
                 arrays = await asyncio.to_thread(_series_arrays, store, symbol, live_tail)
+                feature_epoch = None
+                if arrays is not None and len(arrays[3]):
+                    feature_epoch = int(arrays[3][-1])
                 probabilities = None
                 features_ready = False
                 model_ready = False
@@ -371,27 +436,41 @@ async def run() -> None:
                     received = latest.received_at
                 if received is not None and received.tzinfo is None:
                     received = received.replace(tzinfo=timezone.utc)
+                locked = False
+                if (
+                    runtime.mode != "observe"
+                    and not runtime.paused
+                    and not runtime.emergency_stop
+                    and not runtime.uncertain_block
+                ):
+                    locked = store.try_lock(owner, datetime.now(timezone.utc), ttl_seconds=120)
+                    if not locked:
+                        await asyncio.sleep(1)
+                        continue
+                runtime = store.runtime()
                 state = CycleState(
                     mode=runtime.mode,
                     probabilities=None if probabilities is None else probabilities.tolist(),
                     latest_tick_epoch=None if latest is None else latest.broker_epoch,
+                    feature_epoch=feature_epoch,
                     tick_received_at=received,
                     features_ready=features_ready,
                     model_ready=model_ready,
                     model_expired=model_expired,
                     owner=owner,
+                    symbol=symbol,
+                    execution_eligible=bool(active is not None and active.execution_eligible),
+                    proposal_spacing_seconds=float(settings.dm_proposal_spacing_seconds),
                     max_tick_age_seconds=settings.dm_max_tick_age_seconds,
                     max_proposal_age_seconds=settings.dm_max_proposal_age_seconds,
                     margin=float(runtime.margin),
                     uncertain=bool(runtime.uncertain_block),
                     risk=store.risk_snapshot(datetime.now(timezone.utc)),
+                    live_epoch=lambda: _latest_epoch(store, symbol),
+                    live_controls=lambda: _live_controls(store),
+                    fresh_risk=lambda: store.risk_snapshot(datetime.now(timezone.utc)),
+                    commit_intent=store.commit_intent,
                 )
-                locked = False
-                if runtime.mode != "observe" and not runtime.paused and not runtime.emergency_stop:
-                    locked = store.try_lock(owner, datetime.now(timezone.utc))
-                    if not locked:
-                        await asyncio.sleep(1)
-                        continue
                 try:
                     result = await run_cycle(broker, state, datetime.now(timezone.utc))
                 except Exception as exc:
@@ -400,18 +479,19 @@ async def run() -> None:
                         "action": "skip",
                         "reason": "cycle_failed",
                         "probabilities": state.probabilities,
-                        "digit": None if not state.probabilities else int(max(range(10), key=lambda index: state.probabilities[index])),
+                        "digit": leading_digit(list(state.probabilities)) if state.probabilities else None,
                     }
+                try:
+                    interesting = result.get("action") != "skip"
+                    signature = f"{result.get('action')}:{result.get('reason')}:{result.get('digit')}:{state.latest_tick_epoch}"
+                    now_s = time.time()
+                    if interesting or signature != last_skip or now_s - last_skip_at > 15 or state.intents:
+                        _persist(store, state, result)
+                        last_skip = signature
+                        last_skip_at = now_s
                 finally:
                     if locked:
                         store.release_lock(owner)
-                interesting = result.get("action") != "skip"
-                signature = f"{result.get('action')}:{result.get('reason')}:{result.get('digit')}:{state.latest_tick_epoch}"
-                now_s = time.time()
-                if interesting or signature != last_skip or now_s - last_skip_at > 15:
-                    _persist(store, state, result)
-                    last_skip = signature
-                    last_skip_at = now_s
                 try:
                     bal = await adapter.balance()
                     if bal.get("balance") is not None:
@@ -419,6 +499,7 @@ async def run() -> None:
                 except Exception:
                     pass
                 await asyncio.sleep(1)
+            store.update_runtime(connection_status="reconnecting", last_error="price socket closed")
         except AccountRejected as exc:
             store.update_runtime(
                 connection_status="online",

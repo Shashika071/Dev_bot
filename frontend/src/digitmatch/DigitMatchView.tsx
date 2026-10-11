@@ -30,6 +30,13 @@ const SKIP_REASON: Record<string, string> = {
   purchase_not_sent: 'The order was not sent.',
   risk_unavailable: 'Risk limits could not be read.',
   unknown_mode: 'The trading mode is not recognized.',
+  prediction_overtaken: 'A newer tick arrived while the digit was being scored, so the order was skipped.',
+  proposal_changed: 'The quote changed before the order was sent.',
+  proposal_unreadable: 'The quote price or payout could not be checked.',
+  filtered_evidence_missing: 'Filtered mode is off until a separate evidence check is recorded. Estimated value is not that evidence.',
+  flat_prediction: 'Every digit is equally likely, so no digit is kept.',
+  mode_changed: 'The mode changed before the order was sent.',
+  intent_not_durable: 'The order could not be saved before it was sent, so it was skipped.',
 };
 
 function decisionSentence(decision: { action: string; reason: string; digit: number | null } | null): string {
@@ -147,7 +154,7 @@ type Dashboard = {
     matches_legacy_symbol: boolean | null;
   };
   contract: { type: string; duration_ticks: number; ready: boolean; error: string | null };
-  model: { id: number; name: string; checksum: string; created_at: string | null; has_demonstrated_edge: boolean } | null;
+  model: { id: number; name: string; checksum: string; created_at: string | null; has_demonstrated_edge: boolean; execution_eligible?: boolean } | null;
   probabilities: number[] | null;
   probability_label: string;
   decision: {
@@ -189,8 +196,21 @@ type Dashboard = {
     reset_timezone: string;
     margin: number;
     broker_min_stake: number | null;
+    recovery_loss?: number;
+    win_profit_target?: number;
     max_open_contracts: number;
+    open_exposure?: number;
   };
+  unresolved_orders?: number;
+  readiness?: {
+    database: boolean;
+    worker_online: boolean;
+    feed_fresh: boolean;
+    model_loaded: boolean;
+    execution_clear: boolean;
+    demo_verified: boolean;
+    unresolved_orders: number | null;
+  } | null;
   ticks_stored: number;
   train_tick_limit?: number;
   touch_ticks_available?: number;
@@ -464,6 +484,24 @@ export default function DigitMatchView() {
       {trainAlert}
       {error && <div className="alert alert-error"><AlertTriangle size={14} /><div>{error}</div></div>}
       {data?.last_error && <div className="alert alert-error"><AlertTriangle size={14} /><div>{data.last_error}</div></div>}
+      {data?.mode === 'demo_filtered' && data.model && data.model.execution_eligible === false && (
+        <div className="alert alert-warning">
+          <AlertTriangle size={14} />
+          <div>
+            Filtered demo stays idle. Promoting a model does not make it eligible to trade.
+            Estimated value is not a demonstrated edge.
+          </div>
+        </div>
+      )}
+      {(data?.unresolved_orders || 0) > 0 && (
+        <div className="alert alert-error">
+          <AlertTriangle size={14} />
+          <div>
+            {data?.unresolved_orders} purchase{data?.unresolved_orders === 1 ? '' : 's'} still pending or uncertain.
+            They count as exposure. This screen does not send them again.
+          </div>
+        </div>
+      )}
       {data?.reconciliation.blocked && (
         <div className="alert alert-error">
           <AlertTriangle size={14} />
@@ -489,6 +527,17 @@ export default function DigitMatchView() {
               {data?.demo_verified && <span className="badge badge-amber">DEMO</span>}
               {data?.paused && <span className="badge badge-amber">Paused</span>}
               {data?.emergency_stop && <span className="badge badge-amber">Emergency stop</span>}
+              {data?.readiness && (
+                <span className={data.readiness.database && data.readiness.execution_clear ? 'badge badge-green' : 'badge badge-amber'}>
+                  {data.readiness.database ? 'DB' : 'DB down'}
+                  {' · '}
+                  {data.readiness.worker_online ? 'worker' : 'worker off'}
+                  {' · '}
+                  {data.readiness.feed_fresh ? 'feed fresh' : 'feed stale'}
+                  {' · '}
+                  {data.readiness.model_loaded ? 'model ok' : 'model unchecked'}
+                </span>
+              )}
             </div>
             <div className="font-mono text-xs dash-account-grid">
               <span>
@@ -574,6 +623,7 @@ export default function DigitMatchView() {
           <div className="dash-stat">
             <div className="dash-stat-label">Selected digit</div>
             <div className="dash-stat-value">{data?.decision?.digit ?? '—'}</div>
+            <div className="dash-stat-sub">{data?.decision?.digit == null ? 'Changes only when one digit is ahead' : 'From this check'}</div>
           </div>
           <div className="dash-stat">
             <div className="dash-stat-label">Break-even</div>
@@ -787,8 +837,11 @@ export default function DigitMatchView() {
         >
           <div className="grid-2">
             <div className="form-group">
-              <label className="form-label">Stake</label>
+              <label className="form-label">Base stake</label>
               <input className="form-input" value={stake} onChange={(event) => setStake(event.target.value)} />
+              <p className="text-xs text-dim" style={{ marginTop: 6 }}>
+                Starts here, normally 0.35. After losses, the next demo stake rises only enough for a win to cover those losses and leave about $1. A win sets it back to this base. It will not rise past the daily loss room.
+              </p>
             </div>
             <div className="form-group">
               <label className="form-label">Cooldown seconds</label>

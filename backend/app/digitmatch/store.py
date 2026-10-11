@@ -106,6 +106,48 @@ class SqlStore:
         import app.models  # noqa: F401
 
         Base.metadata.create_all(self.engine)
+        self._ensure_added_columns()
+
+    def _ensure_added_columns(self) -> None:
+        """Add newer columns on databases created before this revision. Existing rows stay."""
+        from sqlalchemy import inspect, text
+
+        inspector = inspect(self.engine)
+        tables = set(inspector.get_table_names())
+        statements = []
+        if "dm_intents" in tables:
+            have = {column["name"] for column in inspector.get_columns("dm_intents")}
+            for name, ddl in (
+                ("symbol", "VARCHAR(32)"),
+                ("duration_ticks", "INTEGER"),
+                ("feature_epoch", "INTEGER"),
+                ("mode", "VARCHAR(32)"),
+            ):
+                if name not in have:
+                    statements.append(f"ALTER TABLE dm_intents ADD COLUMN {name} {ddl}")
+        if "dm_models" in tables:
+            have = {column["name"] for column in inspector.get_columns("dm_models")}
+            if "execution_eligible" not in have:
+                default = "FALSE" if self.engine.dialect.name == "postgresql" else "0"
+                statements.append(
+                    f"ALTER TABLE dm_models ADD COLUMN execution_eligible BOOLEAN NOT NULL DEFAULT {default}"
+                )
+        if "dm_runtime" in tables:
+            have = {column["name"] for column in inspector.get_columns("dm_runtime")}
+            number = "DOUBLE PRECISION" if self.engine.dialect.name == "postgresql" else "FLOAT"
+            if "recovery_loss" not in have:
+                statements.append(
+                    f"ALTER TABLE dm_runtime ADD COLUMN recovery_loss {number} NOT NULL DEFAULT 0"
+                )
+            if "win_profit_target" not in have:
+                statements.append(
+                    f"ALTER TABLE dm_runtime ADD COLUMN win_profit_target {number} NOT NULL DEFAULT 1"
+                )
+        if not statements:
+            return
+        with self.engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
 
     def seed(self) -> None:
         with self.Session() as session:
@@ -151,6 +193,14 @@ class SqlStore:
         current = _naive(now)
         expires = current + timedelta(seconds=ttl_seconds)
         with self.Session() as session:
+            pending = (
+                session.query(DmIntent)
+                .filter(DmIntent.status.in_(("reserved", "submitting", "uncertain")))
+                .count()
+            )
+            lock = session.get(DmLock, 1)
+            if pending and (lock is None or lock.owner != owner):
+                return False
             result = session.execute(
                 update(DmLock)
                 .where(DmLock.id == 1)
@@ -159,6 +209,138 @@ class SqlStore:
             )
             session.commit()
             return result.rowcount == 1
+
+    def commit_intent(self, payload: dict) -> None:
+        """Upsert a purchase intent. Callers commit `reserved` before the buy is written."""
+        self._ensure_added_columns()
+        with self.Session() as session:
+            row = session.query(DmIntent).filter_by(client_key=str(payload["id"])).one_or_none()
+            values = {
+                "status": str(payload["status"]),
+                "digit": int(payload["digit"]),
+                "stake": float(payload.get("ask_price") or 0),
+                "proposal_id": payload.get("proposal_id"),
+                "ask_price": payload.get("ask_price"),
+                "total_payout": payload.get("total_payout"),
+                "contract_id": None if payload.get("contract_id") is None else str(payload.get("contract_id")),
+                "error": None if payload.get("error") is None else str(payload.get("error"))[:2000],
+                "symbol": payload.get("symbol") or "R_100",
+                "duration_ticks": int(payload.get("duration_ticks") or 5),
+                "feature_epoch": payload.get("feature_epoch"),
+                "mode": payload.get("mode"),
+            }
+            if row is None:
+                session.add(DmIntent(client_key=str(payload["id"]), **values))
+            else:
+                for key, value in values.items():
+                    setattr(row, key, value)
+            session.commit()
+
+    def recover_if_unowned(self, now: datetime) -> dict:
+        """Classify leftovers only when no live worker still holds the execution lock."""
+        current = _naive(now)
+        with self.Session() as session:
+            lock = session.get(DmLock, 1)
+            if lock is not None and lock.owner and lock.expires_at is not None and _naive(lock.expires_at) > current:
+                return {"skipped": True, "not_sent": 0, "uncertain": 0}
+        return self.recover_unfinished_intents()
+
+    def recover_unfinished_intents(self) -> dict:
+        """A reserved intent never reached the socket. A submitting intent might have."""
+        reserved = 0
+        uncertain = 0
+        with self.Session() as session:
+            rows = session.query(DmIntent).filter(DmIntent.status.in_(("reserved", "submitting"))).all()
+            for row in rows:
+                if row.status == "reserved":
+                    row.status = "not_sent"
+                    row.error = "process stopped before the buy was sent"
+                    reserved += 1
+                else:
+                    row.status = "uncertain"
+                    row.error = "process stopped after the buy may have been sent"
+                    uncertain += 1
+            accepted = session.query(DmIntent).filter(DmIntent.status == "accepted").all()
+            for row in accepted:
+                if not row.contract_id:
+                    continue
+                exists = (
+                    session.query(DmContract)
+                    .filter(DmContract.broker_contract_id == str(row.contract_id))
+                    .one_or_none()
+                )
+                if exists is None:
+                    session.add(
+                        DmContract(
+                            broker_contract_id=str(row.contract_id),
+                            digit=int(row.digit),
+                            status="open",
+                            buy_price=row.ask_price,
+                            total_payout=row.total_payout,
+                            mode=row.mode or "demo_explore",
+                            intent_id=row.id,
+                        )
+                    )
+            session.commit()
+        if uncertain:
+            self.update_runtime(uncertain_block=True, uncertain_reason="unfinished purchase needs reconciliation")
+        return {"not_sent": reserved, "uncertain": uncertain}
+
+    def unresolved_intent_count(self) -> int:
+        with self.Session() as session:
+            return (
+                session.query(DmIntent)
+                .filter(DmIntent.status.in_(("reserved", "submitting", "uncertain")))
+                .count()
+            )
+
+    def readiness(self) -> dict:
+        from app.digitmatch.registry import load_bundle
+
+        database = True
+        try:
+            with self.engine.connect() as connection:
+                connection.exec_driver_sql("SELECT 1")
+        except Exception:
+            database = False
+        runtime = self.runtime()
+        now = datetime.now(timezone.utc)
+        received = runtime.last_tick_received_at
+        feed_age = None
+        if received is not None:
+            if received.tzinfo is None:
+                received = received.replace(tzinfo=timezone.utc)
+            feed_age = (now - received).total_seconds()
+        model = self.active_model()
+        model_ok = False
+        model_error = None
+        if model is not None:
+            try:
+                load_bundle(model.path)
+                model_ok = True
+            except Exception as exc:
+                model_error = type(exc).__name__
+        unresolved = self.unresolved_intent_count() if database else None
+        return {
+            "database": database,
+            "worker_online": runtime.connection_status == "online",
+            "feed_age_seconds": feed_age,
+            "feed_fresh": feed_age is not None and feed_age <= settings.dm_max_tick_age_seconds,
+            "model_loaded": model_ok,
+            "model_error": model_error,
+            "unresolved_orders": unresolved,
+            "execution_clear": unresolved == 0 and not runtime.uncertain_block,
+            "demo_verified": bool(runtime.demo_verified),
+        }
+
+    def apply_recovery(self, profit: float) -> None:
+        """Add a loss to the amount the next win must cover. A win clears it."""
+        runtime = self.runtime()
+        if profit > 0:
+            self.update_runtime(recovery_loss=0)
+            return
+        if profit < 0:
+            self.update_runtime(recovery_loss=float(runtime.recovery_loss or 0) + abs(float(profit)))
 
     def release_lock(self, owner: str) -> None:
         with self.Session() as session:
@@ -235,6 +417,56 @@ class SqlStore:
             row.quality_flags = ",".join(sorted(flags))
         return True
 
+    def tick_before(self, symbol: str, epoch: int):
+        """Latest stored tick that is still older than epoch. Used when backfilling history."""
+        with self.Session() as session:
+            row = (
+                session.query(DmTick)
+                .filter(DmTick.symbol == symbol, DmTick.broker_epoch < int(epoch))
+                .order_by(DmTick.broker_epoch.desc(), DmTick.id.desc())
+                .first()
+            )
+            if row is not None:
+                session.expunge(row)
+            return row
+
+    def recompute_order_flags(self, symbol: str) -> int:
+        """Rebuild gap and order flags from epoch order. A backfilled tick is not out of order."""
+        order_flags = {"out_of_order", "gap", "precision_change"}
+        changed = 0
+        with self.Session() as session:
+            rows = (
+                session.query(DmTick)
+                .filter(DmTick.symbol == symbol)
+                .order_by(DmTick.broker_epoch.asc(), DmTick.id.asc())
+                .all()
+            )
+            previous_epoch = None
+            previous_precision = None
+            previous_quote = None
+            for row in rows:
+                existing = [flag for flag in (row.quality_flags or "").split(",") if flag]
+                kept = [flag for flag in existing if flag not in order_flags]
+                quality = assess_tick(
+                    epoch=int(row.broker_epoch),
+                    previous_epoch=previous_epoch,
+                    precision=row.precision,
+                    previous_precision=previous_precision,
+                    expected_tick_seconds=settings.dm_expected_tick_seconds,
+                    quote_text=row.quote_text,
+                    previous_quote_text=previous_quote,
+                )
+                merged = kept + [flag for flag in quality.flags if flag not in kept]
+                text = ",".join(merged)
+                if text != (row.quality_flags or ""):
+                    row.quality_flags = text
+                    changed += 1
+                previous_epoch = int(row.broker_epoch)
+                previous_precision = row.precision
+                previous_quote = row.quote_text
+            session.commit()
+        return changed
+
     def latest_tick(self, symbol: str):
         with self.Session() as session:
             row = (
@@ -300,6 +532,12 @@ class SqlStore:
             settled = _naive(contract["sell_time"])
             if settled is not None and (last_settled is None or settled > last_settled):
                 last_settled = settled
+        with self.Session() as session:
+            open_count += (
+                session.query(DmIntent)
+                .filter(DmIntent.status.in_(("reserved", "submitting", "uncertain")))
+                .count()
+            )
         if last_settled is not None and last_settled.tzinfo is None:
             last_settled = last_settled.replace(tzinfo=timezone.utc)
         return RiskSnapshot(
@@ -318,6 +556,8 @@ class SqlStore:
             paused=bool(runtime.paused),
             uncertain=bool(runtime.uncertain_block),
             broker_min_stake=runtime.broker_min_stake,
+            recovery_loss=float(runtime.recovery_loss or 0),
+            win_profit_target=float(runtime.win_profit_target or 1),
         )
 
     def record_decision(self, **values) -> None:
@@ -471,6 +711,7 @@ class SqlStore:
                     "name": row.name,
                     "created_at": None if row.created_at is None else row.created_at.isoformat(),
                     "is_active": bool(row.is_active),
+                    "execution_eligible": bool(row.execution_eligible),
                     "checksum": row.checksum,
                     "dataset_version": row.dataset_version,
                     "schema": row.schema,

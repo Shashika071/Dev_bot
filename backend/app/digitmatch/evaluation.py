@@ -61,7 +61,12 @@ def calibration_bins(y_true: np.ndarray, probabilities: np.ndarray, bins: int = 
 
 
 def block_bootstrap_mean(values: np.ndarray, *, block: int = 20, draws: int = 200, seed: int = 0) -> dict:
-    """Mean and percentile interval using contiguous blocks, not iid draws."""
+    """Mean and percentile interval using contiguous blocks, not iid draws.
+
+    Assumption: nearby five-tick labels overlap, so an iid bootstrap would
+    look too precise. Blocks of 20 rows keep short runs together. The
+    interval is not a trading-profit interval and does not prove an edge.
+    """
     values = np.asarray(values, dtype=float)
     if len(values) == 0:
         return {"mean": None, "low": None, "high": None, "block": block, "draws": 0}

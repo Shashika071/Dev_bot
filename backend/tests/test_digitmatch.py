@@ -359,15 +359,28 @@ def test_reconciliation_requires_one_clear_match():
     state.intents.append(
         {"id": "i", "status": "uncertain", "digit": 4, "ask_price": 1.0, "total_payout": 8.0}
     )
+    identity = {"symbol": "R_100", "digit": 4, "duration": 5}
     unclear = reconcile_unknown(
         state,
         [
-            {"action_type": "buy", "amount": 1, "contract_id": 1},
-            {"action_type": "buy", "amount": 1, "contract_id": 2},
+            {"action_type": "buy", "amount": 1, "contract_id": 1, **identity},
+            {"action_type": "buy", "amount": 1, "contract_id": 2, **identity},
         ],
     )
     assert unclear["status"] == "still_uncertain"
-    clear = reconcile_unknown(state, [{"action_type": "buy", "amount": 1, "contract_id": 77}])
+    amount_only = reconcile_unknown(state, [{"action_type": "buy", "amount": 1, "contract_id": 77}])
+    assert amount_only["status"] == "still_uncertain"
+    clear = reconcile_unknown(
+        state,
+        [{
+            "action_type": "buy",
+            "amount": 1,
+            "contract_id": 77,
+            "symbol": "R_100",
+            "digit": 4,
+            "duration": 5,
+        }],
+    )
     assert clear["status"] == "reconciled"
     assert clear["contract_id"] == "77"
 
@@ -422,6 +435,35 @@ def test_ui_state_prefers_uncertain_purchase():
             "auth_status": "demo",
         }
     ) == "stale_data"
+
+
+def test_older_history_is_not_marked_out_of_order_after_a_live_tick(tmp_path: Path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'backfill.db'}", poolclass=NullPool)
+    store = SqlStore(engine)
+    store.create_schema()
+    live = normalize_observation(
+        symbol="R_100", quote="123.40", epoch=2000, pip_size=2, source="live", ingestion_id="live", broker_tick_id=None
+    )
+    older = normalize_observation(
+        symbol="R_100", quote="123.38", epoch=1998, pip_size=2, source="history", ingestion_id="hist", broker_tick_id=None
+    )
+    assert store.add_tick(live) == "inserted"
+    predecessor = store.tick_before("R_100", older.broker_epoch)
+    store.add_tick(
+        older,
+        previous_epoch=None if predecessor is None else predecessor.broker_epoch,
+        previous_precision=None if predecessor is None else predecessor.precision,
+        previous_quote=None if predecessor is None else predecessor.quote_text,
+    )
+    stored = {row.broker_epoch: row.quality_flags or "" for row in store.series("R_100")}
+    assert "out_of_order" not in stored[1998]
+    poisoned = normalize_observation(
+        symbol="R_100", quote="123.36", epoch=1996, pip_size=2, source="history", ingestion_id="hist", broker_tick_id=None
+    )
+    store.add_tick(poisoned, previous_epoch=2000)
+    assert store.recompute_order_flags("R_100") >= 1
+    cleaned = {row.broker_epoch: row.quality_flags or "" for row in store.series("R_100")}
+    assert "out_of_order" not in cleaned[1996]
 
 
 def test_conflicting_ticks_are_kept(tmp_path: Path):
@@ -516,6 +558,8 @@ def test_migration_revision_is_importable():
     scripts = ScriptDirectory.from_config(cfg)
     revisions = {revision.revision: revision.down_revision for revision in scripts.walk_revisions()}
     assert revisions["002_digitmatch"] == "001_hardening"
+    assert revisions["003_digitmatch_execution"] == "002_digitmatch"
+    assert revisions["004_digitmatch_recovery"] == "003_digitmatch_execution"
 
 
 def test_dashboard_numbers_that_are_not_finite_do_not_break_json():
@@ -570,4 +614,312 @@ def test_a_running_train_blocks_a_second_one(tmp_path: Path):
     assert store.active_train_job()["status"] == "queued"
     store.save_job(DmTrainJob, first, status="done", progress="saved")
     assert store.active_train_job() is None
+
+
+def _sqlite_store(tmp_path: Path, name: str) -> SqlStore:
+    engine = create_engine(f"sqlite:///{tmp_path / name}", poolclass=NullPool, connect_args={"timeout": 5})
+    store = SqlStore(engine)
+    store.create_schema()
+    store.seed()
+    return store
+
+
+def test_crash_before_submission_does_not_keep_exposure(tmp_path: Path):
+    store = _sqlite_store(tmp_path, "reserved.db")
+    store.commit_intent({"id": "before", "status": "reserved", "digit": 3, "ask_price": 1.0, "total_payout": 8.0})
+    assert store.risk_snapshot(datetime.now(timezone.utc)).open_contracts == 1
+    recovered = store.recover_unfinished_intents()
+    assert recovered["not_sent"] == 1
+    assert store.risk_snapshot(datetime.now(timezone.utc)).open_contracts == 0
+
+
+def test_crash_after_acceptance_keeps_the_contract(tmp_path: Path):
+    store = _sqlite_store(tmp_path, "accepted.db")
+    store.commit_intent(
+        {
+            "id": "after",
+            "status": "accepted",
+            "digit": 4,
+            "ask_price": 1.0,
+            "total_payout": 8.0,
+            "contract_id": "broker-44",
+            "symbol": "R_100",
+            "duration_ticks": 5,
+            "mode": "demo_explore",
+        }
+    )
+    store.recover_unfinished_intents()
+    trades = store.list_trades()
+    assert trades[0]["broker_contract_id"] == "broker-44"
+    assert trades[0]["status"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_lost_buy_response_blocks_a_restart(tmp_path: Path):
+    store = _sqlite_store(tmp_path, "lost.db")
+    broker = FakeBroker(lose_response_after_accept=True)
+    state = _state(
+        mode="demo_explore",
+        probabilities=[0.05] * 9 + [0.55],
+        commit_intent=store.commit_intent,
+    )
+    result = await run_cycle(broker, state, datetime.now(timezone.utc))
+    assert result["reason"] == "uncertain_purchase"
+    assert len(broker.buys) == 1
+    restarted = SqlStore(store.engine)
+    assert restarted.risk_snapshot(datetime.now(timezone.utc)).open_contracts == 1
+    assert restarted.try_lock("other-worker", datetime.now(timezone.utc)) is False
+    again = await run_cycle(broker, state, datetime.now(timezone.utc))
+    assert again["reason"] == "uncertain_purchase"
+    assert len(broker.buys) == 1
+
+
+def test_pending_intent_blocks_a_second_worker_after_the_lock_expires(tmp_path: Path):
+    store = _sqlite_store(tmp_path, "race.db")
+    now = datetime.now(timezone.utc)
+    assert store.try_lock("worker-a", now, ttl_seconds=1) is True
+    store.commit_intent({"id": "inflight", "status": "submitting", "digit": 2, "ask_price": 1.0, "total_payout": 8.0})
+    store.release_lock("worker-a")
+    assert store.try_lock("worker-b", now + timedelta(seconds=5), ttl_seconds=60) is False
+
+
+@pytest.mark.asyncio
+async def test_a_newer_tick_during_quoting_skips_the_purchase():
+    broker = FakeBroker()
+    calls = {"n": 0}
+
+    def epoch():
+        calls["n"] += 1
+        return 1000 if calls["n"] < 12 else 1001
+
+    state = _state(
+        mode="demo_explore",
+        probabilities=[0.05] * 9 + [0.55],
+        feature_epoch=1000,
+        latest_tick_epoch=1000,
+        live_epoch=epoch,
+    )
+    result = await run_cycle(broker, state, datetime.now(timezone.utc))
+    assert result["reason"] == "prediction_overtaken"
+    assert broker.buys == []
+
+
+@pytest.mark.asyncio
+async def test_emergency_stop_during_quoting_skips_the_purchase():
+    broker = FakeBroker()
+    calls = {"n": 0}
+
+    def controls():
+        calls["n"] += 1
+        return {
+            "mode": "demo_explore",
+            "paused": False,
+            "emergency_stop": calls["n"] >= 12,
+            "uncertain": False,
+        }
+
+    state = _state(
+        mode="demo_explore",
+        probabilities=[0.05] * 9 + [0.55],
+        live_controls=controls,
+    )
+    result = await run_cycle(broker, state, datetime.now(timezone.utc))
+    assert result["reason"] == "emergency_stop"
+    assert broker.buys == []
+
+
+@pytest.mark.asyncio
+async def test_mode_change_during_quoting_skips_the_purchase():
+    broker = FakeBroker()
+    calls = {"n": 0}
+
+    def controls():
+        calls["n"] += 1
+        return {
+            "mode": "observe" if calls["n"] >= 12 else "demo_explore",
+            "paused": False,
+            "emergency_stop": False,
+        }
+
+    state = _state(
+        mode="demo_explore",
+        probabilities=[0.05] * 9 + [0.55],
+        live_controls=controls,
+    )
+    result = await run_cycle(broker, state, datetime.now(timezone.utc))
+    assert result["reason"] == "mode_changed"
+    assert broker.buys == []
+
+
+@pytest.mark.asyncio
+async def test_a_slow_proposal_is_rejected(monkeypatch):
+    broker = FakeBroker()
+    clock = {"t": 0.0}
+
+    def monotonic():
+        clock["t"] += 4.0
+        return clock["t"]
+
+    monkeypatch.setattr("app.digitmatch.execution.time.monotonic", monotonic)
+    state = _state(mode="demo_explore", probabilities=[0.05] * 9 + [0.55])
+    result = await run_cycle(broker, state, datetime.now(timezone.utc))
+    assert result["reason"] == "stale_proposal"
+    assert broker.buys == []
+
+
+@pytest.mark.asyncio
+async def test_a_changed_quote_is_not_submitted():
+    class Drift(FakeBroker):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def proposal(self, digit: int, stake: float, currency: str) -> dict:
+            self.calls += 1
+            payload = await super().proposal(digit, stake, currency)
+            if self.calls > 10:
+                payload = dict(payload)
+                payload["ask_price"] = 1.5
+            return payload
+
+    broker = Drift()
+    state = _state(mode="demo_explore", probabilities=[0.05] * 9 + [0.55])
+    result = await run_cycle(broker, state, datetime.now(timezone.utc))
+    assert result["reason"] == "proposal_changed"
+    assert broker.buys == []
+
+
+def test_uncertain_purchase_counts_as_exposure(tmp_path: Path):
+    store = _sqlite_store(tmp_path, "exposure.db")
+    store.commit_intent({"id": "u", "status": "uncertain", "digit": 1, "ask_price": 1.0, "total_payout": 8.0})
+    snapshot = store.risk_snapshot(datetime.now(timezone.utc))
+    assert snapshot.open_contracts == 1
+    decision = assess(snapshot, datetime.now(timezone.utc), next_loss=1)
+    assert decision.allowed is False
+    assert decision.reason == "open_contract"
+
+
+def test_daily_loss_respects_the_reset_timezone(tmp_path: Path):
+    store = _sqlite_store(tmp_path, "tz.db")
+    store.update_runtime(reset_timezone="Asia/Colombo", daily_loss_limit=20)
+    sold = datetime(2026, 10, 11, 18, 20, tzinfo=timezone.utc)
+    with store.Session() as session:
+        session.add(
+            DmContract(
+                broker_contract_id="tz-1",
+                digit=1,
+                status="lost",
+                buy_price=1,
+                total_payout=8,
+                profit=-20,
+                purchase_time=sold,
+                sell_time=sold,
+                mode="demo_explore",
+            )
+        )
+        session.commit()
+    same_day = store.risk_snapshot(datetime(2026, 10, 11, 18, 25, tzinfo=timezone.utc))
+    next_day = store.risk_snapshot(datetime(2026, 10, 11, 18, 40, tzinfo=timezone.utc))
+    assert same_day.pnl_today == pytest.approx(-20)
+    assert next_day.pnl_today == pytest.approx(0)
+    blocked = assess(same_day, datetime(2026, 10, 11, 18, 25, tzinfo=timezone.utc), next_loss=1)
+    assert blocked.reason == "daily_loss_limit"
+
+
+def test_corrupt_or_incompatible_model_is_refused(tmp_path: Path):
+    from app.digitmatch.registry import load_bundle
+
+    path = tmp_path / "model.joblib"
+    path.write_bytes(b"not-a-model")
+    path.with_suffix(".json").write_text(
+        '{"checksum": "deadbeef", "schema": "dm-features-v1", "dataset_version": "abc"}',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="checksum"):
+        load_bundle(str(path))
+
+
+def test_controls_reject_a_missing_session(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.config import settings
+    from app.main import app
+
+    monkeypatch.setattr(settings, "dm_require_app_auth", True)
+    monkeypatch.setattr(settings, "dm_app_password", "local-test-password")
+    monkeypatch.setattr(settings, "dm_session_secret", "local-test-secret")
+    client = TestClient(app)
+    denied = client.post("/api/digitmatch/mode", json={"mode": "demo_explore"})
+    assert denied.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_a_flat_model_does_not_keep_the_same_digit():
+    broker = FakeBroker()
+    state = _state(mode="demo_explore", probabilities=[0.1] * 10)
+    result = await run_cycle(broker, state, datetime.now(timezone.utc))
+    assert result["reason"] == "flat_prediction"
+    assert "digit" not in result
+    assert broker.buys == []
+
+
+@pytest.mark.asyncio
+async def test_filtered_mode_fails_closed_without_evidence():
+    broker = FakeBroker()
+    state = _state(mode="demo_filtered", probabilities=[0.01] * 9 + [0.9], execution_eligible=False)
+    result = await run_cycle(broker, state, datetime.now(timezone.utc))
+    assert result["reason"] == "filtered_evidence_missing"
+    assert broker.buys == []
+
+
+def test_recovery_stake_stays_at_the_base_until_a_win_cannot_cover_one_dollar():
+    from app.digitmatch.ev import stake_to_cover
+
+    base = stake_to_cover(
+        loss=0, target_profit=1, ask_price=0.35, total_payout=2.92, floor=0.35, ceiling=20
+    )
+    assert base == 0.35
+    after_five = stake_to_cover(
+        loss=1.75, target_profit=1, ask_price=0.35, total_payout=2.92, floor=0.35, ceiling=20
+    )
+    assert after_five == 0.38
+    capped = stake_to_cover(
+        loss=1.75, target_profit=1, ask_price=0.35, total_payout=2.92, floor=0.35, ceiling=0.35
+    )
+    assert capped is None
+
+
+def test_a_win_clears_the_recovery_loss(tmp_path: Path):
+    store = _sqlite_store(tmp_path, "recovery.db")
+    store.apply_recovery(-0.35)
+    store.apply_recovery(-0.35)
+    assert store.runtime().recovery_loss == pytest.approx(0.70)
+    store.apply_recovery(2.57)
+    assert store.runtime().recovery_loss == pytest.approx(0)
+
+
+def test_postgres_pending_intent_blocks_a_second_connection():
+    import os
+
+    url = os.environ.get("DM_PG_TEST_URL")
+    if not url:
+        pytest.skip("DM_PG_TEST_URL is not set")
+    engine = create_engine(url, poolclass=NullPool)
+    store = SqlStore(engine)
+    store.create_schema()
+    store.seed()
+    now = datetime.now(timezone.utc)
+    key = f"pg-{now.timestamp()}"
+    store.commit_intent(
+        {"id": key, "status": "uncertain", "digit": 0, "ask_price": 1.0, "total_payout": 8.0}
+    )
+    try:
+        other = SqlStore(engine)
+        assert other.try_lock("pg-worker", now) is False
+    finally:
+        from app.models.digitmatch import DmIntent
+
+        with store.Session() as session:
+            session.query(DmIntent).filter_by(client_key=key).delete()
+            session.commit()
 

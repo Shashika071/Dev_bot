@@ -105,6 +105,8 @@ class DmRuntime(Base):
     contract_error = Column(Text, nullable=True)
     broker_min_stake = Column(Float, nullable=True)
     contract_ready = Column(Boolean, nullable=False, default=False)
+    recovery_loss = Column(Float, nullable=False, default=0.0)
+    win_profit_target = Column(Float, nullable=False, default=1.0)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
@@ -130,6 +132,10 @@ class DmIntent(Base):
     calibrated_probability = Column(Float, nullable=True)
     contract_id = Column(String(64), nullable=True)
     error = Column(Text, nullable=True)
+    symbol = Column(String(32), nullable=True)
+    duration_ticks = Column(Integer, nullable=True)
+    feature_epoch = Column(Integer, nullable=True)
+    mode = Column(String(32), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -192,6 +198,7 @@ class DmModel(Base):
     path = Column(Text, nullable=False)
     checksum = Column(String(64), nullable=False)
     is_active = Column(Boolean, nullable=False, default=False)
+    execution_eligible = Column(Boolean, nullable=False, default=False)
     dataset_version = Column(String(64), nullable=False)
     time_start = Column(Integer, nullable=True)
     time_end = Column(Integer, nullable=True)

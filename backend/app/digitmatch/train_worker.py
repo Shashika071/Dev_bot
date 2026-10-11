@@ -43,6 +43,7 @@ def run_once(store: SqlStore, symbol: str, enable_mlp: bool, job_id: int | None 
             store.save_job(DmTrainJob, job_id, status="running", progress=text)
 
     progress("Loading ticks")
+    store.recompute_order_flags(symbol)
     loaded = _load(store, symbol)
     if loaded is None:
         raise RuntimeError("no ticks are stored for training")

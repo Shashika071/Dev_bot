@@ -525,6 +525,9 @@ class DerivTradeClient:
                 if not fut.done():
                     fut.set_exception(ConnectionError(str(e)))
             self._pending.clear()
+            # The library timed out waiting for a pong. Deriv did not send a close.
+            # Drop the dead socket so the caller reconnects instead of staying "online".
+            self.ws = None
 
     async def _dispatch_stream(self, data: dict) -> None:
         handler = self._stream_handler
