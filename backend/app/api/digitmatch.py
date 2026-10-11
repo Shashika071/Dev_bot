@@ -511,6 +511,16 @@ def cancel_history(_: None = Depends(_control_access)):
         return {"ok": True, "cancelled": True, "job_id": row.id}
 
 
+@router.post("/history/delete")
+def delete_history(_: None = Depends(_control_access)):
+    store = _store()
+    runtime = store.runtime()
+    symbol = runtime.resolved_symbol or EXPECTED_LEGACY_SYMBOL
+    removed = store.delete_history(symbol)
+    store.audit("history_delete", f"removed {removed} ticks for {symbol}")
+    return {"ok": True, "removed": removed, "symbol": symbol}
+
+
 @router.get("/history/export")
 def export_history(_: None = Depends(_control_access)):
     store = _store()

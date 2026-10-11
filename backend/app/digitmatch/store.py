@@ -725,8 +725,42 @@ class SqlStore:
 
     def list_trades(self, limit: int = 50) -> list[dict]:
         with self.Session() as session:
-            rows = session.query(DmContract).order_by(DmContract.id.desc()).limit(limit).all()
-            return [_contract_dict(row) for row in rows]
+            rows = session.query(DmContract).order_by(DmContract.id.asc()).all()
+            running = 0.0
+            stamped = []
+            for row in rows:
+                item = _contract_dict(row)
+                if row.profit is None:
+                    item["running_profit"] = None
+                else:
+                    running += float(row.profit)
+                    item["running_profit"] = running
+                stamped.append(item)
+        stamped.reverse()
+        return stamped[:limit]
+
+    def latest_decision_digit(self) -> int | None:
+        with self.Session() as session:
+            row = (
+                session.query(DmDecision)
+                .filter(DmDecision.digit.is_not(None))
+                .order_by(DmDecision.id.desc())
+                .first()
+            )
+            if row is None or row.digit is None:
+                return None
+            return int(row.digit)
+
+    def delete_history(self, symbol: str) -> int:
+        with self.Session() as session:
+            session.query(DmIngestJob).filter(
+                DmIngestJob.symbol == symbol,
+                DmIngestJob.status.in_(["queued", "running", "copying"]),
+            ).update({DmIngestJob.cancel_requested: True}, synchronize_session=False)
+            removed = session.query(DmTick).filter(DmTick.symbol == symbol).delete(synchronize_session=False)
+            session.query(DmIngestJob).filter(DmIngestJob.symbol == symbol).delete(synchronize_session=False)
+            session.commit()
+            return int(removed)
 
     def list_decisions(self, limit: int = 30) -> list[dict]:
         with self.Session() as session:

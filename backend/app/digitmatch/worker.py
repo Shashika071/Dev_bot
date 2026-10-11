@@ -15,7 +15,7 @@ from app.digitmatch.account import AccountRejected, require_trade_scope, verify_
 from app.digitmatch.credentials import resolve_digitmatch_credentials
 from app.digitmatch.shared_session import DigitMatchSession
 from app.digitmatch.errors import DerivCallError
-from app.digitmatch.execution import CycleState, apply_settlement, leading_digit, reconcile_unknown, run_cycle
+from app.digitmatch.execution import CycleState, apply_settlement, chosen_digit, reconcile_unknown, run_cycle
 from app.digitmatch.features import LOOKBACK
 from app.digitmatch.ingestion import normalize_observation
 from app.digitmatch.instrument import MarketUnavailable, resolve_volatility_100, validate_digitmatch_five_ticks
@@ -313,6 +313,13 @@ def _series_arrays(store: SqlStore, symbol: str, limit: int | None = None):
     return np.asarray(digits), np.asarray(prices), np.asarray(usable), np.asarray(epochs)
 
 
+def _recent_digits(arrays) -> list[int]:
+    if arrays is None:
+        return []
+    recent = [int(digit) for digit, ok in zip(arrays[0].tolist(), arrays[2].tolist()) if ok]
+    return recent[-100:]
+
+
 async def run() -> None:
     store = SqlStore()
     store.create_schema()
@@ -470,6 +477,8 @@ async def run() -> None:
                     live_controls=lambda: _live_controls(store),
                     fresh_risk=lambda: store.risk_snapshot(datetime.now(timezone.utc)),
                     commit_intent=store.commit_intent,
+                    recent_digits=_recent_digits(arrays),
+                    last_chosen_digit=store.latest_decision_digit(),
                 )
                 try:
                     result = await run_cycle(broker, state, datetime.now(timezone.utc))
@@ -479,7 +488,7 @@ async def run() -> None:
                         "action": "skip",
                         "reason": "cycle_failed",
                         "probabilities": state.probabilities,
-                        "digit": leading_digit(list(state.probabilities)) if state.probabilities else None,
+                        "digit": chosen_digit(state) if state.probabilities else None,
                     }
                 try:
                     interesting = result.get("action") != "skip"

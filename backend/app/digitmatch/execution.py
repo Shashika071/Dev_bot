@@ -47,6 +47,8 @@ class CycleState:
     lock_owner: str | None = None
     risk: RiskSnapshot | None = None
     audits: list = field(default_factory=list)
+    recent_digits: list[int] = field(default_factory=list)
+    last_chosen_digit: int | None = None
 
     def try_lock(self, owner: str) -> bool:
         if self.lock_owner not in (None, owner):
@@ -70,11 +72,48 @@ def leading_digit(probabilities: list[float]) -> int | None:
     return leaders[0]
 
 
+def most_shown_digit(digits: list[int] | None, avoid: int | None = None) -> int | None:
+    """Most common digit in the last 100. The previous pick is skipped when another digit exists."""
+    if not digits:
+        return None
+    window: list[int] = []
+    for value in digits[-100:]:
+        try:
+            digit = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= digit <= 9:
+            window.append(digit)
+    if len(window) < 100:
+        return None
+    counts = [0] * 10
+    for digit in window:
+        counts[digit] += 1
+    order = sorted(range(10), key=lambda digit: (-counts[digit], digit))
+    for digit in order:
+        if counts[digit] == 0:
+            continue
+        if avoid is not None and digit == int(avoid):
+            continue
+        return digit
+    top = order[0]
+    return top if counts[top] else None
+
+
+def chosen_digit(state: CycleState) -> int | None:
+    if not state.probabilities:
+        return None
+    leader = leading_digit(list(state.probabilities))
+    if leader is not None:
+        return leader
+    return most_shown_digit(state.recent_digits, state.last_chosen_digit)
+
+
 def _scored(state: CycleState) -> dict:
     if not state.probabilities:
         return {}
     payload = {"probabilities": state.probabilities}
-    digit = leading_digit(list(state.probabilities))
+    digit = chosen_digit(state)
     if digit is not None:
         payload["digit"] = digit
     return payload
@@ -121,15 +160,19 @@ async def run_cycle(broker, state: CycleState, now: datetime) -> dict:
     if not gate.allowed:
         return _record(state, "skip", gate.reason, **scored)
 
+    forced = None
     if state.probabilities is not None and leading_digit(list(state.probabilities)) is None:
-        return _record(state, "skip", "flat_prediction", probabilities=state.probabilities)
+        forced = most_shown_digit(state.recent_digits, state.last_chosen_digit)
+        if forced is None:
+            return _record(state, "skip", "flat_prediction", probabilities=state.probabilities)
 
     if state.feature_epoch is not None and state.latest_tick_epoch != state.feature_epoch:
         return _record(state, "skip", "prediction_overtaken", **scored)
 
     epoch_before = state.latest_tick_epoch
     quotes = []
-    for digit in range(10):
+    quote_digits = [forced] if forced is not None else list(range(10))
+    for digit in quote_digits:
         if digit and state.proposal_spacing_seconds > 0:
             await asyncio.sleep(state.proposal_spacing_seconds)
         started = time.monotonic()

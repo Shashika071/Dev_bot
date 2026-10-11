@@ -13,7 +13,7 @@ from app.digitmatch.api_redaction_probe import probe_summary
 from app.digitmatch.calibration import apply_temperature, fit_temperature
 from app.digitmatch.digits import extract_last_digit
 from app.digitmatch.ev import break_even_probability, estimated_net_ev, net_profit
-from app.digitmatch.execution import CycleState, apply_settlement, reconcile_unknown, run_cycle
+from app.digitmatch.execution import CycleState, apply_settlement, most_shown_digit, reconcile_unknown, run_cycle
 from app.digitmatch.fake_broker import FakeBroker
 from app.digitmatch.features import build_examples
 from app.digitmatch.ingestion import normalize_observation
@@ -28,7 +28,7 @@ from app.digitmatch.state import resolve_ui_state
 from app.digitmatch.store import SqlStore
 from app.models.digitmatch import DmTrainJob
 from app.digitmatch.training import run_training, select_best
-from app.models.digitmatch import DmContract
+from app.models.digitmatch import DmContract, DmTick
 
 
 def _risk(**overrides) -> RiskSnapshot:
@@ -347,7 +347,7 @@ async def test_lost_purchase_response_blocks_another_buy():
 @pytest.mark.asyncio
 async def test_disconnect_before_buy_does_not_mark_uncertain():
     broker = FakeBroker(disconnect_before_buy=True)
-    state = _state(mode="demo_explore")
+    state = _state(mode="demo_explore", probabilities=[0.05] * 9 + [0.55])
     result = await run_cycle(broker, state, datetime.now(timezone.utc))
     assert result["reason"] == "purchase_not_sent"
     assert state.uncertain is False
@@ -861,6 +861,63 @@ async def test_a_flat_model_does_not_keep_the_same_digit():
     assert result["reason"] == "flat_prediction"
     assert "digit" not in result
     assert broker.buys == []
+
+
+def test_equal_probabilities_use_the_most_common_recent_digit_then_the_next():
+    window = [4] * 60 + [8] * 40
+    assert most_shown_digit(window, None) == 4
+    assert most_shown_digit(window, 4) == 8
+    assert most_shown_digit(window[:99], None) is None
+
+
+@pytest.mark.asyncio
+async def test_a_flat_model_buys_the_most_shown_digit_once():
+    broker = FakeBroker()
+    state = _state(
+        mode="demo_explore",
+        probabilities=[0.1] * 10,
+        recent_digits=[4] * 60 + [8] * 40,
+    )
+    result = await run_cycle(broker, state, datetime.now(timezone.utc))
+    assert result["action"] == "buy"
+    assert result["digit"] == 4
+    assert broker.buys[0]["proposal_id"] == "prop-4"
+    again = _state(
+        mode="demo_explore",
+        probabilities=[0.1] * 10,
+        recent_digits=[4] * 60 + [8] * 40,
+        last_chosen_digit=4,
+    )
+    second = await run_cycle(broker, again, datetime.now(timezone.utc))
+    assert second["digit"] == 8
+
+
+def test_history_delete_removes_ticks_and_trade_profit_adds_up(tmp_path: Path):
+    store = _sqlite_store(tmp_path, "history.db")
+    with store.Session() as session:
+        session.add(
+            DmTick(
+                symbol="R_100",
+                broker_epoch=10,
+                quote_wire="1.23",
+                quote_text="1.23",
+                precision=2,
+                last_digit="3",
+                digit_value=3,
+                source="test",
+                ingestion_id="job",
+                dedup_key="tick-1",
+            )
+        )
+        session.add(DmContract(broker_contract_id="a", digit=1, status="sold", profit=-0.35, mode="demo_explore"))
+        session.add(DmContract(broker_contract_id="b", digit=2, status="sold", profit=2.57, mode="demo_explore"))
+        session.commit()
+    assert store.delete_history("R_100") == 1
+    assert store.tick_count("R_100") == 0
+    rows = store.list_trades()
+    assert rows[0]["broker_contract_id"] == "b"
+    assert rows[0]["running_profit"] == pytest.approx(2.22)
+    assert rows[1]["running_profit"] == pytest.approx(-0.35)
 
 
 @pytest.mark.asyncio

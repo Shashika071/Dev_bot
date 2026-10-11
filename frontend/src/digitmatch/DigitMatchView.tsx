@@ -34,7 +34,8 @@ const SKIP_REASON: Record<string, string> = {
   proposal_changed: 'The quote changed before the order was sent.',
   proposal_unreadable: 'The quote price or payout could not be checked.',
   filtered_evidence_missing: 'Filtered mode is off until a separate evidence check is recorded. Estimated value is not that evidence.',
-  flat_prediction: 'Every digit is equally likely, so no digit is kept.',
+  flat_prediction: 'Every digit is equally likely, and there are not yet 100 last digits to choose from.',
+  recent_digit: 'Every digit is equally likely, so the digit is the one that showed up most in the last 100 ticks.',
   mode_changed: 'The mode changed before the order was sent.',
   intent_not_durable: 'The order could not be saved before it was sent, so it was skipped.',
   recovery_stake_capped: 'The stake needed to cover the losses is above the daily loss room, so this trade was skipped.',
@@ -182,6 +183,7 @@ type Dashboard = {
     buy_price: number | null;
     total_payout: number | null;
     profit: number | null;
+    running_profit?: number | null;
     mode: string;
   }>;
   equity: Array<{ contract_id: string; equity: number; drawdown: number; profit: number }>;
@@ -459,6 +461,7 @@ export default function DigitMatchView() {
   const activeModelId = models.find((model) => model.is_active)?.id ?? data?.model?.id ?? null;
   const trainAlert = trainingBanner(data?.train_job ?? null, data?.ticks_stored ?? 0, data?.train_tick_limit ?? 200000, activeModelId);
   const trades = data?.trades ?? [];
+  const tradeTotal = trades.find((trade) => trade.running_profit != null)?.running_profit ?? 0;
   const wins = trades.filter((trade) => (trade.profit ?? 0) > 0).length;
   const losses = trades.filter((trade) => (trade.profit ?? 0) < 0).length;
   const settled = trades.filter((trade) => trade.profit != null).length;
@@ -653,7 +656,7 @@ export default function DigitMatchView() {
           <div className="dash-stat">
             <div className="dash-stat-label">Selected digit</div>
             <div className="dash-stat-value">{data?.decision?.digit ?? '—'}</div>
-            <div className="dash-stat-sub">{data?.decision?.digit == null ? 'Changes only when one digit is ahead' : 'From this check'}</div>
+            <div className="dash-stat-sub">{data?.decision?.digit == null ? 'Needs one digit ahead, or 100 last digits' : 'From this check. A tie uses the most common of the last 100, skipping the previous pick.'}</div>
           </div>
           <div className="dash-stat">
             <div className="dash-stat-label">Break-even</div>
@@ -757,24 +760,37 @@ export default function DigitMatchView() {
           <h3 className="section-title"><Database size={16} />Trade history</h3>
         </div>
         {data && data.trades.length > 0 ? (
-          <table className="dm-table">
-            <thead>
-              <tr><th>Contract</th><th>Digit</th><th>Status</th><th>Ask</th><th>Total payout</th><th>Profit</th><th>Mode</th></tr>
-            </thead>
-            <tbody>
-              {data.trades.map((trade) => (
-                <tr key={trade.broker_contract_id}>
-                  <td>{trade.broker_contract_id}</td>
-                  <td>{trade.digit}</td>
-                  <td>{trade.status}</td>
-                  <td>{trade.buy_price ?? '—'}</td>
-                  <td>{trade.total_payout ?? '—'}</td>
-                  <td>{trade.profit ?? '—'}</td>
-                  <td>{trade.mode}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <>
+            <p className="text-sm" style={{ marginBottom: 8 }}>
+              Total P/L{' '}
+              <strong style={{ color: tradeTotal >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                {`${tradeTotal >= 0 ? '+' : ''}${tradeTotal.toFixed(2)} ${data.currency || ''}`.trim()}
+              </strong>
+            </p>
+            <table className="dm-table">
+              <thead>
+                <tr><th>Contract</th><th>Digit</th><th>Status</th><th>Ask</th><th>Total payout</th><th>Profit</th><th>Running P/L</th><th>Mode</th></tr>
+              </thead>
+              <tbody>
+                {data.trades.map((trade) => (
+                  <tr key={trade.broker_contract_id}>
+                    <td>{trade.broker_contract_id}</td>
+                    <td>{trade.digit}</td>
+                    <td>{trade.status}</td>
+                    <td>{trade.buy_price ?? '—'}</td>
+                    <td>{trade.total_payout ?? '—'}</td>
+                    <td style={{ color: trade.profit == null ? undefined : trade.profit >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                      {trade.profit == null ? '—' : `${trade.profit >= 0 ? '+' : ''}${trade.profit.toFixed(2)}`}
+                    </td>
+                    <td style={{ color: trade.running_profit == null ? undefined : trade.running_profit >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                      {trade.running_profit == null ? '—' : `${trade.running_profit >= 0 ? '+' : ''}${trade.running_profit.toFixed(2)}`}
+                    </td>
+                    <td>{trade.mode}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
         ) : <p className="text-sm text-secondary">No demo contracts recorded.</p>}
       </div>
 
@@ -789,6 +805,10 @@ export default function DigitMatchView() {
             {press('Use saved ticks', () => post('/api/digitmatch/history/use-saved', {}, 'Copy started. The History line shows the count.'))}
             {press('Download history', () => post('/api/digitmatch/history/start', { target_ticks: 100000 }, 'History download started.'))}
             {press('Cancel download', () => post('/api/digitmatch/history/cancel', {}, 'Download cancel requested.'))}
+            {press('Delete all history', () => {
+              if (!window.confirm('Delete all saved Digit Matches ticks? Trades and models stay.')) return;
+              post('/api/digitmatch/history/delete', {}, 'Saved tick history deleted.');
+            })}
             <a className="btn btn-ghost" href={`${API}/api/digitmatch/history/export`}>Export CSV</a>
           </div>
         </div>
