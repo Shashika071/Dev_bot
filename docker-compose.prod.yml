@@ -83,38 +83,6 @@ services:
     networks:
       - deriv_net
 
-  digitmatch-worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    env_file: .env.prod
-    volumes:
-      - ./data:/app/data
-    depends_on:
-      postgres:
-        condition: service_healthy
-    command: python -m app.digitmatch.worker
-    mem_limit: 768m
-    networks:
-      - deriv_net
-
-  digitmatch-trainer:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    env_file: .env.prod
-    volumes:
-      - ./data:/app/data
-    depends_on:
-      postgres:
-        condition: service_healthy
-    command: python -m app.digitmatch.train_worker
-    mem_limit: 2048m
-    networks:
-      - deriv_net
-
   frontend:
     build:
       context: ./frontend
