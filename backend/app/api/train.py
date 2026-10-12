@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import get_db, async_session
 from app.features.tick_loader import load_ticks_dataframe, tick_coverage_stats
-from app.ml.registry import save_model_version
+from app.ml.registry import promote_model_version, save_model_version
 from app.ml.trainer import TrainingOrchestrator
 from app.models.quote import Quote
 from app.models.tick import Tick
@@ -750,7 +750,9 @@ async def _run_training_background(
             try:
                 async with async_session() as session:
                     mv = await save_model_version(session, meta, results, activate=False)
+                    mv = await promote_model_version(session, mv.version_tag)
                     results["model_version_id"] = mv.id
+                    results["is_active"] = bool(mv.is_active)
             except Exception as reg_err:
                 logger.warning("model_registry_persist_failed", error=str(reg_err))
 
@@ -1059,7 +1061,7 @@ async def promote_trained_model(
     body: PromoteBody,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Activate a challenger after evidence gates and a 14-day frozen shadow period."""
+    """Activate a saved model. Edge evidence and the 14-day wait are not required."""
     from app.ml.registry import promote_model_version
 
     try:

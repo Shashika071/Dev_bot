@@ -802,8 +802,8 @@ class TrainingOrchestrator:
                 },
                 "limitations": (
                     "Final test was evaluated once after selection on validation. "
-                    "Alerts remain disabled unless has_demonstrated_edge is true and "
-                    "live quote EV filters pass. Zero alerts is acceptable."
+                    "A saved model is turned on without an edge flag or a 14-day wait. "
+                    "Live quote, candle, confluence, and trend checks still apply."
                 ),
                 "version_tag": version_tag,
             },

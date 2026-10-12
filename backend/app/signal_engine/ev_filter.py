@@ -5,7 +5,7 @@ supports a conservative edge over the live quote break-even.
 An alert is only allowed when:
 1. Conservative empirical probability (Wilson CI lower) exceeds breakeven + margin
 2. Sufficient held-out samples exist near the predicted probability
-3. Model metadata marks demonstrated edge (unless disabled)
+3. Demonstrated-edge metadata is not required unless that check is turned on
 4. EV using conservative probability is positive
 """
 
@@ -41,7 +41,7 @@ class EVFilter:
         self,
         min_ev_margin: float | None = None,
         min_samples_in_range: int | None = None,
-        require_demonstrated_edge: bool = True,
+        require_demonstrated_edge: bool = False,
     ):
         from app.ops_prefs import load_ops_prefs
 

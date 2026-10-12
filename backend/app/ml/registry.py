@@ -36,8 +36,8 @@ async def save_model_version(
     """
     Insert a ModelVersion row from training metadata.
 
-    New runs stay inactive challengers unless activate is explicitly set.
-    Activation is reserved for an operator promotion after the shadow period.
+    New runs stay inactive until promote_model_version turns the latest one on.
+    Edge evidence and the 14-day wait are not required for that step.
     """
     results = results or {}
     direction = metadata.get("direction") or "upper"
@@ -123,7 +123,7 @@ async def promote_model_version(
     session: AsyncSession,
     version_tag: str,
 ) -> ModelVersion:
-    """Activate a challenger only after evidence and the frozen shadow period."""
+    """Turn a saved model on. Edge evidence and the 14-day wait are not required."""
     from app.ml.promotion import promotion_blockers
 
     existing = await session.execute(

@@ -1,6 +1,6 @@
 """Walk-forward windows, promotion gates, checksums, and frozen promotion."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -97,16 +97,15 @@ def test_contract_must_match_when_metadata_is_present():
     assert "barrier" in reason
 
 
-def test_promotion_requires_fourteen_day_shadow():
+def test_promotion_does_not_wait_for_edge_or_shadow():
     now = datetime.now(timezone.utc)
-    ready = {
-        "has_demonstrated_edge": True,
-        "lockbox_beats_baseline": True,
-        "shadow_started_at": (now - timedelta(days=15)).isoformat(),
+    fresh = {
+        "has_demonstrated_edge": False,
+        "lockbox_beats_baseline": False,
+        "shadow_started_at": now.isoformat(),
     }
-    assert promotion_blockers(ready, now=now) == []
-    fresh = dict(ready, shadow_started_at=now.isoformat())
-    assert any("14" in item for item in promotion_blockers(fresh, now=now))
+    assert promotion_blockers(fresh, now=now) == []
+    assert promotion_blockers({}, now=now) == []
 
 
 def test_aggregate_ignores_tiny_folds():

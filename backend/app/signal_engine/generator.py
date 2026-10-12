@@ -642,7 +642,7 @@ class SignalGenerator:
                 "does not have demonstrated historical edge. Research only. " + limitations
             )
 
-        validated = bool(best["has_edge"]) and not force_no_edge and not force_model_candles
+        validated = not force_no_edge and not force_model_candles
         signal = await self.lifecycle.create_signal(
             session,
             symbol=symbol,

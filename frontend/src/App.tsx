@@ -290,7 +290,7 @@ function explainTrainError(err?: string | null): { title: string; steps: string[
         'Data is split into train / validate / calibrate / test, then some rows are purged to prevent leakage.',
         'With ~1 day of data the calibration slice can fall below the minimum.',
         'In this Train page pick Starter (cal 20 / edge 15), or wait for 2–3 more days — no .env / VPS edit needed.',
-        'Training can still finish without “demonstrated edge”; alerts stay strict until edge is proven.',
+        'Training can finish without demonstrated edge. The model still turns on. Quote, candles, and trend still decide each trade.',
       ],
     };
   }
@@ -1592,7 +1592,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
           )}
           {models?.trained && (
             <p className="text-xs text-dim mt-3">
-              Auto alerts need <span className="text-cyan">Edge OK</span> + tick confluence + candle confirm (1m/5m) + EV gates.
+              Auto alerts use the active model plus tick confluence, candle confirm (1m/5m), the quote check, and the trend gate. Edge is shown for information.
               <span className="text-amber"> Analyze & Signal</span> uses the same gates with a confidence floor (default ≥95%).
               <span className="text-amber"> Analyze / Force</span> keep searching until <strong>3 signals/day</strong>.
               After each trade: cooldown (market rest) before the next — not immediate. Stop cancels.
@@ -1613,7 +1613,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
             <div className="empty-state">
               <div className="empty-icon"><ShieldCheck size={24} color="var(--text-dim)"/></div>
               <p className="text-sm font-medium text-secondary">No signals yet</p>
-              <p className="text-xs text-dim mt-1">Train a model, then Analyze & Signal — or wait for Edge OK auto alerts.</p>
+              <p className="text-xs text-dim mt-1">Train a model, then Analyze &amp; Signal — or wait for the quote, candles, and trend to line up.</p>
             </div>
           )}
 
@@ -2522,7 +2522,7 @@ function TrainView() {
             Model saved · {ts.result.timestamp?.slice(0, 15).replace('T', ' ')}
             {ts.result.has_demonstrated_edge
               ? ' · held-out edge found'
-              : ' · no demonstrated edge yet (alerts stay cautious)'}
+              : ' · no demonstrated edge — model still turns on'}
           </div>
         )}
 
@@ -2565,7 +2565,7 @@ function TrainView() {
           <div className={`alert ${ts.result.has_demonstrated_edge ? 'alert-success' : 'alert-warning'} mb-4`}>
             {ts.result.has_demonstrated_edge
               ? <><CheckCircle size={14}/>Selected pipeline shows held-out edge</>
-              : <><AlertTriangle size={14}/>No demonstrated edge — actionable alerts suppressed</>}
+              : <><AlertTriangle size={14}/>No demonstrated edge — model is on; quote, candles, and trend still apply</>}
             <div className="text-xs mt-1">{ts.result.edge_description}</div>
           </div>
 
