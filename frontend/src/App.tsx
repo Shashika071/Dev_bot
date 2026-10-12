@@ -628,7 +628,8 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
     breakeven_probability?: number; margin_over_breakeven?: number;
     meets_confidence?: boolean; confluence_met?: boolean;
     candle_confirm_met?: boolean; candle_confirm_score?: number;
-    candle_source?: string;
+    candle_source?: string; candle_profile?: string;
+    trend_state?: string;
     trend_side?: string | null;
     trend_ok?: boolean;
     selected_pipeline?: string; reason?: string;
@@ -1192,13 +1193,13 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
                   ? ` Components 1m ${Number(parts['1m'] ?? 0).toFixed(2)}, 5m ${Number(parts['5m'] ?? 0).toFixed(2)}, 15m ${Number(parts['15m'] ?? 0).toFixed(2)}.`
                   : '';
                 if (state === 'UPPER') {
-                  return <span className="badge badge-green" title={`${fresh}, score ${score}${since}.${componentText} Only a strong opposite is blocked.`}>Trend UP</span>;
+                  return <span className="badge badge-green" title={`${fresh}, score ${score}${since}.${componentText} A lower trade is blocked.`}>Trend UP</span>;
                 }
                 if (state === 'LOWER') {
-                  return <span className="badge badge-amber" title={`${fresh}, score ${score}${since}.${componentText} Only a strong opposite is blocked.`}>Trend DOWN</span>;
+                  return <span className="badge badge-amber" title={`${fresh}, score ${score}${since}.${componentText} An upper trade is blocked.`}>Trend DOWN</span>;
                 }
                 if (state === 'CONFLICTED') {
-                  return <span className="badge badge-dim" title={`${fresh}, score ${score}.${componentText} Timeframes disagree, so neither side is vetoed.`}>Trend MIXED</span>;
+                  return <span className="badge badge-dim" title={`${fresh}, score ${score}.${componentText} Timeframes disagree, so both sides are blocked.`}>Trend MIXED</span>;
                 }
                 if (state === 'NEUTRAL') {
                   return <span className="badge badge-dim" title={`${fresh}, score ${score}.${componentText} No confirmed strong trend.`}>Trend FLAT</span>;
@@ -1348,6 +1349,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
             {(() => {
               const src = analysisRows.find(r => r.candle_source)?.candle_source
                 || analysisRows.find(r => r.ok)?.candle_source;
+              const profile = analysisRows.find(r => r.candle_profile)?.candle_profile;
               if (!src && analysisRows.length === 0) return null;
               const official = src === 'deriv_official';
               const ticks = src === 'tick_aggregate';
@@ -1361,6 +1363,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
                       ? <span className="badge badge-amber">TICKS</span>
                       : <span className="badge badge-dim">{label}</span>}
                   <span className="text-dim"> · {label}</span>
+                  {profile && <span className="badge badge-dim"> · {profile}</span>}
                 </div>
               );
             })()}
@@ -1394,7 +1397,9 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
                           : a.candle_source
                             ? <span className="text-dim"> · {a.candle_source}</span>
                             : null}
-                      {a.trend_side
+                      {String(a.trend_state || '').toUpperCase() === 'CONFLICTED'
+                        ? <span className="text-amber"> · trend mixed (blocked)</span>
+                        : a.trend_side
                         ? (a.trend_ok
                           ? <span className="text-green"> · trend {a.trend_side}</span>
                           : <span className="text-dim"> · against {a.trend_side} trend</span>)
@@ -3147,7 +3152,7 @@ function SetupView({ online }: { online: boolean }) {
             <label className="form-label">Candle confirm min score</label>
             <input type="number" step="0.1" min={0} max={20} className="form-input" value={ops.candle_confirm_min_score}
               onChange={e => setOpsField('candle_confirm_min_score', Number(e.target.value))}/>
-            <div className="form-hint">{opsGuide.candle_confirm_min_score || '1m/5m/15m + patterns (engulfing, pin, soldiers…) default 4.'}</div>
+            <div className="form-hint">{opsGuide.candle_confirm_min_score || 'R_100 ±0.08 / 9m uses a 1m impulse or breakout aligned with the 5m anchor.'}</div>
           </div>
           <div className="form-group">
             <label className="form-label">Candle confirm min gap</label>
@@ -3188,7 +3193,7 @@ function SetupView({ online }: { online: boolean }) {
           <label className="text-sm flex items-center gap-2" style={{ cursor: 'pointer' }}>
             <input type="checkbox" checked={ops.hybrid_trend_gate_enabled}
               onChange={e => setOpsField('hybrid_trend_gate_enabled', e.target.checked)}/>
-            Block only a confirmed strong opposite trend
+            Block mixed markets and a strong opposite trend
           </label>
         </div>
 

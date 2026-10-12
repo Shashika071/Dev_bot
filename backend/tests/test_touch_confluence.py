@@ -49,6 +49,25 @@ def test_rejects_unreachable_barrier():
     assert result is None
 
 
+def test_008_contract_uses_price_point_reachability():
+    strategy = TouchConfluenceStrategy(min_reachability_ratio=0.75)
+    just_short = _features("upper")
+    just_short["price_range_60"] = 0.059
+    just_short["price_range_300"] = 0.059
+    assert strategy.evaluate(
+        just_short, current_price=100.0, barrier_distance=0.08
+    ) is None
+
+    reachable = _features("upper")
+    reachable["price_range_60"] = 0.061
+    reachable["price_range_300"] = 0.061
+    result = strategy.evaluate(
+        reachable, current_price=100.0, barrier_distance=0.08
+    )
+    assert result is not None
+    assert result.features["reachability_ratio"] == 0.061 / 0.08
+
+
 def test_registered_by_default():
     registry = StrategyRegistry()
     registry.register_defaults()

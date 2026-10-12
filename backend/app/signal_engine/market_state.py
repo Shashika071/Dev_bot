@@ -339,9 +339,11 @@ def direction_blocked_by_trend(
     *,
     enabled: bool = True,
 ) -> tuple[bool, str]:
-    """Block only a fresh, confirmed trend that is strongly opposite."""
+    """Block a fresh mixed market, and a fresh strong trend that is opposite."""
     if not enabled or snapshot is None:
         return False, "trend_gate_off"
+    if snapshot.fresh and snapshot.state == "CONFLICTED":
+        return True, "mixed_timeframes"
     if not snapshot.fresh or not snapshot.confirmed_strong:
         return False, snapshot.state.lower() if snapshot.state else "unavailable"
     opposite = {"UPPER": "lower", "LOWER": "upper"}.get(snapshot.state)

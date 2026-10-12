@@ -241,6 +241,16 @@ class SignalGenerator:
                         ticks=tick_frame,
                         min_score=float(ops.get("candle_confirm_min_score", 4.0)),
                         min_gap=float(ops.get("candle_confirm_min_gap", 1.0)),
+                        symbol=symbol,
+                        barrier_distance=float(barrier_distance),
+                        duration_seconds=int(
+                            duration_seconds
+                            or (
+                                conf_settings.duration_seconds
+                                if conf_settings
+                                else 540
+                            )
+                        ),
                     )
                     if not candle_result.confirmed:
                         logger.debug(
@@ -505,6 +515,7 @@ class SignalGenerator:
                                 "score": candle_result.score,
                                 "explanation": candle_result.explanation,
                                 "source": (candle_result.details or {}).get("source"),
+                                "profile": (candle_result.details or {}).get("profile"),
                             }
                             if candle_result is not None
                             else None
@@ -515,9 +526,9 @@ class SignalGenerator:
         if not passing:
             return None
 
-        # Hybrid gate: block only a fresh, confirmed strong opposite trend.
-        # Neutral and conflicted states do not veto, and trend is not added
-        # to the calibrated probability.
+        # Hybrid gate: a fresh mixed market blocks both sides. A fresh strong
+        # trend blocks only the opposite side. Flat does not veto, and trend
+        # strength is not added to the calibrated probability.
         from app.ops_prefs import ops as ops_value
         from app.signal_engine.market_state import (
             direction_blocked_by_trend,

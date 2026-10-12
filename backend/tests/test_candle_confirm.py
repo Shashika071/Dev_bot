@@ -66,3 +66,67 @@ def test_evaluate_ohlc_direct():
         source="deriv_official",
     )
     assert res.score > 0
+
+
+def test_r100_short_touch_uses_contract_specific_profile():
+    ticks = _synthetic_up_ticks(n=9000)
+    official = {
+        "1m": aggregate_ohlc(ticks, "1m", max_candles=80),
+        "5m": aggregate_ohlc(ticks, "5m", max_candles=40),
+        "15m": aggregate_ohlc(ticks, "15m", max_candles=24),
+        "source": "deriv_official",
+    }
+    result = evaluate_candle_confirm_best(
+        "upper",
+        official=official,
+        symbol="R_100",
+        barrier_distance=0.08,
+        duration_seconds=540,
+    )
+    assert result.confirmed is True
+    assert result.details["profile"] == "r100_touch_008_9m_v1"
+    assert result.details["diagnostics"]["anchor_aligned"] is True
+    assert result.details["diagnostics"]["trigger"] is True
+    assert result.details["patterns_enabled"] == [
+        "directional_impulse",
+        "five_bar_breakout",
+        "engulfing_support_only",
+    ]
+
+
+def test_r100_short_touch_rejects_opposite_anchor():
+    ticks = _synthetic_down_ticks(n=9000)
+    official = {
+        "1m": aggregate_ohlc(ticks, "1m", max_candles=80),
+        "5m": aggregate_ohlc(ticks, "5m", max_candles=40),
+        "15m": aggregate_ohlc(ticks, "15m", max_candles=24),
+        "source": "deriv_official",
+    }
+    result = evaluate_candle_confirm_best(
+        "upper",
+        official=official,
+        symbol="R_100",
+        barrier_distance=0.08,
+        duration_seconds=540,
+    )
+    assert result.confirmed is False
+    assert result.details["diagnostics"]["anchor_aligned"] is False
+    assert "5m anchor not aligned" in result.explanation
+
+
+def test_other_contract_keeps_generic_candle_path():
+    ticks = _synthetic_up_ticks(n=9000)
+    official = {
+        "1m": aggregate_ohlc(ticks, "1m", max_candles=80),
+        "5m": aggregate_ohlc(ticks, "5m", max_candles=40),
+        "15m": aggregate_ohlc(ticks, "15m", max_candles=24),
+        "source": "deriv_official",
+    }
+    result = evaluate_candle_confirm_best(
+        "upper",
+        official=official,
+        symbol="R_100",
+        barrier_distance=0.09,
+        duration_seconds=540,
+    )
+    assert result.details.get("profile") is None

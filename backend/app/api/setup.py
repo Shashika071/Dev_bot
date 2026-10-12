@@ -92,17 +92,21 @@ async def get_ops_prefs() -> dict:
             "confluence_min_score": "Minimum confluence score to fire.",
             "confluence_min_gap": "Min score gap between upper vs lower confluence.",
             "require_candle_confirm": (
-                "If on, 1m/5m/15m candles + patterns must agree "
-                "(engulfing, stars, harami, tweezers, soldiers/crows, pins, etc.)."
+                "For R_100 Touch ±0.08 / 9m, require a closed 1m expanding "
+                "impulse or breakout aligned with a stable 5m anchor."
             ),
-            "candle_confirm_min_score": "Minimum candle confirmation score (multi-TF + patterns).",
+            "candle_confirm_min_score": (
+                "Minimum candle score. The short-Touch profile ignores generic "
+                "Forex-style pattern collections."
+            ),
             "candle_confirm_min_gap": "Min score gap vs opposite candle direction.",
             "auto_pause_enabled": "Pause alerts if live results look worse than breakeven.",
             "auto_pause_min_resolved": "How many resolved live signals before auto-pause can fire.",
             "auto_pause_ci_margin": "Extra margin vs mean breakeven for the pause rule.",
             "hybrid_trend_gate_enabled": (
-                "If on, block a prediction only when the closed 1m/5m/15m trend "
-                "is a confirmed strong opposite. Neutral or mixed trends do not veto."
+                "If on, block both sides while the closed 1m/5m/15m trend is mixed, "
+                "and block a prediction that opposes a confirmed strong trend. "
+                "A flat trend does not veto."
             ),
         },
     }

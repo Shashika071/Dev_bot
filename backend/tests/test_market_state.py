@@ -104,7 +104,8 @@ def test_conflict_and_stale_state_do_not_veto():
     tracker.update(0.4, conflicted=True, bar_id=1, fresh=True)
     conflicted = tracker.update(0.4, conflicted=True, bar_id=2, fresh=True)
     assert conflicted.state == "CONFLICTED"
-    assert direction_blocked_by_trend("lower", conflicted) == (False, "conflicted")
+    assert direction_blocked_by_trend("lower", conflicted) == (True, "mixed_timeframes")
+    assert direction_blocked_by_trend("upper", conflicted) == (True, "mixed_timeframes")
 
     tracker.update(0.8, conflicted=False, bar_id=3, fresh=True)
     upper = tracker.update(0.8, conflicted=False, bar_id=4, fresh=True)

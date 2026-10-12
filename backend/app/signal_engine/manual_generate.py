@@ -537,6 +537,9 @@ async def generate_manual_signal(
             ticks=df,
             min_score=float(ops.get("candle_confirm_min_score", 4.0)),
             min_gap=float(ops.get("candle_confirm_min_gap", 1.0)),
+            symbol=conf.symbol,
+            barrier_distance=float(feature_barrier),
+            duration_seconds=int(conf.duration_seconds),
         )
         candle_met = bool(candle.confirmed) if require_candle else True
 
@@ -590,6 +593,7 @@ async def generate_manual_signal(
             "candle_confirm_score": candle.score,
             "candle_confirm_explanation": candle.explanation,
             "candle_source": (candle.details or {}).get("source"),
+            "candle_profile": (candle.details or {}).get("profile"),
             "trend_side": trend_side,
             "trend_ok": trend_ok,
             "trend_state": trend_state,

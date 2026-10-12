@@ -1,11 +1,12 @@
-"""
-Candle confirmation layer for One-Touch signals.
+"""Candle confirmation layer for One-Touch signals.
 
-Prefers Deriv official 1m + 5m + 15m OHLC; falls back to tick-aggregated
-candles if the public candle API is unavailable. Scores trend + classic
-candlestick patterns (engulfing, stars, harami, tweezers, soldiers/crows,
-abandoned baby, three methods, etc.). Extra gate on top of tick confluence
-+ ML confidence — does not replace tick training.
+The R_100, 0.08-price-point, 9-minute contract uses a deliberately small
+profile: 1-minute impulse/breakout evidence aligned with a non-trivial
+5-minute anchor. Named gap/reversal pattern collections are not used for that
+continuous synthetic market. Other contracts retain the legacy generic scorer.
+
+This is an extra gate on top of quote-exact EV and calibrated ML evidence; a
+candle pattern never changes the model probability or demonstrates edge.
 """
 
 from __future__ import annotations
@@ -518,6 +519,272 @@ def _score_tf(candles: list[dict], direction: str) -> tuple[float, list[str]]:
     return score, reasons
 
 
+SHORT_TOUCH_PROFILE = "r100_touch_008_9m_v1"
+
+
+def _uses_short_touch_profile(
+    symbol: str | None,
+    barrier_distance: float | None,
+    duration_seconds: int | None,
+) -> bool:
+    try:
+        barrier = float(barrier_distance)
+        duration = int(duration_seconds)
+    except (TypeError, ValueError):
+        return False
+    return (
+        str(symbol or "").upper() == "R_100"
+        and abs(barrier - 0.08) <= 1e-6
+        and duration == 540
+    )
+
+
+def _five_minute_anchor(candles: list[dict]) -> tuple[int, float]:
+    """Return a deadbanded 5m trend anchor and normalized strength."""
+    if len(candles) < 22:
+        return 0, 0.0
+    closes = [float(c["close"]) for c in candles]
+    ranges = [
+        max(float(c["high"]) - float(c["low"]), 1e-9)
+        for c in candles[-12:]
+    ]
+    scale = max(float(np.median(ranges)), 1e-9)
+    fast = _ema(closes, 8)
+    slow = _ema(closes, 21)
+    spread = (fast[-1] - slow[-1]) / scale
+    slope = (fast[-1] - fast[-2]) / scale
+    # Tiny EMA differences are noise, not an anchor.
+    if spread >= 0.08 and slope > 0:
+        return 1, float(min(abs(spread), 2.0))
+    if spread <= -0.08 and slope < 0:
+        return -1, float(min(abs(spread), 2.0))
+    return 0, float(min(abs(spread), 2.0))
+
+
+def _short_touch_evidence(
+    candles_1m: list[dict],
+    candles_5m: list[dict],
+    direction: str,
+    *,
+    barrier_distance: float,
+    duration_seconds: int,
+) -> tuple[float, list[str], dict]:
+    """Score only evidence relevant to a nearby barrier touch.
+
+    A direction needs a 5m anchor and a fresh 1m trigger. Engulfing is
+    supporting evidence only; it cannot trigger a trade by itself.
+    """
+    if len(candles_1m) < 22 or len(candles_5m) < 22:
+        return 0.0, ["insufficient closed candles"], {
+            "anchor_aligned": False,
+            "trigger": False,
+            "reachable": False,
+        }
+
+    recent = candles_1m[-22:]
+    latest = recent[-1]
+    previous = recent[-2]
+    o0, h0, l0, c0 = (
+        float(latest["open"]),
+        float(latest["high"]),
+        float(latest["low"]),
+        float(latest["close"]),
+    )
+    o1, c1 = float(previous["open"]), float(previous["close"])
+    candle_range = _range(h0, l0)
+    body = c0 - o0
+    body_ratio = abs(body) / candle_range
+    close_position = (c0 - l0) / candle_range
+    median_range = max(
+        float(
+            np.median(
+                [
+                    _range(float(c["high"]), float(c["low"]))
+                    for c in recent[-20:]
+                ]
+            )
+        ),
+        1e-9,
+    )
+    projected_excursion = median_range * np.sqrt(
+        max(float(duration_seconds) / 60.0, 1.0)
+    )
+    reachability_ratio = projected_excursion / max(float(barrier_distance), 1e-9)
+    reachable = bool(reachability_ratio >= 1.25)
+    range_expanding = bool(candle_range >= 0.80 * median_range)
+
+    sign = 1 if direction == "upper" else -1
+    anchor, anchor_strength = _five_minute_anchor(candles_5m)
+    anchor_aligned = anchor == sign
+    directional_body = body > 0 if sign > 0 else body < 0
+    closes_at_edge = close_position >= 0.72 if sign > 0 else close_position <= 0.28
+    impulse = bool(
+        directional_body
+        and body_ratio >= 0.55
+        and closes_at_edge
+        and range_expanding
+    )
+
+    prior = recent[-6:-1]
+    prior_high = max(float(c["high"]) for c in prior)
+    prior_low = min(float(c["low"]) for c in prior)
+    breakout = bool(
+        directional_body
+        and range_expanding
+        and (
+            (sign > 0 and c0 > prior_high and close_position >= 0.65)
+            or (sign < 0 and c0 < prior_low and close_position <= 0.35)
+        )
+    )
+    engulfing = bool(
+        (
+            sign > 0
+            and c1 < o1
+            and body > 0
+            and c0 >= o1
+            and o0 <= c1
+        )
+        or (
+            sign < 0
+            and c1 > o1
+            and body < 0
+            and c0 <= o1
+            and o0 >= c1
+        )
+    )
+    recent_bodies = [
+        float(c["close"]) - float(c["open"]) for c in recent[-3:]
+    ]
+    directional_count = sum(
+        value > 0 if sign > 0 else value < 0 for value in recent_bodies
+    )
+    trigger = bool(impulse or breakout)
+
+    score = 0.0
+    reasons: list[str] = []
+    if anchor_aligned:
+        score += 2.5
+        reasons.append(f"5m anchor {'up' if sign > 0 else 'down'}")
+    if impulse:
+        score += 2.0
+        reasons.append("1m expanding impulse")
+    if breakout:
+        score += 1.5
+        reasons.append("1m five-bar breakout")
+    if closes_at_edge and directional_body:
+        score += 1.0
+        reasons.append("1m close at directional edge")
+    if directional_count >= 2:
+        score += 1.0
+        reasons.append("2/3 directional 1m bodies")
+    if range_expanding:
+        score += 0.75
+        reasons.append("1m range active")
+    if engulfing:
+        score += 0.5
+        reasons.append("engulfing support")
+    if reachable:
+        score += 0.5
+        reasons.append("9m barrier reachable")
+
+    return score, reasons, {
+        "anchor": anchor,
+        "anchor_strength": anchor_strength,
+        "anchor_aligned": anchor_aligned,
+        "trigger": trigger,
+        "impulse": impulse,
+        "breakout": breakout,
+        "engulfing_support": engulfing,
+        "body_ratio": float(body_ratio),
+        "close_position": float(close_position),
+        "range_expanding": range_expanding,
+        "median_1m_range": float(median_range),
+        "projected_9m_excursion": float(projected_excursion),
+        "reachability_ratio": float(reachability_ratio),
+        "reachable": reachable,
+    }
+
+
+def _evaluate_short_touch_profile(
+    candles_1m: list[dict],
+    candles_5m: list[dict],
+    direction: str,
+    *,
+    barrier_distance: float,
+    duration_seconds: int,
+    min_score: float,
+    min_gap: float,
+    source: str,
+) -> CandleConfirmResult:
+    score, reasons, diagnostics = _short_touch_evidence(
+        candles_1m,
+        candles_5m,
+        direction,
+        barrier_distance=barrier_distance,
+        duration_seconds=duration_seconds,
+    )
+    opposite = "lower" if direction == "upper" else "upper"
+    opposite_score, _, opposite_diagnostics = _short_touch_evidence(
+        candles_1m,
+        candles_5m,
+        opposite,
+        barrier_distance=barrier_distance,
+        duration_seconds=duration_seconds,
+    )
+    is_official = str(source) == "deriv_official"
+    need_score = max(float(min_score) + (1.5 if is_official else 0.0), 6.0)
+    need_gap = max(float(min_gap) + (0.5 if is_official else 0.0), 1.5)
+    gap = score - opposite_score
+    prerequisites = (
+        diagnostics["reachable"]
+        and diagnostics["anchor_aligned"]
+        and diagnostics["trigger"]
+    )
+    confirmed = bool(
+        prerequisites and score >= need_score and gap >= need_gap
+    )
+    missing = []
+    if not diagnostics["reachable"]:
+        missing.append("barrier not reachable from recent 1m range")
+    if not diagnostics["anchor_aligned"]:
+        missing.append("5m anchor not aligned")
+    if not diagnostics["trigger"]:
+        missing.append("no expanding 1m impulse or breakout")
+    explanation = (
+        f"candle_confirm[{SHORT_TOUCH_PROFILE}] {direction}: score={score:.1f} "
+        f"(opp={opposite_score:.1f}, gap={gap:.1f}) "
+        f"need≥{need_score:.1f}/{need_gap:.1f} — "
+        + (
+            "; ".join(reasons)
+            if confirmed
+            else "; ".join(missing or reasons or ["insufficient evidence"])
+        )
+    )
+    return CandleConfirmResult(
+        confirmed=confirmed,
+        direction=direction,
+        score=float(score),
+        opposite_score=float(opposite_score),
+        explanation=explanation,
+        details={
+            "profile": SHORT_TOUCH_PROFILE,
+            "source": source,
+            "barrier_distance": float(barrier_distance),
+            "duration_seconds": int(duration_seconds),
+            "effective_min_score": need_score,
+            "effective_min_gap": need_gap,
+            "patterns_enabled": [
+                "directional_impulse",
+                "five_bar_breakout",
+                "engulfing_support_only",
+            ],
+            "diagnostics": diagnostics,
+            "opposite_diagnostics": opposite_diagnostics,
+            "reasons": reasons,
+        },
+    )
+
+
 async def fetch_deriv_official_candles(client: Any, symbol: str) -> dict[str, list[dict]]:
     """
     Pull official Deriv OHLC for 1m / 5m / 15m on the public WS client.
@@ -548,6 +815,9 @@ def evaluate_candle_confirm_ohlc(
     min_score: float = 4.0,
     min_gap: float = 1.0,
     source: str = "ohlc",
+    symbol: str | None = None,
+    barrier_distance: float | None = None,
+    duration_seconds: int | None = None,
 ) -> CandleConfirmResult:
     """Confirm direction from pre-built 1m/5m/15m OHLC lists."""
     direction = str(direction).lower()
@@ -561,6 +831,17 @@ def evaluate_candle_confirm_ohlc(
     c1 = _drop_forming_candle(candles_1m) if is_official else list(candles_1m)
     c5 = _drop_forming_candle(candles_5m) if is_official else list(candles_5m)
     c15 = _drop_forming_candle(candles_15m) if is_official else list(candles_15m)
+    if _uses_short_touch_profile(symbol, barrier_distance, duration_seconds):
+        return _evaluate_short_touch_profile(
+            c1,
+            c5,
+            direction,
+            barrier_distance=float(barrier_distance),
+            duration_seconds=int(duration_seconds),
+            min_score=min_score,
+            min_gap=min_gap,
+            source=source,
+        )
     need_score = float(min_score) + (1.5 if is_official else 0.0)
     need_gap = float(min_gap) + (0.5 if is_official else 0.0)
 
@@ -627,6 +908,9 @@ def evaluate_candle_confirm(
     *,
     min_score: float = 4.0,
     min_gap: float = 1.0,
+    symbol: str | None = None,
+    barrier_distance: float | None = None,
+    duration_seconds: int | None = None,
 ) -> CandleConfirmResult:
     """
     Fallback: confirm direction using 1m/5m/15m candles built from ticks.
@@ -656,7 +940,16 @@ def evaluate_candle_confirm(
     c5 = aggregate_ohlc(pairs, "5m", max_candles=40)
     c15 = aggregate_ohlc(pairs, "15m", max_candles=24)
     return evaluate_candle_confirm_ohlc(
-        c1, c5, c15, direction, min_score=min_score, min_gap=min_gap, source="tick_aggregate"
+        c1,
+        c5,
+        c15,
+        direction,
+        min_score=min_score,
+        min_gap=min_gap,
+        source="tick_aggregate",
+        symbol=symbol,
+        barrier_distance=barrier_distance,
+        duration_seconds=duration_seconds,
     )
 
 
@@ -667,6 +960,9 @@ def evaluate_candle_confirm_best(
     ticks: Iterable[tuple[int, float]] | pd.DataFrame | None = None,
     min_score: float = 4.0,
     min_gap: float = 1.0,
+    symbol: str | None = None,
+    barrier_distance: float | None = None,
+    duration_seconds: int | None = None,
 ) -> CandleConfirmResult:
     """Use official Deriv OHLC when present; else tick-aggregated fallback."""
     if official and official.get("1m") and official.get("5m"):
@@ -678,10 +974,19 @@ def evaluate_candle_confirm_best(
             min_score=min_score,
             min_gap=min_gap,
             source=str(official.get("source") or "deriv_official"),
+            symbol=symbol,
+            barrier_distance=barrier_distance,
+            duration_seconds=duration_seconds,
         )
     if ticks is not None:
         return evaluate_candle_confirm(
-            ticks, direction, min_score=min_score, min_gap=min_gap
+            ticks,
+            direction,
+            min_score=min_score,
+            min_gap=min_gap,
+            symbol=symbol,
+            barrier_distance=barrier_distance,
+            duration_seconds=duration_seconds,
         )
     return CandleConfirmResult(
         False, str(direction), 0.0, 0.0, "no official candles or ticks", {}
