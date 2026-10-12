@@ -26,14 +26,18 @@ def _parse_ts(value: Any) -> Optional[datetime]:
         return None
 
 
-async def save_and_activate_model_version(
+async def save_model_version(
     session: AsyncSession,
     metadata: dict,
     results: Optional[dict] = None,
+    *,
+    activate: bool = False,
 ) -> ModelVersion:
     """
-    Insert a ModelVersion row from training metadata and mark it active
-    for its (symbol, direction). Deactivates prior active rows for that pair.
+    Insert a ModelVersion row from training metadata.
+
+    New runs stay inactive challengers unless activate is explicitly set.
+    Activation is reserved for an operator promotion after the shadow period.
     """
     results = results or {}
     direction = metadata.get("direction") or "upper"
@@ -44,14 +48,14 @@ async def save_and_activate_model_version(
     split = metadata.get("split_info") or {}
     paths = metadata.get("paths") or {}
 
-    # Deactivate previous active models for this symbol+direction
-    await session.execute(
-        update(ModelVersion)
-        .where(ModelVersion.symbol == symbol)
-        .where(ModelVersion.direction == direction)
-        .where(ModelVersion.is_active.is_(True))
-        .values(is_active=False)
-    )
+    if activate:
+        await session.execute(
+            update(ModelVersion)
+            .where(ModelVersion.symbol == symbol)
+            .where(ModelVersion.direction == direction)
+            .where(ModelVersion.is_active.is_(True))
+            .values(is_active=False)
+        )
 
     existing = await session.execute(
         select(ModelVersion).where(ModelVersion.version_tag == version_tag)
@@ -84,7 +88,7 @@ async def save_and_activate_model_version(
     row.selected_signal_count = metrics.get("selected_signal_count")
     row.has_demonstrated_edge = bool(metadata.get("has_demonstrated_edge", False))
     row.edge_description = metadata.get("edge_description")
-    row.is_active = True
+    row.is_active = bool(activate)
     row.alerts_paused = False
     row.pause_reason = None
     row.model_path = metadata.get("model_path") or paths.get(algorithm)
@@ -96,14 +100,59 @@ async def save_and_activate_model_version(
     await session.commit()
     await session.refresh(row)
     logger.info(
-        "model_version_activated",
+        "model_version_saved",
         id=row.id,
         version_tag=version_tag,
         direction=direction,
+        active=row.is_active,
         has_edge=row.has_demonstrated_edge,
     )
     return row
 
+
+async def save_and_activate_model_version(
+    session: AsyncSession,
+    metadata: dict,
+    results: Optional[dict] = None,
+) -> ModelVersion:
+    """Backward-compatible explicit activation. Prefer promote_model_version."""
+    return await save_model_version(session, metadata, results, activate=True)
+
+
+async def promote_model_version(
+    session: AsyncSession,
+    version_tag: str,
+) -> ModelVersion:
+    """Activate a challenger only after evidence and the frozen shadow period."""
+    from app.ml.promotion import promotion_blockers
+
+    existing = await session.execute(
+        select(ModelVersion).where(ModelVersion.version_tag == version_tag)
+    )
+    row = existing.scalar_one_or_none()
+    if row is None:
+        raise ValueError(f"Unknown model version {version_tag}")
+    try:
+        metadata = json.loads(row.metadata_json or "{}")
+    except json.JSONDecodeError:
+        metadata = {}
+    metadata["has_demonstrated_edge"] = bool(row.has_demonstrated_edge)
+    blockers = promotion_blockers(metadata)
+    if blockers:
+        raise ValueError("Promotion refused: " + "; ".join(blockers))
+
+    await session.execute(
+        update(ModelVersion)
+        .where(ModelVersion.symbol == row.symbol)
+        .where(ModelVersion.direction == row.direction)
+        .where(ModelVersion.is_active.is_(True))
+        .values(is_active=False)
+    )
+    row.is_active = True
+    await session.commit()
+    await session.refresh(row)
+    logger.info("model_version_promoted", version_tag=version_tag, id=row.id)
+    return row
 
 async def get_active_model_version(
     session: AsyncSession,

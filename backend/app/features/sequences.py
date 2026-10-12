@@ -1,7 +1,7 @@
 """
 Price-sequence builders for LSTM models.
 
-Sequences use only ticks strictly before the decision/entry time.
+Sequences use ticks at or before the decision/entry time, matching tabular features.
 Contract fields (barrier distance, direction, duration) are appended as constants.
 """
 
@@ -28,7 +28,7 @@ def build_price_sequence(
       2: direction (+1 upper / -1 lower)
       3: duration_seconds / 540
     """
-    recent = ticks_df[ticks_df["epoch"] < entry_epoch].tail(seq_len)
+    recent = ticks_df[ticks_df["epoch"] <= int(entry_epoch)].tail(seq_len)
     if len(recent) < seq_len:
         return None
 

@@ -42,6 +42,7 @@ class OpsPrefsBody(BaseModel):
     auto_pause_enabled: bool = True
     auto_pause_min_resolved: int = Field(20, ge=5, le=200)
     auto_pause_ci_margin: float = Field(0.0, ge=-0.1, le=0.1)
+    hybrid_trend_gate_enabled: bool = True
 
 
 @router.get("/ops-prefs")
@@ -68,6 +69,7 @@ async def get_ops_prefs() -> dict:
             "auto_pause_enabled",
             "auto_pause_min_resolved",
             "auto_pause_ci_margin",
+            "hybrid_trend_gate_enabled",
         ],
         "stay_in_env": [
             "POSTGRES_*",
@@ -98,6 +100,10 @@ async def get_ops_prefs() -> dict:
             "auto_pause_enabled": "Pause alerts if live results look worse than breakeven.",
             "auto_pause_min_resolved": "How many resolved live signals before auto-pause can fire.",
             "auto_pause_ci_margin": "Extra margin vs mean breakeven for the pause rule.",
+            "hybrid_trend_gate_enabled": (
+                "If on, block a prediction only when the closed 1m/5m/15m trend "
+                "is a confirmed strong opposite. Neutral or mixed trends do not veto."
+            ),
         },
     }
 

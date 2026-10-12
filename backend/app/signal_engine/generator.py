@@ -111,6 +111,7 @@ class SignalGenerator:
         require_touch_confluence: Optional[bool] = None,
         strategy_barrier_distance: Optional[float] = None,
         official_candles: Optional[dict] = None,
+        duration_seconds: Optional[int] = None,
     ) -> Optional[dict]:
         """
         confidence_override: allow signals without demonstrated edge, but only when
@@ -292,6 +293,24 @@ class SignalGenerator:
             has_edge = pack["has_edge"]
             version_id = pack["version_id"]
             meta = pack.get("metadata") or {}
+            from app.ml.contract_spec import model_matches_contract
+
+            contract_ok, contract_reason = model_matches_contract(
+                meta,
+                symbol=symbol,
+                direction=direction,
+                barrier_distance=float(barrier_distance),
+                duration_seconds=duration_seconds,
+                entry_delay_seconds=int(settings.manual_entry_delay_seconds),
+                barrier_unit="relative_price_points" if meta.get("barrier_unit") else None,
+            )
+            if not contract_ok:
+                logger.info(
+                    "signal_contract_mismatch",
+                    direction=direction,
+                    reason=contract_reason,
+                )
+                continue
             selected_pipeline = meta.get("selected_pipeline", "catboost")
             component_probs: dict = {}
 
@@ -496,9 +515,14 @@ class SignalGenerator:
         if not passing:
             return None
 
-        # If EMA + recent return agree, do not buy the opposite side.
-        # Stops a saturated Upper model (p≈100%) from trading into a downtrend.
-        from app.signal_engine.trend_side import market_trend_side
+        # Hybrid gate: block only a fresh, confirmed strong opposite trend.
+        # Neutral and conflicted states do not veto, and trend is not added
+        # to the calibrated probability.
+        from app.ops_prefs import ops as ops_value
+        from app.signal_engine.market_state import (
+            direction_blocked_by_trend,
+            evaluate_market_state,
+        )
 
         trend_frame = None
         if features_by_direction:
@@ -508,17 +532,36 @@ class SignalGenerator:
                     break
         if trend_frame is None:
             trend_frame = features_df
-        trend_side = market_trend_side(trend_frame)
-        if trend_side:
-            aligned = [p for p in passing if p.get("direction") == trend_side]
-            if not aligned:
+        market_snapshot = evaluate_market_state(
+            official_candles=ohlc_set,
+            features_df=trend_frame,
+            persist=True,
+        )
+        trend_enabled = bool(ops_value("hybrid_trend_gate_enabled"))
+        kept = []
+        for candidate_row in passing:
+            blocked, block_reason = direction_blocked_by_trend(
+                str(candidate_row.get("direction")),
+                market_snapshot,
+                enabled=trend_enabled,
+            )
+            candidate_row["trend_gate"] = {
+                **market_snapshot.as_dict(),
+                "blocked": blocked,
+                "reason": block_reason,
+            }
+            if blocked:
                 logger.info(
-                    "signal_blocked_against_trend",
-                    trend=trend_side,
-                    candidates=[p.get("direction") for p in passing],
+                    "signal_blocked_strong_opposite_trend",
+                    trend=market_snapshot.state,
+                    direction=candidate_row.get("direction"),
+                    reason=block_reason,
                 )
-                return None
-            passing = aligned
+                continue
+            kept.append(candidate_row)
+        if not kept:
+            return None
+        passing = kept
 
         # Confidence/force: highest model probability; normal: best EV
         if force_no_edge or confidence_override or force_model_candles:
@@ -616,6 +659,8 @@ class SignalGenerator:
                 "force_no_edge": force_no_edge,
                 "force_model_candles": force_model_candles,
                 "confidence_override": confidence_override,
+                "trend_gate": best.get("trend_gate"),
+                "research_only": bool(force_no_edge or force_model_candles or confidence_override),
             },
             explanation=explanation,
             evidence_limitations=limitations,

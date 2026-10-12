@@ -14,7 +14,21 @@ import { playSignalAlertSound, unlockSignalAudio } from './signalAlert';
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-interface ApiStatus { connected: boolean; deriv_connected: boolean; ticks_collected: number; quotes_collected: number; symbol?: string; }
+interface ApiStatus {
+  connected: boolean;
+  deriv_connected: boolean;
+  ticks_collected: number;
+  quotes_collected: number;
+  symbol?: string;
+  market_state?: {
+    state?: string;
+    score?: number;
+    fresh?: boolean;
+    stable_since?: string | null;
+    components?: Record<string, number | boolean>;
+    reason?: string;
+  } | null;
+}
 interface SigData {
   signal_id: string; symbol: string; direction: string; probability: number;
   calibrated_probability?: number; created_at: string; status: string;
@@ -349,6 +363,7 @@ export default function App() {
       ticks_collected: Number(raw.ticks_collected ?? 0),
       quotes_collected: Number(raw.quotes_collected ?? 0),
       symbol: raw.symbol ?? undefined,
+      market_state: raw.market_state ?? null,
     });
   }, []);
 
@@ -1167,15 +1182,36 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
                   ? <span className="badge badge-dim">offline</span>
                   : null}
               {(() => {
+                const market = apiStatus?.market_state;
+                const state = String(market?.state || '').toUpperCase();
+                const score = typeof market?.score === 'number' ? market.score.toFixed(2) : null;
+                const since = market?.stable_since ? ` since ${market.stable_since}` : '';
+                const fresh = market?.fresh ? 'closed 1m/5m/15m' : 'waiting for closed candles';
+                const parts = market?.components;
+                const componentText = parts
+                  ? ` Components 1m ${Number(parts['1m'] ?? 0).toFixed(2)}, 5m ${Number(parts['5m'] ?? 0).toFixed(2)}, 15m ${Number(parts['15m'] ?? 0).toFixed(2)}.`
+                  : '';
+                if (state === 'UPPER') {
+                  return <span className="badge badge-green" title={`${fresh}, score ${score}${since}.${componentText} Only a strong opposite is blocked.`}>Trend UP</span>;
+                }
+                if (state === 'LOWER') {
+                  return <span className="badge badge-amber" title={`${fresh}, score ${score}${since}.${componentText} Only a strong opposite is blocked.`}>Trend DOWN</span>;
+                }
+                if (state === 'CONFLICTED') {
+                  return <span className="badge badge-dim" title={`${fresh}, score ${score}.${componentText} Timeframes disagree, so neither side is vetoed.`}>Trend MIXED</span>;
+                }
+                if (state === 'NEUTRAL') {
+                  return <span className="badge badge-dim" title={`${fresh}, score ${score}.${componentText} No confirmed strong trend.`}>Trend FLAT</span>;
+                }
                 const trend = analysisRows.find(r => r.trend_side)?.trend_side || null;
                 if (!analysisRows.some(r => r.ok) && !trend) return null;
                 if (trend === 'upper') {
-                  return <span className="badge badge-green" title="EMA and last 60 ticks are up — only Upper can trade">Trend UP</span>;
+                  return <span className="badge badge-green" title="Short-term analysis only. The worker trend is not available yet.">Trend UP</span>;
                 }
                 if (trend === 'lower') {
-                  return <span className="badge badge-amber" title="EMA and last 60 ticks are down — only Lower can trade">Trend DOWN</span>;
+                  return <span className="badge badge-amber" title="Short-term analysis only. The worker trend is not available yet.">Trend DOWN</span>;
                 }
-                return <span className="badge badge-dim" title="Trend mixed — either side can trade if it passes">Trend FLAT</span>;
+                return <span className="badge badge-dim" title="No confirmed strong trend. Either side can pass the other gates.">Trend FLAT</span>;
               })()}
               <button
                 type="button"
@@ -1809,6 +1845,7 @@ function TrainView() {
           auto_pause_enabled: true,
           auto_pause_min_resolved: 20,
           auto_pause_ci_margin: 0,
+          hybrid_trend_gate_enabled: true,
         }),
       });
       steps.push(`Bot gates → Analyze 95%, confluence + candle confirm on, live cal samples ${liveCal}`);
@@ -2612,6 +2649,7 @@ type OpsPrefs = {
   auto_pause_enabled: boolean;
   auto_pause_min_resolved: number;
   auto_pause_ci_margin: number;
+  hybrid_trend_gate_enabled: boolean;
   guide?: Record<string, string>;
 };
 
@@ -2631,6 +2669,7 @@ const DEFAULT_OPS: OpsPrefs = {
   auto_pause_enabled: true,
   auto_pause_min_resolved: 20,
   auto_pause_ci_margin: 0,
+  hybrid_trend_gate_enabled: true,
 };
 
 type TradePrefs = {
@@ -2727,6 +2766,7 @@ function SetupView({ online }: { online: boolean }) {
           auto_pause_enabled: r.auto_pause_enabled,
           auto_pause_min_resolved: r.auto_pause_min_resolved,
           auto_pause_ci_margin: r.auto_pause_ci_margin,
+          hybrid_trend_gate_enabled: r.hybrid_trend_gate_enabled !== false,
         });
         if (r.guide) setOpsGuide(r.guide);
       })
@@ -3144,6 +3184,11 @@ function SetupView({ online }: { online: boolean }) {
             <input type="checkbox" checked={ops.auto_pause_enabled}
               onChange={e => setOpsField('auto_pause_enabled', e.target.checked)}/>
             Auto-pause on live underperformance
+          </label>
+          <label className="text-sm flex items-center gap-2" style={{ cursor: 'pointer' }}>
+            <input type="checkbox" checked={ops.hybrid_trend_gate_enabled}
+              onChange={e => setOpsField('hybrid_trend_gate_enabled', e.target.checked)}/>
+            Block only a confirmed strong opposite trend
           </label>
         </div>
 

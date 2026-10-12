@@ -16,6 +16,15 @@ def test_embargo_keeps_non_overlapping():
         assert b - a >= 540
 
 
+def test_embargo_datetime_index_does_not_raise():
+    epochs = list(range(1_700_000_000, 1_700_000_000 + 60 * 30, 60))
+    index = pd.to_datetime(epochs, unit="s", utc=True)
+    times = pd.Series(index, index=index)
+    keep = embargo_overlapping_samples(times, horizon_seconds=540)
+    assert len(keep) == len(times)
+    assert int(keep.sum()) >= 3
+
+
 def test_embargo_empty():
     keep = embargo_overlapping_samples(pd.Series(dtype="datetime64[ns, UTC]"), 540)
     assert keep.empty

@@ -18,18 +18,16 @@ import structlog
 from sklearn.metrics import brier_score_loss, roc_auc_score
 
 from app.config import settings
-from app.features.dataset import chronological_split, embargo_overlapping_samples, walk_forward_splits
-from app.features.labels import filter_resolved_labels, label_touch_outcomes
-from app.features.pipeline import (
-    build_features,
-    drop_zero_variance_columns,
-    get_feature_columns,
-    select_feature_matrix,
-    validate_no_future_leakage,
-)
+from app.features.dataset import chronological_split, embargo_overlapping_samples
+from app.features.pipeline import apply_feature_prep, fit_feature_prep
+from app.ml.artifacts import checksum_paths, dataset_manifest_id, write_run_manifest
+from app.ml.dataset_builder import build_touch_dataset
 from app.ml.quote_match import match_quotes_to_entries
-from app.features.sequences import build_price_sequence, stack_sequences
-from app.ml.baseline import HistoricalFrequencyBaseline, LogisticRegressionBaseline
+from app.ml.baseline import (
+    HistoricalFrequencyBaseline,
+    LogisticRegressionBaseline,
+    VolatilityDistanceBaseline,
+)
 from app.ml.calibration import ProbabilityCalibrator, compute_calibration_metrics
 from app.ml.catboost_model import CatBoostTouchModel
 from app.ml.ensemble import (
@@ -40,6 +38,8 @@ from app.ml.ensemble import (
 from app.ml.evaluation import evaluate_model
 from app.ml.lstm_model import LSTMTouchModel
 from app.ml.report import write_evaluation_report
+from app.ml.validation_gates import GateThresholds, evaluate_promotion_gates
+from app.ml.walk_forward_eval import evaluate_outer_folds, fractions_for_lockbox, lockbox_start_index
 from app.ml.xgboost_model import XGBoostTouchModel
 
 logger = structlog.get_logger(__name__)
@@ -137,26 +137,27 @@ class TrainingOrchestrator:
         )
 
         entry_times = self._sample_entry_times(ticks_df, sampling_interval_seconds)
-        labels_df = label_touch_outcomes(
-            ticks_df=ticks_df,
-            entry_times=entry_times,
-            duration_seconds=self.duration_seconds,
+        built = build_touch_dataset(
+            ticks_df,
+            entry_times,
             barrier_distance=self.barrier_distance,
             barrier_direction=self.barrier_direction,
+            duration_seconds=self.duration_seconds,
             entry_delay_seconds=self.entry_delay_seconds,
+            seq_len=self.seq_len,
             min_window_ticks=settings.min_label_window_ticks,
         )
-        unresolved = int((~labels_df["resolved"]).sum()) if not labels_df.empty else 0
-        labels_df = filter_resolved_labels(labels_df)
+        unresolved = built.unresolved
+        resolved_count = built.resolved_before_alignment
         logger.info(
             "labels_computed",
-            resolved=len(labels_df),
+            resolved=resolved_count,
             unresolved=unresolved,
-            touched=int(labels_df["touched"].sum()) if not labels_df.empty else 0,
+            aligned=built.aligned_rows,
         )
 
         min_labels = 100
-        if labels_df.empty or len(labels_df) < min_labels:
+        if resolved_count < min_labels:
             span_s = (
                 int(ticks_df["epoch"].max()) - int(ticks_df["epoch"].min())
                 if not ticks_df.empty
@@ -168,77 +169,30 @@ class TrainingOrchestrator:
             return {
                 "error": (
                     f"Insufficient resolved labeled data for training: "
-                    f"{len(labels_df)} resolved (need ≥{min_labels}). "
+                    f"{resolved_count} resolved (need ≥{min_labels}). "
                     f"Non-overlapping samples every {sampling_interval_seconds}s need "
                     f"~{need_span_h:.1f}h continuous tick coverage "
                     f"(current span ≈{span_s/3600.0:.1f}h, {len(ticks_df):,} ticks). "
                     f"Let the worker collect longer, or POST /train/download?target_ticks=0 "
                     f"to pull the last ~24h from Deriv, then train again."
                 ),
-                "count": len(labels_df),
+                "count": resolved_count,
                 "min_required": min_labels,
                 "span_hours": round(span_s / 3600.0, 2),
                 "sampling_interval_seconds": sampling_interval_seconds,
             }
 
-        rows = []
-        feature_epochs = []
-        entry_epochs = []
-        for _, row in labels_df.iterrows():
-            entry_time = row["entry_time"]
-            entry_epoch = (
-                int(entry_time.timestamp())
-                if hasattr(entry_time, "timestamp")
-                else int(entry_time)
-            )
-            recent_ticks = ticks_df[ticks_df["epoch"] < entry_epoch].tail(600)
-            if len(recent_ticks) < 100:
-                continue
+        if built.aligned_rows < 100:
+            return {"error": "Could not compute enough aligned feature/sequence rows", "count": built.aligned_rows}
 
-            features = build_features(
-                recent_ticks,
-                barrier_distance=self.barrier_distance,
-                barrier_direction=self.barrier_direction,
-            )
-            if features.empty:
-                continue
-
-            seq = build_price_sequence(
-                ticks_df,
-                entry_epoch=entry_epoch,
-                barrier_distance=self.barrier_distance,
-                barrier_direction=self.barrier_direction,
-                duration_seconds=self.duration_seconds,
-                seq_len=self.seq_len,
-            )
-            if seq is None:
-                continue
-
-            feat_row = features.iloc[-1].to_dict()
-            feat_epoch = int(feat_row.get("epoch", recent_ticks["epoch"].iloc[-1]))
-            feature_epochs.append(feat_epoch)
-            entry_epochs.append(entry_epoch)
-            rows.append(
-                {
-                    "features": feat_row,
-                    "sequence": seq,
-                    "touched": int(bool(row["touched"])),
-                    "entry_time": entry_time,
-                }
-            )
-
-        if len(rows) < 100:
-            return {"error": "Could not compute enough aligned feature/sequence rows", "count": len(rows)}
-
-        if not validate_no_future_leakage(feature_epochs, entry_epochs):
+        if built.leakage:
             return {"error": "Future leakage detected in feature construction"}
 
-        features_matrix = select_feature_matrix(pd.DataFrame([r["features"] for r in rows]))
-        sequences = stack_sequences([r["sequence"] for r in rows])
-        labels_aligned = pd.Series([r["touched"] for r in rows], name="touched")
-        times_aligned = pd.Series([r["entry_time"] for r in rows], name="entry_time")
-        feature_cols = drop_zero_variance_columns(features_matrix, get_feature_columns())
-        features_matrix = features_matrix[feature_cols]
+        features_matrix = built.features
+        sequences = built.sequences
+        labels_aligned = built.labels
+        times_aligned = built.times
+        attempted_labels = resolved_count + unresolved
 
         # Keep sequences paired with tabular rows under chronological sort
         sort_idx = times_aligned.argsort()
@@ -278,6 +232,32 @@ class TrainingOrchestrator:
         gap_seconds = int(settings.train_gap_seconds)
         min_cal = int(getattr(self, "_min_cal", settings.train_min_calibration_samples))
         min_test = int(getattr(self, "_min_edge", settings.train_edge_min_selected))
+        wf_summary: dict = {
+            "folds_total": 0,
+            "folds_eligible": 0,
+            "models": {},
+            "selected_pipeline": None,
+        }
+        try:
+            wf_summary, _lock_from_folds = evaluate_outer_folds(
+                features_matrix,
+                labels_aligned,
+                times_aligned,
+                sequences,
+                direction=self.barrier_direction,
+                outcome_window_seconds=self.duration_seconds,
+                gap_seconds=gap_seconds,
+                n_splits=int(settings.wf_outer_folds),
+                include_heavy_models=True,
+            )
+        except Exception as fold_error:
+            logger.warning("walk_forward_failed", error=str(fold_error))
+
+        lock_start = lockbox_start_index(
+            len(features_matrix),
+            fraction=float(settings.lockbox_fraction),
+        )
+        fracs = fractions_for_lockbox(len(features_matrix), lock_start)
         try:
             split = chronological_split(
                 features_df=features_matrix,
@@ -285,23 +265,23 @@ class TrainingOrchestrator:
                 times=times_aligned,
                 outcome_window_seconds=self.duration_seconds,
                 gap_seconds=gap_seconds,
-                feature_columns=feature_cols,
+                train_frac=fracs["train_frac"],
+                val_frac=fracs["val_frac"],
+                cal_frac=fracs["cal_frac"],
+                test_frac=fracs["test_frac"],
                 min_cal_samples=min_cal,
-                min_test_samples=min_test,
+                min_test_samples=min(min_test, max(5, len(features_matrix) - lock_start)),
             )
         except ValueError as e:
             return {"error": f"Dataset split failed: {e}"}
 
-        # Walk-forward fold count for reporting / stability metadata
-        wf_folds = walk_forward_splits(
-            features_matrix,
-            labels_aligned,
-            times_aligned,
-            n_splits=3,
-            outcome_window_seconds=self.duration_seconds,
-            gap_seconds=gap_seconds,
-            feature_columns=feature_cols,
-        )
+        feature_prep = fit_feature_prep(split.X_train)
+        feature_cols = list(feature_prep["feature_columns"])
+        split.X_train = apply_feature_prep(split.X_train, feature_prep)
+        split.X_val = apply_feature_prep(split.X_val, feature_prep)
+        split.X_cal = apply_feature_prep(split.X_cal, feature_prep)
+        split.X_test = apply_feature_prep(split.X_test, feature_prep)
+        wf_folds_eligible = int(wf_summary.get("folds_eligible") or 0)
 
         if len(split.X_cal) < min_cal:
             # Rough days needed at current non-overlapping spacing
@@ -380,27 +360,44 @@ class TrainingOrchestrator:
         match_rate = float(quote_match.get("match_rate") or 0.0)
         results["quote_backtest_note"] = (
             f"quote_match_rate={match_rate:.2%}; unmatched rows use fallback "
-            "breakeven 0.956 and are flagged — not demonstrated profitability "
-            "unless match_rate is high and EV edge criteria pass."
+            "breakeven 0.956 for description only and never for promotion."
         )
         results["quote_match_rate"] = match_rate
 
-        # --- Train base models on TRAIN only (val for early stopping) ---
+        # Early stopping uses a tail of TRAIN. VAL is diagnostic; CAL calibrates;
+        # the lockbox (X_test) is scored once after the pipeline is frozen.
+        es_n = max(15, int(len(X_train) * 0.15))
+        if len(X_train) - es_n >= 30:
+            X_fit, y_fit = X_train.iloc[:-es_n], y_train.iloc[:-es_n]
+            X_es, y_es = X_train.iloc[-es_n:], y_train.iloc[-es_n:]
+            seq_fit = seq_train[:-es_n]
+            seq_es = seq_train[-es_n:]
+        else:
+            X_fit, y_fit, X_es, y_es = X_train, y_train, None, None
+            seq_fit, seq_es = seq_train, None
+
         freq_baseline = HistoricalFrequencyBaseline()
         freq_baseline.fit(pd.DataFrame({"touched": y_train.values, "barrier_direction": self.barrier_direction}))
 
         lr_model = LogisticRegressionBaseline()
         lr_model.fit(X_train, y_train)
+        vol_model = VolatilityDistanceBaseline()
+        vol_model.fit(X_train, y_train)
 
         xgb_model = XGBoostTouchModel(direction=self.barrier_direction)
-        xgb_model.fit(X_train, y_train, X_val, y_val)
+        xgb_model.fit(X_fit, y_fit, X_es, y_es)
 
         cb_model = CatBoostTouchModel(direction=self.barrier_direction)
-        cb_model.fit(X_train, y_train, X_val, y_val)
+        cb_model.fit(X_fit, y_fit, X_es, y_es)
 
         lstm_model = LSTMTouchModel(direction=self.barrier_direction)
         try:
-            lstm_model.fit(seq_train, y_train.values, seq_val, y_val.values)
+            lstm_model.fit(
+                seq_fit,
+                np.asarray(y_fit),
+                seq_es,
+                None if y_es is None else np.asarray(y_es),
+            )
             lstm_ok = True
         except Exception as e:
             logger.error("lstm_train_failed", error=str(e))
@@ -421,9 +418,6 @@ class TrainingOrchestrator:
         val_preds = _preds(X_val, seq_val)
         cal_preds = _preds(X_cal, seq_cal)
         test_preds = _preds(X_test, seq_test)
-
-        # Weighted ensemble (weights from VAL only)
-        weighted = fit_weighted_ensemble(val_preds, y_val.values)
 
         # Stacking via chronological OOF on TRAIN only (never on base train predictions in-sample)
         from app.ml.ensemble import MODEL_KEYS
@@ -469,10 +463,25 @@ class TrainingOrchestrator:
             logger.warning("stacking_unavailable", error=str(e))
             stacking = None
 
-        # Candidate raw scores on VAL for selection (no test peeking)
+        from app.ml.ensemble import MODEL_KEYS as _ENSEMBLE_KEYS
+
+        weight_mask = np.ones(len(X_train), dtype=bool)
+        for key in _ENSEMBLE_KEYS:
+            weight_mask &= np.isfinite(np.asarray(oof[key], dtype=float))
+        if int(weight_mask.sum()) >= 30:
+            weighted = fit_weighted_ensemble(
+                {key: np.asarray(oof[key])[weight_mask] for key in _ENSEMBLE_KEYS},
+                y_train.values[weight_mask],
+            )
+        else:
+            weighted = fit_weighted_ensemble(val_preds, y_val.values)
+
+        # Candidate raw scores on VAL are diagnostic. The frozen choice is the
+        # walk-forward winner when one cleared the baseline on enough folds.
         candidates_raw_val = {
             "baseline": np.full(len(y_val), baseline_rate),
             "logistic_regression": lr_model.predict_proba(X_val),
+            "volatility_distance": vol_model.predict_proba(X_val),
             "catboost": val_preds["catboost"],
             "lstm": val_preds["lstm"],
             "weighted": weighted.predict(val_preds),
@@ -504,16 +513,21 @@ class TrainingOrchestrator:
                 best_brier=best_brier,
                 baseline_brier=baseline_brier,
             )
+        fold_choice = wf_summary.get("selected_pipeline")
+        if fold_choice in candidates_raw_val:
+            best_name = str(fold_choice)
+            best_brier = float(val_scores.get(fold_choice, best_brier))
 
         results["validation_selection"] = {
-            "metric": "brier_score_vs_baseline",
+            "metric": "walk_forward_then_val_brier",
             "scores": val_scores,
             "baseline_brier": baseline_brier,
             "selected_pipeline": best_name,
             "brier_improvement": baseline_brier - best_brier,
             "equal_weights_baseline": equal_weights(),
             "chosen_weights": weighted.weights,
-            "walk_forward_folds": len(wf_folds),
+            "walk_forward_folds": wf_folds_eligible,
+            "walk_forward": wf_summary,
         }
         logger.info("pipeline_selected", selected=best_name, val_brier=best_brier)
 
@@ -522,6 +536,8 @@ class TrainingOrchestrator:
                 return np.full(len(next(iter(preds_map.values()))), baseline_rate)
             if best_name == "logistic_regression":
                 return lr_model.predict_proba(X if X is not None else X_cal)
+            if best_name == "volatility_distance":
+                return vol_model.predict_proba(X if X is not None else X_cal)
             if best_name == "weighted":
                 return weighted.predict(preds_map)
             if best_name == "stacking":
@@ -551,6 +567,7 @@ class TrainingOrchestrator:
         builders = [
             ("baseline", lambda p, X: np.full(len(y_test), baseline_rate)),
             ("logistic_regression", lambda p, X: lr_model.predict_proba(X)),
+            ("volatility_distance", lambda p, X: vol_model.predict_proba(X)),
             ("catboost", lambda p, X: p["catboost"]),
             ("lstm", lambda p, X: p["lstm"]),
             ("weighted", lambda p, X: weighted.predict(p)),
@@ -570,6 +587,7 @@ class TrainingOrchestrator:
                 quote_payouts=np.where(test_matched, test_payouts, np.nan),
                 times=t_test,
                 margin_over_breakeven=float(settings.train_edge_margin),
+                quote_matched=test_matched,
             )
             candidate_reports[name] = rep
             results[name] = _report_to_dict(rep)
@@ -587,17 +605,35 @@ class TrainingOrchestrator:
                 quote_payouts=np.where(test_matched, test_payouts, np.nan),
                 times=t_test,
                 margin_over_breakeven=float(settings.train_edge_margin),
+                quote_matched=test_matched,
             )
             candidate_reports["stacking"] = rep
             results["stacking"] = _report_to_dict(rep)
 
         selected_report = candidate_reports[best_name]
-        mean_be = float(np.nanmean(test_be)) if len(test_be) else 0.956
+        baseline_report = candidate_reports["baseline"]
+        if bool(test_matched.any()):
+            mean_be = float(np.mean(test_be[test_matched]))
+        else:
+            mean_be = float("nan")
+        fold_stats = (wf_summary.get("models") or {}).get(best_name) or {}
+        fold_win_fraction = float(fold_stats.get("win_fraction") or 0.0)
+        lockbox_beats = float(selected_report.brier_score) < float(baseline_report.brier_score)
+        unresolved_rate = (
+            float(unresolved) / float(attempted_labels) if attempted_labels else 0.0
+        )
         has_edge, edge_description = self._compute_edge(
             selected_report,
             mean_breakeven=mean_be,
             quote_match_rate=match_rate,
-            wf_fold_count=len(wf_folds),
+            wf_fold_count=wf_folds_eligible,
+            selected_quote_match_rate=float(getattr(selected_report, "selected_quote_match_rate", 0.0)),
+            selected_matched_count=int(getattr(selected_report, "selected_matched_count", 0)),
+            calibration_samples=len(X_cal),
+            calibration_both_classes=bool(cal_pos and cal_neg),
+            unresolved_rate=unresolved_rate,
+            fold_win_fraction=fold_win_fraction,
+            lockbox_beats_baseline=lockbox_beats,
         )
         results["selected_pipeline"] = best_name
         results["has_demonstrated_edge"] = has_edge
@@ -622,6 +658,7 @@ class TrainingOrchestrator:
             "stacking": os.path.join(model_dir, f"stacking_{self.barrier_direction}_{timestamp}.pkl"),
             "calibrator": os.path.join(model_dir, f"calibrator_{self.barrier_direction}_{timestamp}.pkl"),
             "logistic": os.path.join(model_dir, f"logistic_{self.barrier_direction}_{timestamp}.pkl"),
+            "volatility": os.path.join(model_dir, f"volatility_{self.barrier_direction}_{timestamp}.pkl"),
         }
 
         xgb_model.save(paths["xgboost"])
@@ -637,11 +674,25 @@ class TrainingOrchestrator:
             paths.pop("stacking", None)
         calibrator.save(paths["calibrator"])
         lr_model.save(paths["logistic"])
+        vol_model.save(paths["volatility"])
 
-        # Primary model_path for backward-compatible worker loaders
-        primary_path = paths.get(best_name) or paths["catboost"]
-        if best_name in ("weighted", "stacking", "baseline"):
-            primary_path = paths["catboost"]
+        path_key = {
+            "logistic_regression": "logistic",
+            "volatility_distance": "volatility",
+            "baseline": "catboost",
+        }.get(best_name, best_name)
+        primary_path = paths.get(path_key) or paths["catboost"]
+        checksums = checksum_paths(paths)
+        manifest_id = dataset_manifest_id(
+            {
+                "symbol": self.symbol,
+                "direction": self.barrier_direction,
+                "barrier_distance": self.barrier_distance,
+                "duration_seconds": self.duration_seconds,
+                "entry_delay_seconds": self.entry_delay_seconds,
+                "entry_epochs": entry_epochs.tolist(),
+            }
+        )
 
         metadata = {
             "version_tag": version_tag,
@@ -653,6 +704,10 @@ class TrainingOrchestrator:
             "duration_seconds": self.duration_seconds,
             "entry_delay_seconds": self.entry_delay_seconds,
             "feature_columns": feature_cols,
+            "feature_prep": feature_prep,
+            "strict_features": True,
+            "decision_inclusive": True,
+            "schema_version": 2,
             "lstm_seq_len": self.seq_len,
             "timestamp": timestamp,
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -691,11 +746,19 @@ class TrainingOrchestrator:
             "sampling_interval_seconds": sampling_interval_seconds,
             "effective_sample_count": effective_n,
             "gap_seconds": gap_seconds,
-            "walk_forward_folds": len(wf_folds),
+            "walk_forward_folds": wf_folds_eligible,
+            "walk_forward": wf_summary,
+            "lockbox_beats_baseline": lockbox_beats,
             "quote_match_rate": match_rate,
+            "selected_quote_match_rate": float(getattr(selected_report, "selected_quote_match_rate", 0.0)),
             "mean_quote_breakeven": mean_be,
             "block_bootstrap_ci": results.get("block_bootstrap_ci"),
             "quote_backtest_note": results["quote_backtest_note"],
+            "artifact_sha256": checksums,
+            "dataset_manifest_id": manifest_id,
+            "shadow_started_at": datetime.now(timezone.utc).isoformat(),
+            "ece": getattr(selected_report, "ece", None),
+            "mce": getattr(selected_report, "mce", None),
         }
 
         meta_path = os.path.join(model_dir, f"meta_{self.barrier_direction}_{timestamp}.json")
@@ -704,6 +767,8 @@ class TrainingOrchestrator:
             json.dump(metadata, f, indent=2, default=str)
         with open(latest_path, "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2, default=str)
+        run_dir = os.path.join(model_dir, "runs", version_tag)
+        write_run_manifest(run_dir, metadata)
 
         report_path = os.path.join(model_dir, f"report_{self.barrier_direction}_{timestamp}.json")
         write_evaluation_report(
@@ -717,6 +782,8 @@ class TrainingOrchestrator:
                 "selected_pipeline": best_name,
                 "has_demonstrated_edge": has_edge,
                 "edge_description": edge_description,
+                "walk_forward": wf_summary,
+                "lockbox_beats_baseline": lockbox_beats,
                 "contract_semantics": CONTRACT_SEMANTICS,
                 "calibration": {
                     **{k: cal_metrics.get(k) for k in ("brier_score", "log_loss", "calibration_slope", "calibration_intercept", "prob_true", "prob_pred")},
@@ -777,35 +844,42 @@ class TrainingOrchestrator:
         mean_breakeven: float = 0.956,
         quote_match_rate: float = 0.0,
         wf_fold_count: int = 0,
+        selected_quote_match_rate: float | None = None,
+        selected_matched_count: int | None = None,
+        calibration_samples: int = 0,
+        calibration_both_classes: bool = False,
+        unresolved_rate: float = 0.0,
+        fold_win_fraction: float = 0.0,
+        lockbox_beats_baseline: bool = False,
     ) -> tuple[bool, str]:
-        min_selected = int(getattr(self, "_min_edge", settings.train_edge_min_selected))
-        margin = float(settings.train_edge_margin)
-        if report.selected_signal_count < min_selected:
-            return False, (
-                f"Insufficient selected test signals: "
-                f"{report.selected_signal_count} < {min_selected}"
-            )
-        if quote_match_rate < 0.25:
-            return False, (
-                f"Insufficient quote coverage for economic edge: "
-                f"match_rate={quote_match_rate:.2%} < 25%"
-            )
-        threshold = float(mean_breakeven) + margin
-        if report.selected_win_rate_ci_lower <= threshold:
-            return False, (
-                f"No demonstrated edge: CI lower "
-                f"{report.selected_win_rate_ci_lower:.4f} <= {threshold:.4f} "
-                f"(mean quote BE={mean_breakeven:.4f})"
-            )
-        note = ""
-        if wf_fold_count < 2:
-            note = " (walk-forward folds < 2 — treat cautiously)"
-        return True, (
-            f"Edge supported: selected_win_rate={report.selected_win_rate:.4f}, "
-            f"CI=[{report.selected_win_rate_ci_lower:.4f}, "
-            f"{report.selected_win_rate_ci_upper:.4f}], n={report.selected_signal_count}, "
-            f"quote_match={quote_match_rate:.2%}{note}"
+        decision = evaluate_promotion_gates(
+            selected_signal_count=int(report.selected_signal_count),
+            selected_win_rate=float(report.selected_win_rate),
+            selected_win_rate_ci_lower=float(report.selected_win_rate_ci_lower),
+            mean_breakeven=float(mean_breakeven),
+            quote_match_rate=float(quote_match_rate),
+            selected_quote_match_rate=float(
+                quote_match_rate if selected_quote_match_rate is None else selected_quote_match_rate
+            ),
+            selected_matched_count=int(
+                report.selected_signal_count if selected_matched_count is None else selected_matched_count
+            ),
+            calibration_samples=int(calibration_samples),
+            calibration_both_classes=bool(calibration_both_classes),
+            unresolved_rate=float(unresolved_rate),
+            eligible_folds=int(wf_fold_count),
+            fold_win_fraction=float(fold_win_fraction),
+            lockbox_beats_baseline=bool(lockbox_beats_baseline),
+            thresholds=GateThresholds(
+                min_outer_folds=int(settings.promotion_min_outer_folds),
+                min_quote_match_rate=float(settings.promotion_min_quote_match),
+                min_selected_quote_match_rate=float(settings.promotion_min_selected_quote_match),
+                min_selected_signals=max(30, int(getattr(self, "_min_edge", settings.train_edge_min_selected))),
+                min_calibration_samples=int(settings.promotion_min_calibration_samples),
+                edge_margin=float(settings.train_edge_margin),
+            ),
         )
+        return decision.passed, decision.summary
 
     def _sample_entry_times(self, ticks_df: pd.DataFrame, interval_seconds: int) -> pd.Series:
         if ticks_df.empty:

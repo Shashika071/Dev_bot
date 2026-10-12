@@ -89,8 +89,33 @@ def _gen(p=0.78, has_edge=False):
     return gen, lifecycle
 
 
+def _bullish_official_candles():
+    def bars(n, step):
+        rows = []
+        for i in range(n):
+            price = 100.0 + i * 0.12
+            rows.append({
+                "epoch": 1_700_000_000 + i * step,
+                "open": price - 0.04,
+                "high": price + 0.06,
+                "low": price - 0.05,
+                "close": price,
+            })
+        return rows
+
+    return {
+        "1m": bars(40, 60),
+        "5m": bars(40, 300),
+        "15m": bars(30, 900),
+        "source": "deriv_official",
+    }
+
+
 @pytest.mark.asyncio
 async def test_confidence_override_emits_when_high():
+    from app.signal_engine.market_state import MarketStateTracker, reset_market_tracker
+
+    reset_market_tracker(MarketStateTracker(path=None))
     gen, lifecycle = _gen(p=0.80)
     feat = _upper_confluence_features()
     session = AsyncMock()
@@ -106,6 +131,7 @@ async def test_confidence_override_emits_when_high():
             symbol="R_100",
             # ask/payout => breakeven 0.40; margin 0.40 >= 0.03
             current_quote={"ask_price": 4.0, "payout": 10.0, "barrier_resolved": 100.09},
+            official_candles=_bullish_official_candles(),
             allowed_directions=["upper"],
             confidence_override=True,
             min_confidence=0.72,
@@ -114,6 +140,35 @@ async def test_confidence_override_emits_when_high():
     assert result is not None
     assert result["confidence_override"] is True
     lifecycle.create_signal.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_force_model_candles_is_not_a_validated_alert():
+    from app.signal_engine.market_state import MarketStateTracker, reset_market_tracker
+
+    reset_market_tracker(MarketStateTracker(path=None))
+    gen, lifecycle = _gen(p=0.90, has_edge=True)
+    feat = _upper_confluence_features()
+    session = AsyncMock()
+    with patch(
+        "app.signal_engine.generator.get_latest_confirmed_settings",
+        new=AsyncMock(return_value=MagicSettings()),
+    ):
+        result = await gen.evaluate_and_generate(
+            session=session,
+            features_df=feat,
+            current_price=100.0,
+            barrier_distance=0.09,
+            symbol="R_100",
+            current_quote={"ask_price": 4.0, "payout": 10.0, "barrier_resolved": 100.09},
+            official_candles=_bullish_official_candles(),
+            allowed_directions=["upper"],
+            force_model_candles=True,
+            min_confidence=0.72,
+        )
+    assert result is not None
+    assert result["is_validated"] is False
+    assert result["force_model_candles"] is True
 
 
 @pytest.mark.asyncio

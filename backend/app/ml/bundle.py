@@ -37,11 +37,17 @@ class ModelPipelineBundle:
         self.lstm: Optional[LSTMTouchModel] = None
         self.weighted: Optional[WeightedEnsemble] = None
         self.stacking: Optional[StackingEnsemble] = None
+        self.logistic = None
+        self.volatility = None
         self.calibrator: Optional[ProbabilityCalibrator] = None
         self.baseline_rate: float = float(metadata.get("baseline_touch_rate", 0.5))
 
     @classmethod
     def load(cls, metadata: dict) -> "ModelPipelineBundle":
+        from app.ml.artifacts import verify_artifact_checksums
+        from app.ml.baseline import LogisticRegressionBaseline, VolatilityDistanceBaseline
+
+        verify_artifact_checksums(metadata)
         bundle = cls(metadata)
         paths = dict(metadata.get("paths") or {})
         direction = metadata.get("direction", "upper")
@@ -77,28 +83,33 @@ class ModelPipelineBundle:
         if paths.get("stacking") and os.path.exists(paths["stacking"]):
             bundle.stacking = StackingEnsemble.load(paths["stacking"])
 
+        if paths.get("logistic") and os.path.exists(paths["logistic"]):
+            logistic = LogisticRegressionBaseline()
+            logistic.load(paths["logistic"])
+            bundle.logistic = logistic
+
+        if paths.get("volatility") and os.path.exists(paths["volatility"]):
+            volatility = VolatilityDistanceBaseline()
+            volatility.load(paths["volatility"])
+            bundle.volatility = volatility
+
         if paths.get("calibrator") and os.path.exists(paths["calibrator"]):
             cal = ProbabilityCalibrator()
             cal.load(paths["calibrator"])
             bundle.calibrator = cal
 
-        # If selected model failed to load, fall back to whatever is available
-        if bundle.selected in ("xgboost", "catboost", "lstm"):
-            loaded = {
-                "xgboost": bundle.xgboost,
-                "catboost": bundle.catboost,
-                "lstm": bundle.lstm,
-            }
-            if loaded.get(bundle.selected) is None:
-                for alt in ("catboost", "xgboost", "lstm", "baseline"):
-                    if alt == "baseline" or loaded.get(alt) is not None:
-                        logger.warning(
-                            "selected_model_missing_fallback",
-                            selected=bundle.selected,
-                            fallback=alt,
-                        )
-                        bundle.selected = alt
-                        break
+        # A missing selected model is a failed load, not a silent algorithm change.
+        required = {
+            "xgboost": bundle.xgboost,
+            "catboost": bundle.catboost,
+            "lstm": bundle.lstm,
+            "weighted": bundle.weighted,
+            "stacking": bundle.stacking,
+            "logistic_regression": bundle.logistic,
+            "volatility_distance": bundle.volatility,
+        }
+        if bundle.selected in required and required[bundle.selected] is None:
+            raise RuntimeError(f"Selected model {bundle.selected} is missing or unreadable")
 
         return bundle
 
@@ -107,11 +118,24 @@ class ModelPipelineBundle:
         features: pd.DataFrame,
         sequences: Optional[np.ndarray] = None,
     ) -> dict[str, float]:
-        from app.features.pipeline import align_features_to_model
+        from app.features.pipeline import align_features_to_model, apply_feature_prep
 
-        # Prefer per-model feature lists; fall back to training metadata columns.
         meta_cols = list(self.metadata.get("feature_columns") or [])
-        aligned = align_features_to_model(features, meta_cols) if meta_cols else features
+        prep = self.metadata.get("feature_prep")
+        frame = features
+        if prep:
+            frame = apply_feature_prep(
+                features,
+                prep,
+                strict=bool(self.metadata.get("strict_features")),
+            )
+            meta_cols = list(prep.get("feature_columns") or meta_cols)
+        aligned = align_features_to_model(
+            frame,
+            meta_cols,
+            fill_values=(prep or {}).get("fill_values"),
+            strict=bool(self.metadata.get("strict_features")) and not prep,
+        ) if meta_cols else frame
 
         out: dict[str, float] = {"baseline": self.baseline_rate}
         if self.xgboost is not None:
@@ -122,6 +146,10 @@ class ModelPipelineBundle:
             out["catboost"] = float(self.catboost.predict_proba(aligned)[0])
         if self.lstm is not None and sequences is not None and len(sequences):
             out["lstm"] = float(self.lstm.predict_proba(sequences)[0])
+        if self.logistic is not None:
+            out["logistic_regression"] = float(self.logistic.predict_proba(aligned)[0])
+        if self.volatility is not None:
+            out["volatility_distance"] = float(self.volatility.predict_proba(aligned)[0])
         return out
 
     def predict_raw(
@@ -135,36 +163,35 @@ class ModelPipelineBundle:
         if selected == "baseline":
             return self.baseline_rate, comps
 
-        if selected in ("xgboost", "catboost", "lstm"):
+        if selected in ("logistic_regression", "volatility_distance", "xgboost", "catboost", "lstm"):
             if selected not in comps:
-                for alt in ("catboost", "xgboost", "lstm", "baseline"):
-                    if alt in comps:
-                        logger.warning(
-                            "inference_fallback_model",
-                            selected=selected,
-                            fallback=alt,
-                        )
-                        return comps[alt], comps
                 raise RuntimeError(f"Selected model {selected} missing at inference")
             return comps[selected], comps
 
-        preds = {k: np.array([comps[k]]) for k in MODEL_KEYS if k in comps}
-        if len(preds) < 3:
-            # Fall back to available tree model if LSTM missing at runtime
-            for k in ("catboost", "xgboost"):
-                if k in comps:
-                    return comps[k], comps
-            return self.baseline_rate, comps
+        if selected in ("weighted", "stacking"):
+            if selected == "weighted":
+                if self.weighted is None:
+                    raise RuntimeError("Selected weighted ensemble is missing")
+                needed = [key for key, weight in self.weighted.weights.items() if float(weight) > 0]
+            else:
+                if self.stacking is None:
+                    raise RuntimeError("Selected stacking ensemble is missing")
+                needed = list(MODEL_KEYS)
+            missing = [key for key in needed if key not in comps]
+            if missing:
+                raise RuntimeError(f"Selected ensemble is missing components: {', '.join(missing)}")
+            preds = {key: np.array([comps[key]]) for key in MODEL_KEYS if key in comps}
+            raw = float(
+                blend_predictions(
+                    selected,
+                    preds,
+                    weighted=self.weighted,
+                    stacking=self.stacking,
+                )[0]
+            )
+            return raw, comps
 
-        raw = float(
-            blend_predictions(
-                selected,
-                preds,
-                weighted=self.weighted,
-                stacking=self.stacking,
-            )[0]
-        )
-        return raw, comps
+        raise RuntimeError(f"Unknown selected pipeline: {selected}")
 
     def predict_calibrated(
         self,

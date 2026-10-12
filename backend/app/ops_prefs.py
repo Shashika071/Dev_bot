@@ -41,6 +41,7 @@ def _defaults() -> dict[str, Any]:
         "auto_pause_enabled": bool(settings.auto_pause_enabled),
         "auto_pause_min_resolved": int(settings.auto_pause_min_resolved),
         "auto_pause_ci_margin": float(settings.auto_pause_ci_margin),
+        "hybrid_trend_gate_enabled": True,
     }
 
 
@@ -67,6 +68,7 @@ def _clamp(prefs: dict[str, Any]) -> dict[str, Any]:
     out["auto_pause_enabled"] = bool(out["auto_pause_enabled"])
     out["auto_pause_min_resolved"] = max(5, min(200, int(out["auto_pause_min_resolved"])))
     out["auto_pause_ci_margin"] = max(-0.1, min(0.1, float(out["auto_pause_ci_margin"])))
+    out["hybrid_trend_gate_enabled"] = bool(out.get("hybrid_trend_gate_enabled", True))
     return out
 
 

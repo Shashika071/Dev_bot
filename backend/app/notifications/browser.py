@@ -48,6 +48,7 @@ def normalize_status(status_data: dict) -> dict[str, Any]:
         "ticks_collected": int(status_data.get("ticks_collected") or 0),
         "quotes_collected": int(status_data.get("quotes_collected") or 0),
         "symbol": status_data.get("symbol"),
+        "market_state": status_data.get("market_state"),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 

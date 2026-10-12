@@ -75,7 +75,7 @@ class CatBoostTouchModel:
             eval_metric="Logloss",
             use_best_model=True if eval_set else False,
             random_seed=self.hyperparams["random_seed"],
-            verbose=100,
+        verbose=False if int(self.hyperparams["iterations"]) < 200 else 100,
             nan_mode="Min",
             auto_class_weights="Balanced",
         )

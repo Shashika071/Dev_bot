@@ -96,6 +96,9 @@ def _metadata_compatible(meta: dict, conf, *, barrier_distance: Optional[float] 
         return False
     if int(meta.get("duration_seconds", -1)) != int(conf.duration_seconds):
         return False
+    delay = meta.get("entry_delay_seconds")
+    if delay is not None and int(delay) != int(settings.manual_entry_delay_seconds):
+        return False
     return True
 
 
@@ -310,6 +313,23 @@ async def generate_manual_signal(
 
     trade_barrier = trade_barrier_f
     model_barrier = model_barrier_f
+    if abs(float(model_barrier) - float(trade_barrier)) > 1e-9:
+        return {
+            "ok": False,
+            "reason": (
+                "Cross-barrier scoring is refused. A model trained at barrier "
+                f"{float(model_barrier):g} is not a calibrated probability for trade barrier "
+                f"{float(trade_barrier):g}. Train and trade the same symbol, direction, "
+                "barrier, duration, and entry delay."
+            ),
+            "analysis": [{
+                "ok": False,
+                "uncalibrated_transfer": True,
+                "model_barrier": float(model_barrier),
+                "trade_barrier": float(trade_barrier),
+                "reason": "exact contract match required",
+            }],
+        }
     strategies = StrategyRegistry()
     strategies.register_defaults()
     generator = SignalGenerator(
@@ -386,20 +406,19 @@ async def generate_manual_signal(
     features_by_direction = {}
     sequences_by_direction = {}
     entry_epoch = int(df.iloc[-1]["epoch"])
+    from app.features.snapshot import build_decision_snapshot
+
     for direction in dirs:
-        features_by_direction[direction] = build_features(
+        snap = build_decision_snapshot(
             df,
-            barrier_distance=feature_barrier,
-            barrier_direction=direction,
-        )
-        sequences_by_direction[direction] = build_price_sequence(
-            df,
-            entry_epoch=entry_epoch,
-            barrier_distance=feature_barrier,
+            entry_epoch,
+            barrier_distance=float(feature_barrier),
             barrier_direction=direction,
             duration_seconds=int(conf.duration_seconds),
             seq_len=settings.lstm_seq_len,
         )
+        features_by_direction[direction] = snap.features
+        sequences_by_direction[direction] = snap.sequence
 
     owns_client = client is None
     if owns_client:
@@ -521,10 +540,24 @@ async def generate_manual_signal(
         )
         candle_met = bool(candle.confirmed) if require_candle else True
 
-        from app.signal_engine.trend_side import market_trend_side
+        from app.signal_engine.market_state import (
+            direction_blocked_by_trend,
+            evaluate_market_state,
+        )
 
-        trend_side = market_trend_side(feat_df)
-        trend_ok = trend_side is None or trend_side == direction
+        market_snapshot = evaluate_market_state(
+            official_candles=official_candles,
+            features_df=feat_df,
+            persist=True,
+        )
+        trend_blocked, trend_reason = direction_blocked_by_trend(
+            direction,
+            market_snapshot,
+            enabled=bool(ops.get("hybrid_trend_gate_enabled", True)),
+        )
+        trend_state = market_snapshot.state
+        trend_side = {"UPPER": "upper", "LOWER": "lower"}.get(trend_state)
+        trend_ok = not trend_blocked
 
         if use_force_gates:
             meets = cal >= min_conf and candle_met and trend_ok
@@ -559,6 +592,12 @@ async def generate_manual_signal(
             "candle_source": (candle.details or {}).get("source"),
             "trend_side": trend_side,
             "trend_ok": trend_ok,
+            "trend_state": trend_state,
+            "trend_score": market_snapshot.score,
+            "trend_components": market_snapshot.components,
+            "trend_stable_since": market_snapshot.stable_since,
+            "trend_fresh": market_snapshot.fresh,
+            "trend_reason": trend_reason,
             "spot": current_price,
             "mode": mode_label,
             "model_barrier": feature_barrier,
@@ -610,6 +649,7 @@ async def generate_manual_signal(
             float(feature_barrier) if (cross_barrier and require_confluence_cross) else None
         ),
         official_candles=official_candles,
+        duration_seconds=int(conf.duration_seconds),
     )
 
     if signal_data and cross_barrier:

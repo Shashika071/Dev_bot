@@ -133,6 +133,9 @@ async def worker_loop():
     active_config = None
     active_symbol = None
     loaded_version_tags: dict[str, str] = {}
+    candle_cache: dict = {"at": 0.0, "data": None, "symbol": None}
+    last_market: dict | None = None
+    heartbeat = 0
 
     try:
         while True:
@@ -190,48 +193,58 @@ async def worker_loop():
                     "ticks_collected": tick_collector._tick_count if tick_collector else 0,
                     "quotes_collected": quotes_total,
                     "directions": list(quote_collectors.keys()),
+                    "market_state": last_market,
                 })
 
                 if not conf:
                     await asyncio.sleep(5)
                     continue
 
-                # Reload models when newer compatible metadata appears
+                # Reload the DB-active model. latest_*.json is not an activation source.
                 for direction in configured_directions(conf.barrier_direction):
-                    meta = _load_latest_metadata(direction)
-                    if not meta or not _metadata_compatible(meta, conf):
-                        continue
-                    tag = meta.get("version_tag", "")
-                    if loaded_version_tags.get(direction) == tag:
-                        continue
-                    cal_path = meta.get("calibrator_path")
-                    if not cal_path or not os.path.exists(cal_path):
-                        continue
                     try:
-                        bundle = ModelPipelineBundle.load(meta)
-                        version_id = hash(tag) % 1_000_000 or 1
                         async with async_session() as reg_session:
                             mv = await get_active_model_version(
                                 reg_session, symbol=conf.symbol, direction=direction
                             )
-                            if mv and mv.version_tag == tag:
-                                version_id = int(mv.id)
+                        if mv is None or not mv.metadata_json:
+                            continue
+                        meta = json.loads(mv.metadata_json)
+                        tag = meta.get("version_tag") or mv.version_tag
+                        if loaded_version_tags.get(direction) == tag:
+                            continue
+                        from app.ml.artifacts import verify_artifact_checksums
+                        from app.ml.contract_spec import model_matches_contract
+
+                        verify_artifact_checksums(meta)
+                        contract_ok, contract_reason = model_matches_contract(
+                            meta,
+                            symbol=conf.symbol,
+                            direction=direction,
+                            barrier_distance=float(barrier_magnitude(conf.barrier_input)),
+                            duration_seconds=int(conf.duration_seconds),
+                            entry_delay_seconds=int(settings.manual_entry_delay_seconds),
+                        )
+                        if not contract_ok:
+                            logger.info("active_model_contract_mismatch", direction=direction, reason=contract_reason)
+                            continue
+                        bundle = ModelPipelineBundle.load(meta)
                         generator.set_model(
                             bundle=bundle,
-                            version_id=version_id,
-                            has_edge=bool(meta.get("has_demonstrated_edge", False)),
+                            version_id=int(mv.id),
+                            has_edge=bool(mv.has_demonstrated_edge),
                             direction=direction,
                             metadata=meta,
-                            version_tag=tag,
+                            version_tag=str(tag),
                         )
                         loaded_version_tags[direction] = tag
                         logger.info(
                             "model_loaded",
                             direction=direction,
                             version_tag=tag,
-                            version_id=version_id,
+                            version_id=int(mv.id),
                             selected=meta.get("selected_pipeline"),
-                            has_edge=meta.get("has_demonstrated_edge"),
+                            has_edge=bool(mv.has_demonstrated_edge),
                         )
                     except Exception as e:
                         logger.error("model_load_failed", direction=direction, error=str(e))
@@ -260,19 +273,54 @@ async def worker_loop():
                 features_by_direction = {}
                 sequences_by_direction = {}
                 entry_epoch = int(df.iloc[-1]["epoch"])
+                from app.features.snapshot import build_decision_snapshot
+
                 for direction in configured_directions(conf.barrier_direction):
-                    features_by_direction[direction] = build_features(
+                    snap = build_decision_snapshot(
                         df,
-                        barrier_distance=barrier_dist,
-                        barrier_direction=direction,
-                    )
-                    sequences_by_direction[direction] = build_price_sequence(
-                        df,
-                        entry_epoch=entry_epoch,
+                        entry_epoch,
                         barrier_distance=barrier_dist,
                         barrier_direction=direction,
                         duration_seconds=int(conf.duration_seconds),
                         seq_len=settings.lstm_seq_len,
+                    )
+                    features_by_direction[direction] = snap.features
+                    sequences_by_direction[direction] = snap.sequence
+
+                if (
+                    candle_cache["data"] is None
+                    or candle_cache.get("symbol") != active_symbol
+                    or time.time() - float(candle_cache["at"]) > 60
+                ):
+                    try:
+                        from app.strategies.candle_confirm import fetch_deriv_official_candles
+
+                        candle_cache["data"] = await fetch_deriv_official_candles(client, active_symbol)
+                        candle_cache["at"] = time.time()
+                        candle_cache["symbol"] = active_symbol
+                    except Exception as candle_error:
+                        logger.warning("official_candles_worker_failed", error=str(candle_error))
+
+                from app.signal_engine.market_state import evaluate_market_state
+
+                first_features = next(
+                    (frame for frame in features_by_direction.values() if frame is not None and not frame.empty),
+                    None,
+                )
+                last_market = evaluate_market_state(
+                    official_candles=candle_cache.get("data"),
+                    features_df=first_features,
+                ).as_dict()
+                heartbeat += 1
+                if heartbeat % 12 == 0:
+                    from app.ml.shadow_log import append_shadow_decision
+
+                    append_shadow_decision(
+                        {
+                            "type": "heartbeat",
+                            "symbol": active_symbol,
+                            "market_state": last_market,
+                        }
                     )
 
                 quotes_by_direction = {}
@@ -296,6 +344,8 @@ async def worker_loop():
                         features_by_direction=features_by_direction,
                         sequences_by_direction=sequences_by_direction,
                         last_tick_age_seconds=last_tick_age,
+                        official_candles=candle_cache.get("data"),
+                        duration_seconds=int(conf.duration_seconds),
                     )
 
                     if signal_data:
@@ -321,6 +371,7 @@ async def worker_loop():
                     "symbol": active_symbol,
                     "ticks_collected": tick_collector._tick_count if tick_collector else 0,
                     "quotes_collected": sum(qc._quote_count for qc in quote_collectors.values()),
+                    "market_state": last_market,
                 })
 
             await asyncio.sleep(5)

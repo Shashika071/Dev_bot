@@ -27,7 +27,17 @@ def test_edge_passes_with_quotes_and_ci():
         selected_win_rate_ci_upper=0.995,
     )
     ok, reason = orch._compute_edge(
-        report, mean_breakeven=0.95, quote_match_rate=0.8, wf_fold_count=3
+        report,
+        mean_breakeven=0.95,
+        quote_match_rate=0.8,
+        selected_quote_match_rate=0.9,
+        selected_matched_count=40,
+        wf_fold_count=5,
+        fold_win_fraction=0.8,
+        lockbox_beats_baseline=True,
+        calibration_samples=50,
+        calibration_both_classes=True,
+        unresolved_rate=0.0,
     )
     assert ok is True
     assert "Edge supported" in reason

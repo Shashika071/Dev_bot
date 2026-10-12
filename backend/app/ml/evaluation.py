@@ -70,6 +70,12 @@ class EvaluationReport:
     # Time block resampling
     block_bootstrap_ci: Optional[dict] = None
 
+    # Reliability additions. Defaults keep older report constructors working.
+    ece: float = 0.0
+    mce: float = 0.0
+    selected_quote_match_rate: float = 0.0
+    selected_matched_count: int = 0
+
 
 def evaluate_model(
     model_name: str,
@@ -84,6 +90,7 @@ def evaluate_model(
     block_size: int = 100,
     n_bootstrap: int = 1000,
     margin_over_breakeven: float = 0.02,
+    quote_matched: Optional[np.ndarray] = None,
 ) -> EvaluationReport:
     """
     Comprehensive model evaluation.
@@ -128,12 +135,20 @@ def evaluate_model(
     net_return = None
     max_dd = None
     max_losing = 0
+    selected_quote_match_rate = 0.0
+    selected_matched_count = 0
 
     if breakeven_probs is not None:
         selected_mask = y_pred_proba > (
             np.asarray(breakeven_probs, dtype=float) + float(margin_over_breakeven)
         )
         selected_count = int(selected_mask.sum())
+        matched = None
+        if quote_matched is not None:
+            matched = np.asarray(quote_matched, dtype=bool)
+            if selected_count > 0:
+                selected_matched_count = int(matched[selected_mask].sum())
+                selected_quote_match_rate = float(matched[selected_mask].mean())
 
         if selected_count > 0:
             selected_outcomes = y_true[selected_mask]
@@ -144,30 +159,34 @@ def evaluate_model(
                 selected_outcomes.sum(), selected_count, confidence=0.95
             )
 
-            # Financial metrics with quotes
+            # Financial metrics use matched quotes only. Unmatched rows stay
+            # descriptive and cannot support an economic claim.
             if quote_prices is not None and quote_payouts is not None:
-                sel_prices = quote_prices[selected_mask]
-                sel_payouts = quote_payouts[selected_mask]
-                sel_outcomes = selected_outcomes
+                economic = selected_mask if matched is None else (selected_mask & matched)
+                sel_prices = quote_prices[economic]
+                sel_payouts = quote_payouts[economic]
+                sel_outcomes = y_true[economic]
+                finite = np.isfinite(sel_prices) & np.isfinite(sel_payouts)
+                sel_prices = sel_prices[finite]
+                sel_payouts = sel_payouts[finite]
+                sel_outcomes = sel_outcomes[finite]
 
-                pnl = np.where(
-                    sel_outcomes == 1,
-                    sel_payouts - sel_prices,  # Win: payout - stake
-                    -sel_prices,               # Loss: lose stake
-                )
-                net_return = float(pnl.sum())
-
-                # Maximum drawdown
-                cumulative = np.cumsum(pnl)
-                running_max = np.maximum.accumulate(cumulative)
-                drawdowns = running_max - cumulative
-                max_dd = float(drawdowns.max()) if len(drawdowns) > 0 else 0
-
-                # Max losing streak
-                max_losing = _max_losing_streak(sel_outcomes)
+                if len(sel_outcomes):
+                    pnl = np.where(
+                        sel_outcomes == 1,
+                        sel_payouts - sel_prices,
+                        -sel_prices,
+                    )
+                    net_return = float(np.nansum(pnl))
+                    cumulative = np.cumsum(pnl)
+                    running_max = np.maximum.accumulate(cumulative)
+                    drawdowns = running_max - cumulative
+                    max_dd = float(drawdowns.max()) if len(drawdowns) > 0 else 0
+                    max_losing = _max_losing_streak(sel_outcomes)
 
     # Baseline comparison
     baseline_rate = float(y_true.mean())
+    ece, mce = _calibration_error(y_true, y_pred_proba)
 
     # Time-block bootstrap for confidence intervals
     block_ci = None
@@ -201,6 +220,10 @@ def evaluate_model(
         calibration_curve_data=cal_metrics,
         signal_coverage=selected_count / len(y_true) if len(y_true) > 0 else 0,
         block_bootstrap_ci=block_ci,
+        ece=ece,
+        mce=mce,
+        selected_quote_match_rate=selected_quote_match_rate,
+        selected_matched_count=selected_matched_count,
     )
 
 
@@ -247,11 +270,13 @@ def _time_block_bootstrap(
     """
     n = len(y_true)
     n_blocks = n // block_size
+    rng = np.random.default_rng(42)
 
     brier_scores = []
     for _ in range(n_bootstrap):
-        # Sample blocks with replacement
-        block_starts = np.random.randint(0, n - block_size, size=n_blocks)
+        # Sample contiguous blocks with replacement. The seed keeps the
+        # supplementary interval reproducible.
+        block_starts = rng.integers(0, max(1, n - block_size), size=n_blocks)
         indices = np.concatenate([np.arange(s, s + block_size) for s in block_starts])
         indices = indices[indices < n]
 
@@ -271,3 +296,24 @@ def _time_block_bootstrap(
             "block_size": block_size,
         }
     return None
+
+
+def _calibration_error(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10) -> tuple[float, float]:
+    y = np.asarray(y_true, dtype=float).ravel()
+    p = np.clip(np.asarray(y_prob, dtype=float).ravel(), 0.0, 1.0)
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    ece = 0.0
+    mce = 0.0
+    total = max(len(y), 1)
+    for idx in range(n_bins):
+        if idx == n_bins - 1:
+            mask = (p >= edges[idx]) & (p <= edges[idx + 1])
+        else:
+            mask = (p >= edges[idx]) & (p < edges[idx + 1])
+        count = int(mask.sum())
+        if count == 0:
+            continue
+        gap = abs(float(y[mask].mean()) - float(p[mask].mean()))
+        ece += (count / total) * gap
+        mce = max(mce, gap)
+    return float(ece), float(mce)

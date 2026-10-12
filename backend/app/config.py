@@ -82,6 +82,12 @@ class Settings(BaseSettings):
     train_max_ticks: int = Field(
         0, ge=0, description="Cap ticks loaded for training (0 = all available)"
     )
+    wf_outer_folds: int = Field(5, ge=2, le=8, description="Expanding walk-forward folds before the lockbox")
+    lockbox_fraction: float = Field(0.12, ge=0.05, le=0.25)
+    promotion_min_quote_match: float = Field(0.50, ge=0.0, le=1.0)
+    promotion_min_selected_quote_match: float = Field(0.80, ge=0.0, le=1.0)
+    promotion_min_calibration_samples: int = Field(50, ge=11, le=500)
+    promotion_min_outer_folds: int = Field(4, ge=2, le=8)
     # Live drift / auto-pause
     auto_pause_enabled: bool = Field(True, description="Pause validated alerts on live underperformance")
     auto_pause_min_resolved: int = Field(

@@ -112,3 +112,62 @@ class LogisticRegressionBaseline:
         self.pipeline = data["pipeline"]
         self._feature_names = data["features"]
         self._is_fitted = True
+
+
+class VolatilityDistanceBaseline:
+    """Touch probability from volatility and barrier-distance features only."""
+
+    name = "volatility_distance"
+    _CANDIDATE_COLUMNS = (
+        "realized_vol_300",
+        "realized_vol_60",
+        "barrier_distance_vol_normalized",
+        "barrier_reachability_300",
+    )
+
+    def __init__(self):
+        self.pipeline = Pipeline([
+            ("scaler", StandardScaler()),
+            ("model", LogisticRegression(max_iter=1000, solver="lbfgs")),
+        ])
+        self._feature_names: list[str] = []
+        self._is_fitted = False
+        self._rate = 0.5
+
+    def fit(self, X_train: pd.DataFrame, y_train: pd.Series):
+        self._rate = float(pd.Series(y_train).mean())
+        columns = [c for c in self._CANDIDATE_COLUMNS if c in X_train.columns]
+        if not columns:
+            columns = list(X_train.columns)[:2]
+        self._feature_names = columns
+        clean = X_train[columns].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        y = np.asarray(y_train, dtype=float).ravel()
+        if len(np.unique(y)) < 2:
+            self._is_fitted = False
+            return
+        self.pipeline.fit(clean, y)
+        self._is_fitted = True
+
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        if not self._is_fitted:
+            return np.full(len(X), self._rate, dtype=float)
+        from app.features.pipeline import align_features_to_model
+
+        aligned = align_features_to_model(X, self._feature_names)
+        return self.pipeline.predict_proba(aligned)[:, 1]
+
+    def save(self, path: str):
+        with open(path, "wb") as handle:
+            pickle.dump(
+                {"pipeline": self.pipeline, "features": self._feature_names, "rate": self._rate, "fitted": self._is_fitted},
+                handle,
+            )
+
+    def load(self, path: str):
+        with open(path, "rb") as handle:
+            data = pickle.load(handle)
+        self.pipeline = data["pipeline"]
+        self._feature_names = data["features"]
+        self._rate = float(data.get("rate", 0.5))
+        self._is_fitted = bool(data.get("fitted", True))
+

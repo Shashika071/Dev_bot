@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import get_db, async_session
 from app.features.tick_loader import load_ticks_dataframe, tick_coverage_stats
-from app.ml.registry import save_and_activate_model_version
+from app.ml.registry import save_model_version
 from app.ml.trainer import TrainingOrchestrator
 from app.models.quote import Quote
 from app.models.tick import Tick
@@ -749,7 +749,7 @@ async def _run_training_background(
             meta = results.get("metadata") or {}
             try:
                 async with async_session() as session:
-                    mv = await save_and_activate_model_version(session, meta, results)
+                    mv = await save_model_version(session, meta, results, activate=False)
                     results["model_version_id"] = mv.id
             except Exception as reg_err:
                 logger.warning("model_registry_persist_failed", error=str(reg_err))
@@ -1047,4 +1047,28 @@ async def start_download(
         "status": "started",
         "message": f"Downloading up to {goal} for {symbol}. Poll /train/download-status.",
         "target_ticks": effective_target,
+    }
+
+
+class PromoteBody(BaseModel):
+    version_tag: str = Field(min_length=3, max_length=64)
+
+
+@router.post("/promote")
+async def promote_trained_model(
+    body: PromoteBody,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Activate a challenger after evidence gates and a 14-day frozen shadow period."""
+    from app.ml.registry import promote_model_version
+
+    try:
+        row = await promote_model_version(db, body.version_tag)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "status": "promoted",
+        "version_tag": row.version_tag,
+        "direction": row.direction,
+        "is_active": row.is_active,
     }

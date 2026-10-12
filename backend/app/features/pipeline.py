@@ -229,26 +229,94 @@ def select_feature_matrix(features_df: pd.DataFrame) -> pd.DataFrame:
     return out[cols]
 
 
+def fit_feature_prep(train_df: pd.DataFrame) -> dict:
+    """Fit column selection, imputation, and regime boundaries on TRAIN only."""
+    from app.features.regime import attach_regime_labels
+
+    raw = train_df.replace([np.inf, -np.inf], np.nan).copy()
+    vol = pd.to_numeric(raw.get("realized_vol_300", pd.Series(dtype=float)), errors="coerce").dropna()
+    vol_low = vol_high = None
+    if len(vol) >= 9:
+        q33, q66 = np.quantile(vol.to_numpy(dtype=float), [1.0 / 3.0, 2.0 / 3.0])
+        vol_low, vol_high = float(q33), float(q66)
+    rng = pd.to_numeric(raw.get("price_range_300", pd.Series(dtype=float)), errors="coerce").dropna()
+    range_median = float(rng.median()) if len(rng) else None
+    transformed = attach_regime_labels(
+        raw,
+        vol_low=vol_low,
+        vol_high=vol_high,
+        range_median=range_median,
+    )
+    columns = drop_zero_variance_columns(transformed, get_feature_columns())
+    fill_values: dict[str, float] = {}
+    for column in columns:
+        series = pd.to_numeric(transformed.get(column, pd.Series(dtype=float)), errors="coerce")
+        median = series.median()
+        fill_values[column] = 0.0 if pd.isna(median) else float(median)
+    return {
+        "feature_columns": columns,
+        "fill_values": fill_values,
+        "vol_low": vol_low,
+        "vol_high": vol_high,
+        "range_median": range_median,
+    }
+
+
+def apply_feature_prep(features_df: pd.DataFrame, prep: dict, *, strict: bool = False) -> pd.DataFrame:
+    """Apply a train-fitted preprocessor. Missing required columns fail closed."""
+    from app.features.regime import attach_regime_labels
+
+    if features_df is None or features_df.empty:
+        return features_df
+    columns = list(prep.get("feature_columns") or [])
+    labeled = attach_regime_labels(
+        features_df,
+        vol_low=prep.get("vol_low"),
+        vol_high=prep.get("vol_high"),
+        range_median=prep.get("range_median"),
+    )
+    missing = [column for column in columns if column not in labeled.columns]
+    if strict and missing:
+        raise ValueError(f"Missing required features: {', '.join(missing)}")
+    return align_features_to_model(
+        labeled,
+        columns,
+        fill_values=prep.get("fill_values") or {},
+        strict=False,
+    )
+
+
 def align_features_to_model(
     X: pd.DataFrame,
     feature_names: list[str] | None,
+    fill_values: dict | None = None,
+    strict: bool = False,
 ) -> pd.DataFrame:
     """
     Align a live feature frame to the exact columns a model was fit on.
 
     Training may drop zero-variance columns; live `select_feature_matrix` returns
     the full set. Extra columns trigger sklearn "unseen at fit time" errors.
+    New models pass train medians and reject missing required columns. Older
+    models still fill unknown columns with 0.
     """
     if X is None or X.empty:
         return X
     clean = X.replace([np.inf, -np.inf], np.nan)
     if not feature_names:
         return clean.fillna(0)
+    missing = [column for column in feature_names if column not in clean.columns]
+    if strict and missing:
+        raise ValueError(f"Missing required features: {', '.join(missing)}")
+    fills = fill_values or {}
     out = clean.copy()
-    for c in feature_names:
-        if c not in out.columns:
-            out[c] = 0.0
-    return out.loc[:, list(feature_names)].fillna(0)
+    for column in feature_names:
+        fill = float(fills.get(column, 0.0))
+        if column not in out.columns:
+            out[column] = fill
+        else:
+            out[column] = pd.to_numeric(out[column], errors="coerce").fillna(fill)
+    return out.loc[:, list(feature_names)]
 
 
 def validate_no_future_leakage(

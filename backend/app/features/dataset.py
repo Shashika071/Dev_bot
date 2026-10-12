@@ -216,21 +216,25 @@ def embargo_overlapping_samples(
     `horizon_seconds` of sample i (reduces label dependence from 60s grids
     on 540s contracts).
     """
-    if times.empty:
-        return pd.Series(dtype=bool)
-    order = times.argsort()
-    times_sorted = times.iloc[order].reset_index(drop=True)
-    keep_sorted = np.zeros(len(times_sorted), dtype=bool)
+    if len(times) == 0:
+        index = times.index if isinstance(times, pd.Series) else None
+        return pd.Series(dtype=bool, index=index)
+    if isinstance(times, pd.Series):
+        values = list(times)
+        index = times.index
+    else:
+        values = list(times)
+        index = times if isinstance(times, pd.Index) else pd.RangeIndex(len(values))
+    epochs = np.array([_to_epoch(t) for t in values], dtype=np.int64)
+    order = np.argsort(epochs, kind="mergesort")
+    keep = np.zeros(len(epochs), dtype=bool)
     next_allowed = -10**18
-    for i, t in enumerate(times_sorted):
-        epoch = _to_epoch(t)
+    for pos in order:
+        epoch = int(epochs[pos])
         if epoch >= next_allowed:
-            keep_sorted[i] = True
+            keep[pos] = True
             next_allowed = epoch + int(horizon_seconds)
-    # Map back to original index order
-    keep = pd.Series(False, index=times.index)
-    keep.iloc[order] = keep_sorted
-    return keep
+    return pd.Series(keep, index=index)
 
 
 def walk_forward_splits(
