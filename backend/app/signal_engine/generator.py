@@ -112,6 +112,7 @@ class SignalGenerator:
         strategy_barrier_distance: Optional[float] = None,
         official_candles: Optional[dict] = None,
         duration_seconds: Optional[int] = None,
+        score_barrier_distance: Optional[float] = None,
     ) -> Optional[dict]:
         """
         confidence_override: allow signals without demonstrated edge, but only when
@@ -309,7 +310,11 @@ class SignalGenerator:
                 meta,
                 symbol=symbol,
                 direction=direction,
-                barrier_distance=float(barrier_distance),
+                barrier_distance=float(
+                    score_barrier_distance
+                    if score_barrier_distance is not None
+                    else barrier_distance
+                ),
                 duration_seconds=duration_seconds,
                 entry_delay_seconds=int(settings.manual_entry_delay_seconds),
                 barrier_unit="relative_price_points" if meta.get("barrier_unit") else None,

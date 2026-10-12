@@ -313,23 +313,6 @@ async def generate_manual_signal(
 
     trade_barrier = trade_barrier_f
     model_barrier = model_barrier_f
-    if abs(float(model_barrier) - float(trade_barrier)) > 1e-9:
-        return {
-            "ok": False,
-            "reason": (
-                "Cross-barrier scoring is refused. A model trained at barrier "
-                f"{float(model_barrier):g} is not a calibrated probability for trade barrier "
-                f"{float(trade_barrier):g}. Train and trade the same symbol, direction, "
-                "barrier, duration, and entry delay."
-            ),
-            "analysis": [{
-                "ok": False,
-                "uncalibrated_transfer": True,
-                "model_barrier": float(model_barrier),
-                "trade_barrier": float(trade_barrier),
-                "reason": "exact contract match required",
-            }],
-        }
     strategies = StrategyRegistry()
     strategies.register_defaults()
     generator = SignalGenerator(
@@ -538,7 +521,7 @@ async def generate_manual_signal(
             min_score=float(ops.get("candle_confirm_min_score", 4.0)),
             min_gap=float(ops.get("candle_confirm_min_gap", 1.0)),
             symbol=conf.symbol,
-            barrier_distance=float(feature_barrier),
+            barrier_distance=float(barrier_dist),
             duration_seconds=int(conf.duration_seconds),
         )
         candle_met = bool(candle.confirmed) if require_candle else True
@@ -654,6 +637,7 @@ async def generate_manual_signal(
         ),
         official_candles=official_candles,
         duration_seconds=int(conf.duration_seconds),
+        score_barrier_distance=float(feature_barrier) if cross_barrier else None,
     )
 
     if signal_data and cross_barrier:
