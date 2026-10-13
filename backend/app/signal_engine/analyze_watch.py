@@ -17,7 +17,7 @@ import structlog
 
 from app.config import settings
 from app.database import async_session
-from app.deriv.auto_trade import maybe_auto_trade_after_signal
+from app.execution.boundary import maybe_execute_signal
 from app.notifications.browser import send_signal_notification
 from app.signal_engine.manual_generate import generate_manual_signal
 
@@ -260,7 +260,7 @@ class AnalyzeWatchService:
                                 pass
                             trade = None
                             try:
-                                trade = await maybe_auto_trade_after_signal(
+                                trade = await maybe_execute_signal(
                                     session, result["signal"]
                                 )
                             except Exception as e:

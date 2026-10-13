@@ -5,6 +5,7 @@ from app.models.signal import Signal
 from app.models.outcome import SignalOutcome
 from app.models.model_version import ModelVersion
 from app.models.ops_snapshot import OpsSnapshot
+from app.models.market import AnalysisEvent, ChartAnnotation, ForecastSnapshot, MarketCandle
 
 __all__ = [
     "ContractSettings",
@@ -14,4 +15,8 @@ __all__ = [
     "SignalOutcome",
     "ModelVersion",
     "OpsSnapshot",
+    "MarketCandle",
+    "AnalysisEvent",
+    "ForecastSnapshot",
+    "ChartAnnotation",
 ]

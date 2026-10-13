@@ -759,7 +759,16 @@ class TrainingOrchestrator:
             "shadow_started_at": datetime.now(timezone.utc).isoformat(),
             "ece": getattr(selected_report, "ece", None),
             "mce": getattr(selected_report, "mce", None),
+            "task_id": f"touch_{self.barrier_direction}",
+            "promotion_checks": {
+                "min_samples": int(getattr(selected_report, "selected_signal_count", 0) or 0) >= int(settings.train_edge_min_selected),
+                "calibration": bool(cal_pos and cal_neg) and len(X_cal) >= int(settings.promotion_min_calibration_samples),
+                "stability": int(wf_folds_eligible) >= int(settings.promotion_min_outer_folds) and float(fold_win_fraction) >= 0.8,
+                "beats_baseline": bool(lockbox_beats and has_edge),
+            },
         }
+        metadata["promotion_ready"] = all(metadata["promotion_checks"].values())
+        results["promotion_ready"] = metadata["promotion_ready"]
 
         meta_path = os.path.join(model_dir, f"meta_{self.barrier_direction}_{timestamp}.json")
         latest_path = os.path.join(model_dir, f"latest_{self.barrier_direction}.json")

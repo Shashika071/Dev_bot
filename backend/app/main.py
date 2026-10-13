@@ -7,6 +7,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import setup, signals, train, ws
+from app.api.analysis import router as analysis_router
+from app.api.market import router as market_router
 from app.config import settings
 from app.database import init_db
 
@@ -30,6 +32,8 @@ app.include_router(setup.router)
 app.include_router(signals.router)
 app.include_router(ws.router)
 app.include_router(train.router)
+app.include_router(market_router)
+app.include_router(analysis_router)
 
 
 @app.on_event("startup")
@@ -43,14 +47,14 @@ async def startup():
         await analyze_watch.resume_if_needed()
     except Exception as e:
         logger.warning("analyze_watch_resume_skip", error=str(e))
-    # Event-driven trade account (balance stream) — one PAT session
+    # Buy-capable session stays down unless the server execution gate is open.
     try:
-        from app.deriv.trade_session import trade_account_session
-        from app.trade_prefs import token_status
+        from app.execution.session_ctl import start_if_allowed
 
-        if token_status().get("token_configured"):
-            await trade_account_session.start()
+        if await start_if_allowed():
             logger.info("trade_account_session_started")
+        else:
+            logger.info("trade_account_session_not_started", reason="execution_gate_closed")
     except Exception as e:
         logger.warning("trade_account_session_start_skip", error=str(e))
 
@@ -58,9 +62,9 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     try:
-        from app.deriv.trade_session import trade_account_session
+        from app.execution.session_ctl import stop_session
 
-        await trade_account_session.stop()
+        await stop_session()
     except Exception as e:
         logger.warning("trade_account_session_stop_skip", error=str(e))
 

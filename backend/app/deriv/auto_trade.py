@@ -13,6 +13,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deriv.trade_session import trade_account_session
+from app.execution.gates import permission_status
 from app.models.signal import Signal
 from app.signal_engine.settings_lookup import get_latest_confirmed_settings
 from app.trade_prefs import get_trade_token, load_trade_prefs
@@ -59,8 +60,9 @@ async def maybe_auto_trade_after_signal(
     Persists a short note on the signal row when possible.
     """
     prefs = load_trade_prefs()
-    if not prefs.get("auto_trade_enabled"):
-        return {"ok": False, "skipped": True, "reason": "auto_trade_disabled"}
+    status = permission_status(prefs)
+    if not status["allowed"]:
+        return {"ok": False, "skipped": True, "reason": status["reason"], "execution": status}
 
     token = get_trade_token()
     if not token:

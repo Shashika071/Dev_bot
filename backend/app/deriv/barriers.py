@@ -16,6 +16,49 @@ def barrier_for_direction(barrier_input: str, direction: str) -> str:
     return f"+{mag}"
 
 
+def touch_order_fields(direction: str, barrier: str, stake: float) -> dict:
+    """Validate a manual One-Touch ticket. Returns the signed barrier and stake."""
+    side = str(direction or "").strip().lower()
+    if side not in ("upper", "lower"):
+        raise ValueError("Touch trades only: choose upper or lower")
+    magnitude = barrier_magnitude(barrier)
+    try:
+        distance = float(magnitude)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Barrier must be a number") from exc
+    if distance <= 0:
+        raise ValueError("Barrier must be greater than 0")
+    amount = round(float(stake), 2)
+    if amount <= 0:
+        raise ValueError("Stake must be greater than 0")
+    if amount > 10000:
+        raise ValueError("Stake is too large")
+    return {
+        "direction": side,
+        "barrier": barrier_for_direction(magnitude, side),
+        "stake": amount,
+    }
+
+
+_DURATION_UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
+
+
+def touch_duration(duration: int, unit: str) -> tuple[int, str]:
+    """Validate the contract length chosen on the chart ticket."""
+    code = str(unit or "m").strip().lower()
+    if code not in _DURATION_UNITS:
+        raise ValueError("Duration unit must be seconds, minutes, hours, or days")
+    try:
+        value = int(duration)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Duration must be a whole number") from exc
+    if value <= 0:
+        raise ValueError("Duration must be greater than 0")
+    if value > 1440:
+        raise ValueError("Duration is too long")
+    return value, code
+
+
 def configured_directions(barrier_direction: str | None) -> list[str]:
     """
     Expand settings direction into concrete directions to monitor.

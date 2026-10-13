@@ -138,6 +138,8 @@ class TradePrefsBody(BaseModel):
     cross_barrier_min_probability: float = Field(0.80, ge=0.50, le=0.99)
     cross_barrier_require_candles: bool = True
     cross_barrier_require_confluence: bool = False
+    execution_confirmed: bool = False
+    daily_loss_limit: float = Field(0.0, ge=0.0, le=100000.0)
 
 
 class TradeTokenBody(BaseModel):
@@ -168,6 +170,8 @@ async def get_trade_prefs() -> dict:
             "cross_barrier_min_probability": "Step confidence on the model barrier before trading Setup (e.g. 0.8 = 80%).",
             "cross_barrier_require_candles": "When on, Cross-barrier also needs 1m/5m/15m candle confirm on the trade direction.",
             "cross_barrier_require_confluence": "When on, Cross also needs touch confluence (reachability + momentum/EMA agreement).",
+            "execution_confirmed": "Explicit confirmation that optional auto-trade may place orders. Still blocked unless EXECUTION_ALLOWED is true.",
+            "daily_loss_limit": "Required positive cap on recorded realized loss before any order is sent.",
         },
     }
 
@@ -184,10 +188,10 @@ async def put_trade_prefs(body: TradePrefsBody) -> dict:
     )
     if account_changed:
         from app.deriv.account_cache import clear_account_cache
-        from app.deriv.trade_session import trade_account_session
+        from app.execution.session_ctl import restart_if_allowed
 
         clear_account_cache()
-        await trade_account_session.restart()
+        await restart_if_allowed()
     return {
         **saved,
         **trade_prefs_public(),
@@ -257,8 +261,9 @@ async def get_trade_account(refresh: bool = False, force: bool = False) -> dict:
         return {"ok": False, "token_configured": False, "error": "No trade token configured"}
 
     live = trade_account_session.status()
-    # Keep live session up whenever a token exists
-    if not live.get("want_running"):
+    from app.config import settings
+
+    if settings.execution_allowed and not live.get("want_running"):
         try:
             await trade_account_session.start()
             live = trade_account_session.status()
@@ -327,23 +332,25 @@ async def get_trade_account(refresh: bool = False, force: bool = False) -> dict:
 
 @router.put("/trade-token")
 async def put_trade_token(body: TradeTokenBody) -> dict:
+    from app.config import settings
     from app.deriv.account_cache import clear_account_cache
     from app.deriv.trade_session import trade_account_session
+    from app.execution.session_ctl import restart_if_allowed
 
     try:
         meta = save_trade_token(body.token)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     clear_account_cache()
-    await trade_account_session.restart()
-    # Wait briefly for live seed
+    started = await restart_if_allowed()
     account: dict = {"ok": False, "error": "Live session starting…"}
-    for _ in range(20):
-        await asyncio.sleep(0.5)
-        snap = trade_account_session.snapshot()
-        if snap.get("ok"):
-            account = {**snap, "live": trade_account_session.connected}
-            break
+    if started and settings.execution_allowed:
+        for _ in range(20):
+            await asyncio.sleep(0.5)
+            snap = trade_account_session.snapshot()
+            if snap.get("ok"):
+                account = {**snap, "live": trade_account_session.connected}
+                break
     if not account.get("ok"):
         account = await _fetch_trade_account()
     return {
@@ -353,6 +360,14 @@ async def put_trade_token(body: TradeTokenBody) -> dict:
         "message": "Token encrypted and stored. Full token is never returned to the UI.",
         "account": account,
     }
+
+
+@router.get("/execution-status")
+async def execution_status() -> dict:
+    """Server and user gates for optional auto-trading. Never places an order."""
+    from app.execution.gates import permission_status
+
+    return permission_status()
 
 
 @router.delete("/trade-token")
@@ -511,6 +526,25 @@ async def get_current_settings(db: AsyncSession = Depends(get_db)) -> Any:
         "barrier_input": settings.barrier_input,
         "barrier_direction": getattr(settings, "barrier_direction", "both"),
     }
+
+
+@router.post("/manual-touch")
+async def manual_touch(
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Place one One-Touch order from the chart. Does not enable auto-trade."""
+    from app.deriv.manual_order import place_manual_touch
+
+    return await place_manual_touch(
+        db,
+        symbol=str(body.get("symbol") or "R_100"),
+        direction=str(body.get("direction") or ""),
+        barrier=str(body.get("barrier") or ""),
+        stake=float(body.get("stake") or 0),
+        duration=int(body["duration"]) if body.get("duration") not in (None, "") else None,
+        duration_unit=str(body.get("duration_unit") or "m"),
+    )
 
 
 @router.post("/confirm")

@@ -50,6 +50,18 @@ def _auth_headers() -> dict:
     return {"X-Internal-Secret": settings.internal_api_secret}
 
 
+async def _publish_market(payload: dict) -> None:
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as http:
+            await http.post(
+                f"{BACKEND_URL}/market/internal/ingest",
+                json=payload,
+                headers=_auth_headers(),
+            )
+    except Exception as e:
+        logger.warning("worker_market_publish_failed", error=str(e))
+
+
 async def _publish_status(payload: dict) -> None:
     try:
         async with httpx.AsyncClient(timeout=5.0) as http:
@@ -197,7 +209,38 @@ async def worker_loop():
                 })
 
                 if not conf:
-                    await asyncio.sleep(5)
+                    if tick_collector is None:
+                        active_symbol = "R_100"
+                        tick_collector = TickCollector(client, active_symbol)
+                        asyncio.create_task(tick_collector.start())
+                        logger.info("market_only_collector_started", symbol=active_symbol)
+                    if (
+                        candle_cache["data"] is None
+                        or candle_cache.get("symbol") != active_symbol
+                        or time.time() - float(candle_cache["at"]) > 60
+                    ):
+                        try:
+                            from app.strategies.candle_confirm import fetch_deriv_official_candles
+
+                            candle_cache["data"] = await fetch_deriv_official_candles(client, active_symbol)
+                            candle_cache["at"] = time.time()
+                            candle_cache["symbol"] = active_symbol
+                        except Exception as candle_error:
+                            logger.warning("official_candles_worker_failed", error=str(candle_error))
+                    async with async_session() as session:
+                        result = await session.execute(
+                            select(Tick)
+                            .where(Tick.symbol == active_symbol)
+                            .order_by(Tick.epoch.desc())
+                            .limit(200)
+                        )
+                        recent = list(reversed(result.scalars().all()))
+                    await _publish_market({
+                        "symbol": active_symbol,
+                        "ticks": [{"epoch": int(row.epoch), "quote": float(row.quote)} for row in recent],
+                        "candles": candle_cache.get("data") or {},
+                    })
+                    await asyncio.sleep(1)
                     continue
 
                 # Reload the DB-active model. latest_*.json is not an activation source.
@@ -311,6 +354,15 @@ async def worker_loop():
                     official_candles=candle_cache.get("data"),
                     features_df=first_features,
                 ).as_dict()
+                tail = df.tail(200)
+                await _publish_market({
+                    "symbol": active_symbol,
+                    "ticks": [
+                        {"epoch": int(row.epoch), "quote": float(row.quote)}
+                        for row in tail.itertuples(index=False)
+                    ],
+                    "candles": candle_cache.get("data") or {},
+                })
                 heartbeat += 1
                 if heartbeat % 12 == 0:
                     from app.ml.shadow_log import append_shadow_decision

@@ -174,11 +174,9 @@ def build_features(
     df["bb_position"] = bollinger_position(prices, bb_upper, bb_lower)
     df["bb_bandwidth"] = bollinger_bandwidth(bb_upper, bb_lower, bb_middle)
 
-    # --- Donchian Channel ---
-    # Uses shift(1) internally — excludes current period from channel
-    rolling_high = prices.rolling(window=donchian_period, min_periods=donchian_period).max()
-    rolling_low = prices.rolling(window=donchian_period, min_periods=donchian_period).min()
-    dc_upper, dc_lower = donchian_channel(rolling_high, rolling_low, donchian_period)
+    # Prior completed ticks only. donchian_channel applies shift(1), so the
+    # current tick cannot sit inside its own channel.
+    dc_upper, dc_lower = donchian_channel(prices, prices, donchian_period)
 
     df["donchian_breakout_state"] = donchian_breakout_state(prices, dc_upper, dc_lower)
     df["dist_to_donchian_upper"] = (dc_upper - prices) / prices.replace(0, np.nan) * 100

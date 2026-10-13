@@ -69,6 +69,7 @@ async def save_model_version(
     row.algorithm = str(algorithm)
     row.direction = direction
     row.symbol = symbol
+    row.task_id = str(metadata.get("task_id") or f"touch_{direction}")
     row.barrier_distance = float(metadata.get("barrier_distance") or 0)
     row.duration_seconds = int(metadata.get("duration_seconds") or 540)
     row.n_train_samples = split.get("train")
@@ -123,7 +124,7 @@ async def promote_model_version(
     session: AsyncSession,
     version_tag: str,
 ) -> ModelVersion:
-    """Turn a saved model on. Edge evidence and the 14-day wait are not required."""
+    """Turn a saved model on after promotion gates pass."""
     from app.ml.promotion import promotion_blockers
 
     existing = await session.execute(

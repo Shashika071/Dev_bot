@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import get_db, async_session
 from app.features.tick_loader import load_ticks_dataframe, tick_coverage_stats
+from app.ml.history_manifest import prefer_longer_history
 from app.ml.registry import promote_model_version, save_model_version
 from app.ml.trainer import TrainingOrchestrator
 from app.models.quote import Quote
@@ -676,6 +677,8 @@ async def _run_training_background(
                 symbol=symbol,
                 max_ticks=max_ticks,
             )
+            df, history_source = prefer_longer_history(df, symbol)
+            _training_state["progress"] = f"Using {history_source} history ({len(df):,} ticks)..."
             # Load quotes for economic backtest join
             qres = await session.execute(
                 select(Quote)
@@ -750,9 +753,9 @@ async def _run_training_background(
             try:
                 async with async_session() as session:
                     mv = await save_model_version(session, meta, results, activate=False)
-                    mv = await promote_model_version(session, mv.version_tag)
                     results["model_version_id"] = mv.id
-                    results["is_active"] = bool(mv.is_active)
+                    results["is_active"] = False
+                    results["promotion_required"] = True
             except Exception as reg_err:
                 logger.warning("model_registry_persist_failed", error=str(reg_err))
 
@@ -824,6 +827,7 @@ async def start_training(
     min_calibration_samples: int | None = None,
     min_edge_selected: int | None = None,
     auto_raise: bool | None = None,
+    task: str = "touch",
 ) -> dict:
     """
     Kick off the ML training pipeline in the background.
@@ -859,6 +863,17 @@ async def start_training(
         }
     )
 
+    task_id = str(task or "touch").strip().lower()
+    if task_id in {"direction_5m", "direction_15m", "direction_30m"}:
+        asyncio.create_task(_run_direction_background(symbol, task_id))
+        return {
+            "status": "started",
+            "message": f"Training {task_id}. The model stays inactive until it passes the gates and is promoted.",
+            "task": task_id,
+        }
+    if task_id not in {"touch", "touch_upper", "touch_lower"}:
+        raise HTTPException(status_code=400, detail="task must be touch or direction_5m, direction_15m, direction_30m")
+
     asyncio.create_task(
         _run_training_background(
             symbol,
@@ -872,11 +887,58 @@ async def start_training(
 
     return {
         "status": "started",
-        "message": "Training job queued. Poll /train/status for updates.",
+        "message": "Training job queued. It will not become active until you promote a model that passed the gates.",
         "min_calibration_samples": cal,
         "min_edge_selected": edge,
         "env_is_default_only": True,
+        "task": "touch",
     }
+
+
+async def _run_direction_background(symbol: str, task_id: str) -> None:
+    """Train one directional horizon and save it inactive."""
+    global _training_state
+    _training_state = {
+        "status": "running",
+        "progress": f"Training {task_id} from retained history...",
+        "result": None,
+        "error": None,
+    }
+    try:
+        max_ticks = int(settings.train_max_ticks or 0)
+        async with async_session() as session:
+            df = await load_ticks_dataframe(session, symbol=symbol, max_ticks=max_ticks)
+        df, history_source = prefer_longer_history(df, symbol)
+        from app.ml.direction_task import train_direction_task
+
+        loop = asyncio.get_event_loop()
+        results = await loop.run_in_executor(
+            None, lambda: train_direction_task(df, task_id, symbol=symbol)
+        )
+        if results.get("error"):
+            _training_state = {"status": "error", "progress": "", "result": None, "error": results["error"]}
+            return
+        meta = results["metadata"]
+        async with async_session() as session:
+            await save_model_version(session, meta, results, activate=False)
+        _training_state = {
+            "status": "done",
+            "progress": "Direction model saved. Promote it only after the gates pass.",
+            "result": {
+                "version_tag": meta["version_tag"],
+                "selected_pipeline": meta["selected_pipeline"],
+                "promotion_ready": bool(meta["promotion_ready"]),
+                "has_demonstrated_edge": bool(meta["promotion_ready"]),
+                "is_active": False,
+                "task_id": task_id,
+                "history_source": history_source,
+                "metrics": meta.get("metrics") or {},
+            },
+            "error": None,
+        }
+    except Exception as exc:
+        logger.error("direction_training_failed", error=str(exc))
+        _training_state = {"status": "error", "progress": "", "result": None, "error": str(exc)}
 
 
 # ── Download endpoint (no WebSocket needed) ────────────────────────────────────
@@ -1061,7 +1123,7 @@ async def promote_trained_model(
     body: PromoteBody,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """Activate a saved model. Edge evidence and the 14-day wait are not required."""
+    """Activate a saved model only after the recorded promotion gates pass."""
     from app.ml.registry import promote_model_version
 
     try:

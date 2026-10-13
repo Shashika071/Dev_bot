@@ -69,6 +69,9 @@ def _defaults() -> dict[str, Any]:
         "cross_barrier_require_candles": True,
         # Optional: also require touch confluence on Cross (stricter)
         "cross_barrier_require_confluence": False,
+        # Second user gate. Server EXECUTION_ALLOWED must also be true.
+        "execution_confirmed": False,
+        "daily_loss_limit": 0.0,
     }
 
 
@@ -99,6 +102,8 @@ def _clamp(prefs: dict[str, Any]) -> dict[str, Any]:
     out["cross_barrier_require_confluence"] = bool(
         out.get("cross_barrier_require_confluence", False)
     )
+    out["execution_confirmed"] = bool(out.get("execution_confirmed", False))
+    out["daily_loss_limit"] = max(0.0, min(100000.0, float(out.get("daily_loss_limit") or 0)))
     return out
 
 

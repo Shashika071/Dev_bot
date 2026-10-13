@@ -563,7 +563,11 @@ class DerivTradeClient:
             raise
         if data.get("error"):
             err = data["error"]
-            raise RuntimeError(err.get("message") or str(err))
+            message = err.get("message") or str(err)
+            code = err.get("code")
+            if code:
+                message = f"{message} ({code})"
+            raise RuntimeError(message)
         return data
 
     async def authorize(self) -> dict:
@@ -715,8 +719,24 @@ class DerivTradeClient:
         data = await self.send(msg)
         return data.get("proposal") or {}
 
-    async def buy(self, proposal_id: str, price: float) -> dict:
-        data = await self.send({"buy": str(proposal_id), "price": float(price)})
+    async def buy(
+        self,
+        proposal_id: str,
+        price: float,
+        *,
+        parameters: Optional[dict] = None,
+    ) -> dict:
+        # PAT options sockets reject proposal ids ("Unknown contract proposal").
+        # Pass the contract in `parameters` and set buy to "1".
+        if parameters is not None:
+            msg: dict[str, Any] = {
+                "buy": "1",
+                "price": float(price),
+                "parameters": parameters,
+            }
+        else:
+            msg = {"buy": str(proposal_id), "price": float(price)}
+        data = await self.send(msg)
         return data.get("buy") or data
 
     async def place_one_touch(
@@ -751,8 +771,26 @@ class DerivTradeClient:
                 ask = 0.0
             if not pid or ask <= 0:
                 return {"ok": False, "error": "Empty proposal from Deriv", "raw": proposal}
-            buy_price = round(ask * 1.02, 2)
-            bought = await self.buy(pid, buy_price)
+            # price is the maximum Deriv may charge. A small cushion covers a tick
+            # of quote movement between the proposal and the buy.
+            buy_price = round(max(ask, ask * 1.02), 2)
+            if self._use_pat:
+                bought = await self.buy(
+                    pid,
+                    buy_price,
+                    parameters={
+                        "amount": float(stake),
+                        "basis": "stake",
+                        "contract_type": "ONETOUCH",
+                        "currency": currency,
+                        "duration": int(duration),
+                        "duration_unit": duration_unit,
+                        "barrier": str(barrier),
+                        "underlying_symbol": symbol,
+                    },
+                )
+            else:
+                bought = await self.buy(pid, buy_price)
             try:
                 buy_price_out = float(bought.get("buy_price") or ask)
             except (TypeError, ValueError):

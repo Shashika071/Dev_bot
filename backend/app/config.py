@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     )
 
     # --- Application ---
+    execution_allowed: bool = Field(
+        False,
+        description="Server gate for optional auto-trading. Analysis never places orders when this is false.",
+    )
     app_timezone: str = Field("Asia/Colombo", description="Timezone for daily signal cap reset")
     max_signals_per_day: int = Field(3, ge=0, le=25)
     signal_cooldown_seconds: int = Field(

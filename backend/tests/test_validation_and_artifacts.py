@@ -104,8 +104,24 @@ def test_promotion_does_not_wait_for_edge_or_shadow():
         "lockbox_beats_baseline": False,
         "shadow_started_at": now.isoformat(),
     }
-    assert promotion_blockers(fresh, now=now) == []
-    assert promotion_blockers({}, now=now) == []
+    assert promotion_blockers(fresh, now=now) == [
+        "model has not passed promotion gates",
+        "missing gate: min_samples",
+        "missing gate: calibration",
+        "missing gate: stability",
+        "missing gate: beats_baseline",
+    ]
+    ready = {
+        "promotion_ready": True,
+        "promotion_checks": {
+            "min_samples": True,
+            "calibration": True,
+            "stability": True,
+            "beats_baseline": True,
+        },
+    }
+    assert promotion_blockers(ready, now=now) == []
+    assert promotion_blockers({}, now=now) == ["missing training metadata"]
 
 
 def test_aggregate_ignores_tiny_folds():

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  Activity, ShieldCheck, Zap, AlertTriangle, Settings,
+  Activity, ShieldCheck, Zap, AlertTriangle, Settings, Home,
   RefreshCw, BarChart2, Brain, CheckCircle, XCircle,
   Loader2, Wifi, WifiOff, Clock, Database, TrendingUp,
   ChevronRight, Info, Signal, Cpu, Volume2, Trash2
@@ -10,6 +10,7 @@ import {
   ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid,
 } from 'recharts';
 import { playSignalAlertSound, unlockSignalAudio } from './signalAlert';
+import { AnalysisPage } from './pages/AnalysisPage';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -189,7 +190,7 @@ interface DownloadStatus {
   target_ticks?: number | null;
 }
 interface DailyStatus { signals_today: number; max_signals: number; cooldown_active: boolean; timezone: string; }
-type Tab = 'dashboard' | 'train' | 'setup';
+type Tab = 'analysis' | 'dashboard' | 'train' | 'setup';
 
 function hoursBetween(oldest?: string, newest?: string): number | null {
   if (!oldest || !newest) return null;
@@ -347,12 +348,19 @@ async function api<T>(path: string, opts?: RequestInit): Promise<T> {
 
 // ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [tab, setTab]           = useState<Tab>('dashboard');
+  const [tab, setTab]           = useState<Tab>('analysis');
   const [status, setStatus]     = useState<ApiStatus|null>(null);
   const [daily, setDaily]       = useState<DailyStatus|null>(null);
   const [online, setOnline]     = useState(false);
   const [signalFlash, setSignalFlash] = useState<string|null>(null);
   const [soundReady, setSoundReady] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(() => {
+    try { return localStorage.getItem('sidebar-open') !== '0'; } catch { return true; }
+  });
+
+  useEffect(() => {
+    try { localStorage.setItem('sidebar-open', sidebarOpen ? '1' : '0'); } catch { /* keep the in-memory choice */ }
+  }, [sidebarOpen]);
 
   const applyStatus = useCallback((raw: any) => {
     if (!raw || typeof raw !== 'object') return;
@@ -387,6 +395,7 @@ export default function App() {
         statusWs.onmessage = e => {
           try {
             const msg = JSON.parse(e.data);
+            if (msg?.type && msg.type !== 'status_update') return;
             applyStatus(msg?.data ?? msg);
           } catch {}
         };
@@ -450,6 +459,7 @@ export default function App() {
   };
 
   const navItems: { id: Tab; label: string; icon: JSX.Element }[] = [
+    { id: 'analysis',  label: 'Home',         icon: <Home size={16}/> },
     { id: 'dashboard', label: 'Dashboard',    icon: <Activity size={16}/> },
     { id: 'train',     label: 'Train Model',  icon: <Brain size={16}/>    },
     { id: 'setup',     label: 'Configuration',icon: <Settings size={16}/> },
@@ -458,7 +468,7 @@ export default function App() {
   const capPct = daily ? Math.min(100, (daily.signals_today / daily.max_signals) * 100) : 0;
 
   return (
-    <div className="app-shell fade-in">
+    <div className={`app-shell fade-in${sidebarOpen ? '' : ' sidebar-hidden'}`}>
       {signalFlash && (
         <div className="signal-flash-banner" role="alert" onClick={() => setSignalFlash(null)}>
           <Volume2 size={28} />
@@ -470,8 +480,7 @@ export default function App() {
         </div>
       )}
 
-      {/* ── Sidebar ── */}
-      <aside className="sidebar">
+      {sidebarOpen && <aside className="sidebar">
         {/* Logo */}
         <div className="logo">
           <div className="logo-icon"><Zap size={18} color="#fff" /></div>
@@ -479,6 +488,9 @@ export default function App() {
             <span className="logo-text">DerivQuant</span>
             <span className="logo-sub">ML Signal Engine</span>
           </div>
+          <button type="button" className="sidebar-hide" title="Hide sidebar" onClick={() => setSidebarOpen(false)}>
+            <ChevronRight size={14} style={{ transform: 'rotate(180deg)' }} />
+          </button>
         </div>
 
         <button
@@ -528,10 +540,22 @@ export default function App() {
           <div className="cap-bar"><div className="cap-bar-fill" style={{width:`${capPct}%`}}/></div>
           <div className="cap-meta">Resets midnight · {daily?.timezone ?? 'Asia/Colombo'}</div>
         </div>
-      </aside>
+      </aside>}
+      {!sidebarOpen && tab !== 'analysis' && (
+        <button type="button" className="sidebar-show" title="Show sidebar" onClick={() => setSidebarOpen(true)}>
+          <ChevronRight size={16} />
+        </button>
+      )}
 
       {/* ── Main ── */}
-      <main className="main-content">
+      <main className={`main-content${tab === 'analysis' ? ' main-chart' : ''}`}>
+        {tab === 'analysis'  && (
+          <AnalysisPage
+            symbol={status?.symbol || 'R_100'}
+            sidebarOpen={sidebarOpen}
+            onToggleSidebar={() => setSidebarOpen((open) => !open)}
+          />
+        )}
         {tab === 'dashboard' && <DashboardView apiStatus={status} />}
         {tab === 'train'     && <TrainView />}
         {tab === 'setup'     && <SetupView online={online} />}
@@ -1125,30 +1149,8 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
         <div className="flex gap-3 items-center">
           <span className="badge badge-amber"><AlertTriangle size={11}/>Research Mode</span>
           <button
-            id="btn-analyze-signal"
-            className="btn btn-primary"
-            onClick={() => openWatchPicker('standard')}
-            disabled={analyzeBusy || !models?.trained}
-            title="Pick trained model + trade barrier, then watch until full gates pass"
-          >
-            {watchMode === 'standard' ? <Loader2 size={14} className="spin"/> : <Zap size={14}/>}
-            {watchMode === 'standard' ? 'Watching Analyze…' : 'Analyze & Signal'}
-          </button>
-          <button
-            id="btn-force-signal"
-            className="btn btn-ghost"
-            onClick={() => openWatchPicker('force_model_candles')}
-            disabled={analyzeBusy || !models?.trained}
-            title="Pick model + barrier, then watch until candles + min p"
-          >
-            {watchMode === 'force_model_candles' ? <Loader2 size={14} className="spin"/> : <Zap size={14}/>}
-            {watchMode === 'force_model_candles'
-              ? 'Watching Force…'
-              : `Force (${(forceMinP * 100).toFixed(0)}% + candles)`}
-          </button>
-          <button
             id="btn-cross-barrier-signal"
-            className="btn btn-ghost"
+            className="btn btn-primary"
             onClick={() => openWatchPicker('cross_barrier')}
             disabled={analyzeBusy || !models?.trained}
             title="Pick train model barrier and different trade barrier (e.g. 0.9 → 0.09)"
@@ -1579,7 +1581,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
             <div className="alert alert-warning mt-2">
               <AlertTriangle size={14}/>
               Auto alerts paused{perf.pause_reason ? `: ${perf.pause_reason}` : '.'}
-              {' '}Analyze & Signal still available for research.
+              {' '}Cross-barrier is still available for research.
             </div>
           )}
           {perf?.performance && (perf.performance.resolved ?? 0) > 0 && (
@@ -1593,8 +1595,7 @@ function DashboardView({ apiStatus }: { apiStatus: ApiStatus|null }) {
           {models?.trained && (
             <p className="text-xs text-dim mt-3">
               Auto alerts use the active model plus tick confluence, candle confirm (1m/5m), the quote check, and the trend gate. Edge is shown for information.
-              <span className="text-amber"> Analyze & Signal</span> uses the same gates with a confidence floor (default ≥95%).
-              <span className="text-amber"> Analyze / Force</span> keep searching until <strong>3 signals/day</strong>.
+              <span className="text-amber"> Cross-barrier</span> scores the trained barrier and buys the trade barrier you pick. It keeps searching until <strong>3 signals/day</strong>.
               After each trade: cooldown (market rest) before the next — not immediate. Stop cancels.
             </p>
           )}
@@ -2564,8 +2565,8 @@ function TrainView() {
 
           <div className={`alert ${ts.result.has_demonstrated_edge ? 'alert-success' : 'alert-warning'} mb-4`}>
             {ts.result.has_demonstrated_edge
-              ? <><CheckCircle size={14}/>Selected pipeline shows held-out edge</>
-              : <><AlertTriangle size={14}/>No demonstrated edge — model is on; quote, candles, and trend still apply</>}
+              ? <><CheckCircle size={14}/>Gates passed. Promote this version before it can go live.</>
+              : <><AlertTriangle size={14}/>Saved but inactive. It cannot go live until the promotion gates pass.</>}
             <div className="text-xs mt-1">{ts.result.edge_description}</div>
           </div>
 
@@ -2691,6 +2692,8 @@ type TradePrefs = {
   cross_barrier_min_probability: number;
   cross_barrier_require_candles: boolean;
   cross_barrier_require_confluence: boolean;
+  execution_confirmed: boolean;
+  daily_loss_limit: number;
   token_configured?: boolean;
   token_mask?: string | null;
 };
@@ -2711,6 +2714,8 @@ const DEFAULT_TRADE: TradePrefs = {
   cross_barrier_min_probability: 0.8,
   cross_barrier_require_candles: true,
   cross_barrier_require_confluence: false,
+  execution_confirmed: false,
+  daily_loss_limit: 0,
   token_configured: false,
   token_mask: null,
 };
@@ -2792,6 +2797,8 @@ function SetupView({ online }: { online: boolean }) {
           cross_barrier_min_probability: Number(r.cross_barrier_min_probability ?? 0.8),
           cross_barrier_require_candles: r.cross_barrier_require_candles !== false,
           cross_barrier_require_confluence: !!r.cross_barrier_require_confluence,
+          execution_confirmed: !!r.execution_confirmed,
+          daily_loss_limit: Number(r.daily_loss_limit ?? 0),
           token_configured: !!r.token_configured,
           token_mask: r.token_mask ?? null,
         });
@@ -2836,6 +2843,8 @@ function SetupView({ online }: { online: boolean }) {
           cross_barrier_min_probability: trade.cross_barrier_min_probability,
           cross_barrier_require_candles: trade.cross_barrier_require_candles,
           cross_barrier_require_confluence: trade.cross_barrier_require_confluence,
+          execution_confirmed: trade.execution_confirmed,
+          daily_loss_limit: trade.daily_loss_limit,
         }),
       });
       setTrade(prev => ({
@@ -2855,6 +2864,8 @@ function SetupView({ online }: { online: boolean }) {
         ),
         cross_barrier_require_candles: r.cross_barrier_require_candles !== false,
         cross_barrier_require_confluence: !!r.cross_barrier_require_confluence,
+        execution_confirmed: !!r.execution_confirmed,
+        daily_loss_limit: Number(r.daily_loss_limit ?? prev.daily_loss_limit),
         token_configured: r.token_configured ?? prev.token_configured,
         token_mask: r.token_mask ?? prev.token_mask,
       }));
@@ -3234,7 +3245,27 @@ function SetupView({ online }: { online: boolean }) {
             checked={trade.auto_trade_enabled}
             onChange={e => setTrade(prev => ({ ...prev, auto_trade_enabled: e.target.checked }))}
           />
-          Enable auto-trade (demo or real)
+          Enable auto-trade (still blocked unless the server gate and confirmation are both on)
+        </label>
+        <label className="text-sm flex items-center gap-2 mb-3" style={{ cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={trade.execution_confirmed}
+            onChange={e => setTrade(prev => ({ ...prev, execution_confirmed: e.target.checked }))}
+          />
+          I confirm optional auto-trade may place orders
+        </label>
+        <label className="text-sm flex items-center gap-2 mb-3">
+          Daily loss limit
+          <input
+            className="input"
+            type="number"
+            min={0}
+            step={1}
+            value={trade.daily_loss_limit}
+            onChange={e => setTrade(prev => ({ ...prev, daily_loss_limit: Number(e.target.value) }))}
+            style={{ width: 120 }}
+          />
         </label>
 
         <div className="flex items-center gap-4 mb-3" style={{ flexWrap: 'wrap' }}>

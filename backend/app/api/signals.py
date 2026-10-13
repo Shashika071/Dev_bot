@@ -15,7 +15,7 @@ from app.config import settings
 
 logger = structlog.get_logger(__name__)
 from app.database import get_db
-from app.deriv.auto_trade import maybe_auto_trade_after_signal
+from app.execution.boundary import maybe_execute_signal
 from app.models.outcome import SignalOutcome
 from app.models.signal import Signal
 from app.models.tick import Tick
@@ -61,6 +61,9 @@ def _signal_to_dict(signal: Signal) -> dict:
         "strategy_name": signal.strategy_name,
         "purchase_price": signal.purchase_price,
         "total_payout": signal.total_payout,
+        "reference_price": signal.reference_price,
+        "resolved_barrier": signal.resolved_barrier,
+        "epoch": int(signal.created_at.timestamp()) if signal.created_at else None,
     }
 
 
@@ -165,6 +168,21 @@ async def chart_candles(
     cached = False
 
     if source in ("official", "auto"):
+        from app.market_data.hub import market_hub
+
+        if market_hub.fresh(sym, interval, max_age=45):
+            cached_rows = market_hub.candles(sym, interval, limit)
+            if len(cached_rows) >= 2:
+                return {
+                    "symbol": sym,
+                    "interval": interval,
+                    "count": len(cached_rows),
+                    "last_quote": cached_rows[-1]["close"],
+                    "candles": cached_rows,
+                    "source": "market_hub",
+                    "cached": True,
+                    "official_error": None,
+                }
         cache_key = f"{sym}:{interval}:{limit}"
         hit = _CHART_OHLC_CACHE.get(cache_key)
         now = time.time()
@@ -279,7 +297,7 @@ async def generate_signal(
         except Exception:
             pass
         try:
-            trade = await maybe_auto_trade_after_signal(db, result["signal"])
+            trade = await maybe_execute_signal(db, result["signal"])
             result["trade"] = trade
         except Exception as e:
             result["trade"] = {"ok": False, "error": str(e)}

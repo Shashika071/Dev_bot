@@ -79,6 +79,32 @@ body {
   gap: 0;
 }
 
+.app-shell.sidebar-hidden { grid-template-columns: 1fr; }
+
+.sidebar-hide, .sidebar-show {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.sidebar-hide { margin-left: auto; flex-shrink: 0; }
+.sidebar-hide:hover, .sidebar-show:hover { color: var(--text-primary); border-color: var(--border-bright); }
+
+.sidebar-show {
+  position: fixed;
+  top: 12px;
+  left: 10px;
+  z-index: 40;
+  background: #131722;
+}
+
 /* ── Sidebar ─────────────────────────────────────────── */
 .sidebar {
   background: rgba(5, 10, 22, 0.95);
@@ -263,6 +289,13 @@ body {
   flex-direction: column;
   gap: 1.5rem;
   min-width: 0;
+}
+
+.main-chart {
+  padding: 0.75rem 1rem;
+  height: 100vh;
+  overflow: hidden;
+  gap: 0;
 }
 
 /* ── Glass Panel ─────────────────────────────────────── */
@@ -1121,6 +1154,25 @@ select {
   to   { filter: brightness(1.18); }
 }
 
+.analysis-workspace { display: flex; flex-direction: column; gap: 0; height: 100%; min-height: 0; background: #0e0e0e; }
+.analysis-toolbar, .analysis-row { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+.analysis-toolbar { padding: 0.45rem 0.75rem; background: #131722; border-bottom: 1px solid #2a2e39; }
+.analysis-toolbar strong { color: #d1d4dc; letter-spacing: 0.02em; }
+.analysis-toolbar button, .analysis-side { font-size: 12px; }
+.analysis-toolbar button { background: transparent; color: #787b86; border: 1px solid transparent; border-radius: 4px; padding: 0.25rem 0.55rem; cursor: pointer; }
+.analysis-toolbar button.active { color: #d1d4dc; background: #2a2e39; }
+.analysis-stage { flex: 1; min-height: 0; display: grid; grid-template-columns: 44px minmax(0, 1fr); }
+.analysis-stage.readings-open { grid-template-columns: 44px minmax(0, 1fr) 320px; }
+.analysis-tools { display: flex; flex-direction: column; gap: 2px; padding: 6px; background: #131722; border-right: 1px solid #2a2e39; }
+.analysis-tools button { width: 32px; height: 32px; border: none; background: transparent; color: #787b86; border-radius: 4px; cursor: pointer; font-size: 14px; }
+.analysis-tools button.active { background: #2a2e39; color: #d1d4dc; }
+.analysis-chart { height: 100%; min-height: 0; border: none; border-radius: 0; overflow: hidden; }
+.analysis-side { background: #131722; border: none; border-left: 1px solid #2a2e39; border-radius: 0; padding: 0.8rem; overflow: auto; height: 100%; max-height: none; }
+.analysis-side h3 { margin: 0.8rem 0 0.3rem; font-size: 13px; }
+.analysis-row { justify-content: space-between; }
+.analysis-row b { font-weight: 500; text-align: right; max-width: 58%; }
+.analysis-side ul { margin: 0.25rem 0 0.25rem 1rem; padding: 0; }
+
 /* ── Scrollbar ───────────────────────────────────────── */
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -1129,6 +1181,10 @@ select {
 
 /* ── Responsive ──────────────────────────────────────── */
 @media (max-width: 900px) {
+  .analysis-stage, .analysis-stage.readings-open { grid-template-columns: 44px minmax(0, 1fr); }
+  .analysis-stage.readings-open .analysis-side { grid-column: 1 / -1; max-height: 40vh; }
+  .main-chart { height: auto; overflow: auto; }
+  .analysis-chart { min-height: 60vh; }
   .app-shell { grid-template-columns: 1fr; }
   .sidebar { height: auto; position: relative; padding: 1rem; flex-direction: row; flex-wrap: wrap; }
   .cap-widget { display: none; }

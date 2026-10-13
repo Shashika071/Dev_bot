@@ -430,6 +430,7 @@ class DerivWSClient:
         *,
         granularity: int = 60,
         count: int = 80,
+        end: int | str = "latest",
     ) -> list[dict]:
         """
         Official Deriv OHLC candles (public WS).
@@ -438,11 +439,15 @@ class DerivWSClient:
         """
         data = await self.get_ticks_history(
             symbol,
-            end="latest",
+            end=end,
             style="candles",
             count=int(count),
             granularity=int(granularity),
         )
+        if isinstance(data, dict) and data.get("error"):
+            err = data["error"]
+            message = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+            raise RuntimeError(message)
         raw = data.get("candles") or data.get("history") or []
         if isinstance(raw, dict):
             # Some payloads nest under history-like keys

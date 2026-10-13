@@ -6,15 +6,19 @@ status/signals over HTTP into this module so the UI can receive them.
 """
 
 import json
-from typing import Any, Optional, Set
+from typing import Any
 from datetime import datetime, timezone
 
 import structlog
 
 logger = structlog.get_logger(__name__)
 
-# Connected WebSocket clients (API process only)
-_ws_clients: Set = set()
+# Price updates, alerts, and connection status each have their own listeners.
+_channels: dict[str, set] = {
+    "status": set(),
+    "notifications": set(),
+    "market": set(),
+}
 
 # Latest worker heartbeat (API process memory)
 _latest_status: dict[str, Any] = {
@@ -27,16 +31,26 @@ _latest_status: dict[str, Any] = {
 }
 
 
-def register_client(ws):
-    """Register a WebSocket client for notifications."""
-    _ws_clients.add(ws)
-    logger.info("browser_notification_client_registered", total=len(_ws_clients))
+def register_client(ws, channel: str = "notifications"):
+    """Register a WebSocket client for one kind of push."""
+    _channels.setdefault(channel, set()).add(ws)
+    logger.info(
+        "browser_notification_client_registered",
+        channel=channel,
+        total=len(_channels[channel]),
+    )
 
 
 def unregister_client(ws):
-    """Unregister a WebSocket client."""
-    _ws_clients.discard(ws)
-    logger.info("browser_notification_client_unregistered", total=len(_ws_clients))
+    """Unregister a WebSocket client from every channel."""
+    for channel, bucket in _channels.items():
+        if ws in bucket:
+            bucket.discard(ws)
+            logger.info(
+                "browser_notification_client_unregistered",
+                channel=channel,
+                total=len(bucket),
+            )
 
 
 def normalize_status(status_data: dict) -> dict[str, Any]:
@@ -58,39 +72,32 @@ def get_latest_status() -> dict[str, Any]:
     return dict(_latest_status)
 
 
-async def send_notification(event_type: str, data: dict):
-    """
-    Send a notification to all connected browser clients.
-    Falls back gracefully if no clients are connected.
-    """
-    if not _ws_clients:
-        return
-
+async def send_notification(event_type: str, data: dict, *, channels: tuple[str, ...]):
+    """Send one event to the listeners registered for these channels."""
     message = json.dumps({
         "type": event_type,
         "data": data,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
-
-    disconnected = set()
-    for ws in _ws_clients.copy():
-        try:
-            await ws.send_text(message)
-        except Exception:
-            disconnected.add(ws)
-
-    for ws in disconnected:
-        _ws_clients.discard(ws)
+    disconnected: list[tuple[str, Any]] = []
+    for channel in channels:
+        for ws in list(_channels.get(channel) or ()):
+            try:
+                await ws.send_text(message)
+            except Exception:
+                disconnected.append((channel, ws))
+    for channel, ws in disconnected:
+        _channels.get(channel, set()).discard(ws)
 
 
 async def send_signal_notification(signal_data: dict):
-    """Send a signal alert notification."""
-    await send_notification("signal_alert", signal_data)
+    """Send a signal alert to the alert socket and the market chart."""
+    await send_notification("signal_alert", signal_data, channels=("notifications", "market"))
 
 
 async def send_status_update(status_data: dict):
-    """Store + broadcast a status update to browser clients."""
+    """Store + broadcast a status update to the connection-status socket only."""
     global _latest_status
     normalized = normalize_status(status_data)
     _latest_status = normalized
-    await send_notification("status_update", normalized)
+    await send_notification("status_update", normalized, channels=("status",))
