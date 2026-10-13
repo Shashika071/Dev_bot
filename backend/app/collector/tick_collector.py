@@ -9,10 +9,11 @@ Features:
 """
 
 import asyncio
-import time
+import os
 from datetime import datetime, timezone
 from typing import Optional
 
+import httpx
 import structlog
 from sqlalchemy import select, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -40,6 +41,7 @@ class TickCollector:
         self._tick_count = 0
         self._gap_count = 0
         self._running = False
+        self._chart_pushes: set[asyncio.Task] = set()
 
     async def start(self):
         """Start tick collection."""
@@ -127,6 +129,7 @@ class TickCollector:
 
             self._last_epoch = epoch
             self._tick_count += 1
+            self._push_chart_tick(int(epoch), float(quote))
 
             if self._tick_count % 100 == 0:
                 logger.info("tick_collector_progress",
@@ -136,6 +139,29 @@ class TickCollector:
 
         except Exception as e:
             logger.error("tick_collector_persist_error", error=str(e))
+
+    def _push_chart_tick(self, epoch: int, quote: float) -> None:
+        """Send this tick to the chart now. The signal loop only publishes about every 5 seconds."""
+        task = asyncio.create_task(self._post_chart_tick(epoch, quote))
+        self._chart_pushes.add(task)
+        task.add_done_callback(self._chart_pushes.discard)
+
+    async def _post_chart_tick(self, epoch: int, quote: float) -> None:
+        from app.config import settings
+
+        url = os.getenv("BACKEND_URL", "http://backend:8000").rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as http:
+                await http.post(
+                    f"{url}/market/internal/ingest",
+                    json={
+                        "symbol": self.symbol,
+                        "ticks": [{"epoch": epoch, "quote": quote}],
+                    },
+                    headers={"X-Internal-Secret": settings.internal_api_secret},
+                )
+        except Exception as e:
+            logger.warning("tick_chart_push_failed", error=str(e))
 
     @property
     def stats(self) -> dict:

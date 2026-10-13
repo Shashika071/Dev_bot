@@ -72,7 +72,7 @@ export function AnalysisPage({
       const next = await api<Snapshot>(
         `/analysis/snapshot?symbol=${encodeURIComponent(symbol)}&interval=${interval === 'tick' ? '1m' : interval}`,
       );
-      setSnapshot(next);
+      setSnapshot((current) => keepLiveCandle(current, next));
       const saved = await api<Array<Record<string, any>>>(
         `/analysis/annotations?symbol=${encodeURIComponent(symbol)}&interval=${interval === 'tick' ? '1m' : interval}`,
       );
@@ -525,6 +525,30 @@ const STEP_SECONDS: Record<string, number> = {
   '1h': 3600,
   '1d': 86400,
 };
+
+function keepLiveCandle<T extends { candles?: Array<{ epoch: number; open: number; high: number; low: number; close: number }> }>(
+  current: T | null,
+  next: T,
+): T {
+  const liveBars = current?.candles;
+  const nextBars = next.candles;
+  if (!liveBars?.length || !nextBars?.length) return next;
+  const live = liveBars[liveBars.length - 1];
+  const incoming = nextBars[nextBars.length - 1];
+  if (live.epoch < incoming.epoch) return next;
+  const candles = nextBars.slice();
+  if (live.epoch === incoming.epoch) {
+    candles[candles.length - 1] = {
+      ...incoming,
+      high: Math.max(incoming.high, live.high),
+      low: Math.min(incoming.low, live.low),
+      close: live.close,
+    };
+  } else {
+    candles.push(live);
+  }
+  return { ...next, candles };
+}
 
 function applyLiveTick<T extends { candles: Array<{ epoch: number; open: number; high: number; low: number; close: number }> }>(
   current: T | null,
