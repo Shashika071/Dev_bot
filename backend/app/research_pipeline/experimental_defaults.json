@@ -1,0 +1,20 @@
+{
+  "confirmed_trading_settings": false,
+  "symbol": "R_100",
+  "symbol_note": "Experimental default: standard Volatility 100 (R_100), not the 1-second index 1HZ100V. Not a confirmed instrument choice.",
+  "target": "all",
+  "horizon_seconds": 540,
+  "barrier_distance": 0.3,
+  "barrier_unit": "relative_price_points",
+  "entry_delay_seconds": 5,
+  "tie_policy": "exclude",
+  "sample_every_seconds": 540,
+  "max_gap_seconds": 5,
+  "warmup_seconds": 1500,
+  "test_fraction": 0.2,
+  "seed": 42,
+  "min_labeled_rows": 80,
+  "hypothetical_r": null,
+  "enable_lstm": false,
+  "fast": false
+}

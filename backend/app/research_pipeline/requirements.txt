@@ -1,0 +1,15 @@
+# Research pipeline dependencies.
+# Versions match backend/requirements.txt. The live app already installs these.
+pandas==2.2.3
+numpy==1.26.4
+scikit-learn==1.5.2
+catboost==1.2.7
+xgboost==2.1.1
+scipy==1.14.1
+pyarrow==17.0.0
+psycopg2-binary==2.9.9
+
+# Optional sequence model. The backend image installs the CPU wheel:
+#   pip install --index-url https://download.pytorch.org/whl/cpu torch==2.4.1
+# The pipeline skips the LSTM when torch is missing or when it does not
+# improve chronological validation loss.
