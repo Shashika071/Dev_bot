@@ -229,6 +229,18 @@ def test_quote_r_uses_development_decisions_only():
     assert abs(result["r"] - 0.5) < 1e-9
 
 
+def test_train_command_accepts_symbol_once(monkeypatch):
+    from app.research_pipeline.__main__ import main
+    from app.research_pipeline.io_ticks import psycopg_dsn
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert main(["inspect", "--symbol", "R_100"]) == 2
+    assert main(["train", "--symbol", "R_100", "--out", "unused"]) == 2
+    assert psycopg_dsn("postgresql+asyncpg://user:secret@postgres:5432/deriv_bot") == (
+        "postgresql://user:secret@postgres:5432/deriv_bot"
+    )
+
+
 def test_feature_groups_add_indicators_without_using_tick_count_as_volume():
     assert "tick_count" not in columns_for("strategy", "upper_touch")
     assert "ret_1m" in columns_for("returns_vol", "direction")

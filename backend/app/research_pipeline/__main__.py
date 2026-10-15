@@ -30,7 +30,6 @@ def main(argv: list[str] | None = None) -> int:
 
     inspect = sub.add_parser("inspect", help="Describe a tick file or database table")
     _add_source(inspect)
-    inspect.add_argument("--symbol", default=None)
 
     train = sub.add_parser("train", help="Train and evaluate. Does not place orders.")
     _add_source(train)

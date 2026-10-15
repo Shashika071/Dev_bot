@@ -35,6 +35,14 @@ def load_quotes(path: str | Path) -> pd.DataFrame:
     return frame
 
 
+def psycopg_dsn(dsn: str) -> str:
+    """Accept the app's SQLAlchemy URL. psycopg2 cannot use the +asyncpg driver suffix."""
+    for prefix in ("postgresql+asyncpg://", "postgres+asyncpg://"):
+        if dsn.startswith(prefix):
+            return "postgresql://" + dsn[len(prefix):]
+    return dsn
+
+
 def load_postgres(dsn: str, symbol: str) -> pd.DataFrame:
     import psycopg2
 
@@ -44,7 +52,7 @@ def load_postgres(dsn: str, symbol: str) -> pd.DataFrame:
         WHERE symbol = %s
         ORDER BY epoch
     """
-    with psycopg2.connect(dsn) as conn:
+    with psycopg2.connect(psycopg_dsn(dsn)) as conn:
         return pd.read_sql_query(query, conn, params=(symbol,))
 
 
