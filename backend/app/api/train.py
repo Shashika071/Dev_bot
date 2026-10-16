@@ -11,7 +11,8 @@ from typing import Any
 
 import pandas as pd
 import structlog
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1070,6 +1071,78 @@ async def download_options(symbol: str = "R_100") -> dict:
         ),
         "presets": presets,
     }
+
+
+@router.get("/export-ticks")
+async def export_ticks(
+    symbol: str = Query(default="R_100", min_length=1, max_length=32),
+    format: str = Query(default="csv", pattern="^(csv|parquet)$"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Download every stored tick for one symbol to the browser (local file).
+
+    This exports the database, not a fresh Deriv pull. Use Fill history first
+    if you need the public ~24h window filled into the DB.
+    """
+    result = await db.execute(
+        select(Tick.symbol, Tick.epoch, Tick.quote, Tick.tick_time, Tick.is_gap)
+        .where(Tick.symbol == symbol)
+        .order_by(Tick.epoch.asc())
+    )
+    rows = result.all()
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"No ticks stored for {symbol}.")
+
+    frame = pd.DataFrame(
+        [
+            {
+                "symbol": str(symbol_value),
+                "epoch": int(epoch),
+                "quote": float(quote),
+                "tick_time": tick_time.isoformat() if tick_time is not None else "",
+                "is_gap": int(is_gap or 0),
+            }
+            for symbol_value, epoch, quote, tick_time, is_gap in rows
+        ]
+    )
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    if format == "parquet":
+        import io
+
+        buffer = io.BytesIO()
+        frame.to_parquet(buffer, index=False)
+        buffer.seek(0)
+        # Also keep a copy under the server parquet folder when configured.
+        try:
+            root = settings.parquet_data_dir
+            if root:
+                os.makedirs(root, exist_ok=True)
+                server_path = os.path.join(root, f"{symbol}_export_{stamp}.parquet")
+                frame.to_parquet(server_path, index=False)
+        except Exception as exc:
+            logger.warning("export_ticks_server_copy_failed", error=str(exc))
+        return Response(
+            content=buffer.getvalue(),
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition": f'attachment; filename="{symbol}_ticks_{stamp}.parquet"',
+                "X-Tick-Count": str(len(frame)),
+            },
+        )
+
+    def _csv_lines():
+        yield "symbol,epoch,quote,tick_time,is_gap\n"
+        for row in frame.itertuples(index=False):
+            yield f"{row.symbol},{row.epoch},{row.quote},{row.tick_time},{row.is_gap}\n"
+
+    return StreamingResponse(
+        _csv_lines(),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{symbol}_ticks_{stamp}.csv"',
+            "X-Tick-Count": str(len(frame)),
+        },
+    )
 
 
 @router.post("/download")

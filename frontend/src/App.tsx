@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import {
   Activity, ShieldCheck, Zap, AlertTriangle, Settings, Home,
   RefreshCw, BarChart2, Brain, CheckCircle, XCircle,
-  Loader2, Wifi, WifiOff, Clock, Database, TrendingUp,
+  Loader2, Wifi, WifiOff, Clock, Database, TrendingUp, Download,
   ChevronRight, Info, Signal, Cpu, Volume2, Trash2
 } from 'lucide-react';
 import {
@@ -1677,6 +1677,8 @@ function TrainView() {
   const [tickDelBusy, setTickDelBusy] = useState(false);
   const [tickDelMsg, setTickDelMsg] = useState('');
   const [tickDelOk, setTickDelOk] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportMsg, setExportMsg] = useState('');
   const prefsLoaded = useRef(false);
   const pollRef = useRef<ReturnType<typeof setInterval>|null>(null);
   const dlPollRef = useRef<ReturnType<typeof setInterval>|null>(null);
@@ -1922,6 +1924,40 @@ function TrainView() {
     } catch (e: any) {
       setDl({ status: 'error', progress: '', error: e.message });
     }
+  };
+
+  const exportTicksLocal = async (format: 'csv' | 'parquet') => {
+    setExportBusy(true);
+    setExportMsg('');
+    try {
+      const response = await fetch(
+        `${API}/train/export-ticks?${new URLSearchParams({ symbol, format })}`,
+      );
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(typeof body.detail === 'string' ? body.detail : `HTTP ${response.status}`);
+      }
+      const blob = await response.blob();
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      const filename = `${symbol}_ticks_${stamp}.${format}`;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      const count = response.headers.get('X-Tick-Count');
+      setExportMsg(
+        count
+          ? `Saved ${Number(count).toLocaleString()} ticks to ${filename}`
+          : `Saved ${filename} to your Downloads folder`,
+      );
+    } catch (e: any) {
+      setExportMsg(e.message || 'Export failed');
+    }
+    setExportBusy(false);
   };
 
   const durSec = Math.max(60, parseInt(dur, 10) || 540);
@@ -2288,6 +2324,48 @@ function TrainView() {
             ? <><Loader2 size={16} className="spin"/>Filling history…</>
             : <><Database size={16}/>Fill history (~24h) for {symbol}</>}
         </button>
+
+        <div className="divider"/>
+        <div className="section-header mb-2">
+          <h3 className="section-title" style={{ fontSize: '0.95rem' }}>Save ticks to this computer</h3>
+        </div>
+        <p className="text-xs text-dim mb-3">
+          Downloads every tick already stored in the database for {symbol}
+          ({tickCount ? `${tickCount.toLocaleString()} ticks` : 'check data info above'}).
+          This is not a new Deriv pull. The file goes to your browser Downloads folder.
+        </p>
+        {exportMsg && (
+          <div className={`alert ${exportMsg.toLowerCase().includes('fail') || exportMsg.toLowerCase().includes('http') || exportMsg.toLowerCase().includes('no ticks') ? 'alert-error' : 'alert-success'} mb-3`}>
+            {exportMsg.toLowerCase().includes('fail') || exportMsg.toLowerCase().includes('http') || exportMsg.toLowerCase().includes('no ticks')
+              ? <XCircle size={14}/>
+              : <CheckCircle size={14}/>}
+            {exportMsg}
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+          <button
+            id="btn-export-ticks-csv"
+            className="btn btn-ghost"
+            style={{ flex: 1, justifyContent: 'center' }}
+            onClick={() => exportTicksLocal('csv')}
+            disabled={busy || exportBusy || tickCount < 1}
+          >
+            {exportBusy
+              ? <><Loader2 size={16} className="spin"/>Saving…</>
+              : <><Download size={16}/>Download CSV</>}
+          </button>
+          <button
+            id="btn-export-ticks-parquet"
+            className="btn btn-ghost"
+            style={{ flex: 1, justifyContent: 'center' }}
+            onClick={() => exportTicksLocal('parquet')}
+            disabled={busy || exportBusy || tickCount < 1}
+          >
+            {exportBusy
+              ? <><Loader2 size={16} className="spin"/>Saving…</>
+              : <><Download size={16}/>Download Parquet</>}
+          </button>
+        </div>
       </div>
 
       {/* Config + start */}
