@@ -1,7 +1,7 @@
 """Purged expanding-window evaluation helpers.
 
-These functions choose windows and summarize fold scores. Model fitting stays
-with the caller so the same split rules can be tested without training.
+Each fold fits models, calibrates them on a separate chronological slice, and
+scores calibrated predictions against a calibration-period frequency baseline.
 """
 
 from __future__ import annotations
@@ -96,7 +96,7 @@ def aggregate_walk_forward(
             score = float(scores[name])
             baseline = float(scores["baseline"])
             briers.append(score)
-            if score <= baseline - float(epsilon):
+            if score < baseline - max(float(epsilon), 1e-12):
                 wins += 1
         count = len(briers)
         fraction = (wins / count) if count else 0.0
@@ -118,6 +118,8 @@ def aggregate_walk_forward(
         "folds_total": len(rows),
         "folds_eligible": len(eligible),
         "min_test": int(min_test),
+        "metrics_kind": "calibrated",
+        "baseline_kind": "calibration_frequency",
         "models": models,
         "selected_pipeline": selected,
     }
@@ -130,82 +132,132 @@ def score_fold_briers(
     y_test: pd.Series,
     *,
     direction: str,
+    X_val: pd.DataFrame | None = None,
+    y_val: pd.Series | None = None,
+    X_cal: pd.DataFrame | None = None,
+    y_cal: pd.Series | None = None,
     seq_train=None,
+    seq_val=None,
+    seq_cal=None,
     seq_test=None,
     include_heavy_models: bool = True,
 ) -> dict[str, float]:
-    """Retrain candidates on one purged fold and score the fold test once."""
+    """Score independently calibrated candidates on an untouched fold test.
+
+    A missing, undersized, or single-class calibration slice makes the fold
+    unavailable. Test labels are used only to compute final Brier scores.
+    """
     from app.ml.baseline import LogisticRegressionBaseline, VolatilityDistanceBaseline
+    from app.ml.candidate_selection import (
+        calibrated_candidate_predictions,
+        fit_candidate_calibrators,
+    )
 
     y_tr = np.asarray(y_train, dtype=float).ravel()
-    if len(np.unique(y_tr)) < 2 or len(X_train) < 20:
+    if (
+        len(X_train) < 20 or len(X_train) != len(y_tr)
+        or not np.isfinite(y_tr).all() or not np.isin(y_tr, [0.0, 1.0]).all()
+        or len(np.unique(y_tr)) < 2
+    ):
         return {}
-    scores: dict[str, float] = {}
+    if X_cal is None or y_cal is None or len(X_cal) != len(y_cal):
+        return {}
+    y_ca = np.asarray(y_cal, dtype=float).ravel()
+    if (
+        len(y_ca) < 11 or not np.isfinite(y_ca).all()
+        or not np.isin(y_ca, [0.0, 1.0]).all() or len(np.unique(y_ca)) < 2
+    ):
+        return {}
+    if len(X_test) != len(y_test) or len(y_test) < 5:
+        return {}
+
     rate = float(np.mean(y_tr))
-    baseline = _brier(y_test, np.full(len(y_test), rate))
-    if baseline is None:
-        return {}
-    scores["baseline"] = baseline
+    raw_cal = {"baseline": np.full(len(X_cal), rate)}
+    raw_test = {"baseline": np.full(len(X_test), rate)}
 
-    logistic = LogisticRegressionBaseline()
-    logistic.fit(X_train, y_train)
-    logistic_score = _brier(y_test, logistic.predict_proba(X_test))
-    if logistic_score is not None:
-        scores["logistic_regression"] = logistic_score
+    def probabilities(values, length: int) -> np.ndarray:
+        values = np.asarray(values, dtype=float).ravel()
+        if len(values) != length or not np.isfinite(values).all():
+            raise ValueError("Fold predictions are not aligned or finite")
+        if ((values < 0) | (values > 1)).any():
+            raise ValueError("Fold predictions must be probabilities")
+        return values
 
-    volatility = VolatilityDistanceBaseline()
-    volatility.fit(X_train, y_train)
-    vol_score = _brier(y_test, volatility.predict_proba(X_test))
-    if vol_score is not None:
-        scores["volatility_distance"] = vol_score
+    def predict_candidate(name: str, model) -> None:
+        cal_predictions = probabilities(model.predict_proba(X_cal), len(X_cal))
+        test_predictions = probabilities(model.predict_proba(X_test), len(X_test))
+        raw_cal[name] = cal_predictions
+        raw_test[name] = test_predictions
 
-    if not include_heavy_models:
-        return scores
-
-    es = max(8, len(X_train) // 10)
-    if len(X_train) - es >= 15:
-        X_fit, y_fit = X_train.iloc[:-es], y_train.iloc[:-es]
-        X_es, y_es = X_train.iloc[-es:], y_train.iloc[-es:]
-    else:
-        X_fit, y_fit, X_es, y_es = X_train, y_train, None, None
-
-    try:
-        from app.ml.xgboost_model import XGBoostTouchModel
-
-        model = XGBoostTouchModel(direction=direction, n_estimators=80, early_stopping_rounds=10)
-        model.fit(X_fit, y_fit, X_es, y_es)
-        score = _brier(y_test, model.predict_proba(X_test))
-        if score is not None:
-            scores["xgboost"] = score
-    except Exception:
-        pass
-
-    try:
-        from app.ml.catboost_model import CatBoostTouchModel
-
-        model = CatBoostTouchModel(direction=direction, iterations=80, early_stopping_rounds=10)
-        model.fit(X_fit, y_fit, X_es, y_es)
-        score = _brier(y_test, model.predict_proba(X_test))
-        if score is not None:
-            scores["catboost"] = score
-    except Exception:
-        pass
-
-    if seq_train is not None and seq_test is not None and len(seq_train) == len(X_train):
+    for name, model in (
+        ("logistic_regression", LogisticRegressionBaseline()),
+        ("volatility_distance", VolatilityDistanceBaseline()),
+    ):
         try:
-            from app.ml.lstm_model import LSTMTouchModel
-
-            model = LSTMTouchModel(direction=direction, max_epochs=3, patience=2)
-            seq_fit = seq_train if X_es is None else seq_train[:-es]
-            seq_es = None if X_es is None else seq_train[-es:]
-            y_fit_np = np.asarray(y_fit, dtype=float)
-            y_es_np = None if y_es is None else np.asarray(y_es, dtype=float)
-            model.fit(seq_fit, y_fit_np, seq_es, y_es_np)
-            score = _brier(y_test, model.predict_proba(seq_test))
-            if score is not None:
-                scores["lstm"] = score
+            model.fit(X_train, y_train)
+            predict_candidate(name, model)
         except Exception:
             pass
+
+    has_val = (
+        X_val is not None and y_val is not None
+        and len(X_val) > 0 and len(X_val) == len(y_val)
+    )
+    X_es, y_es = (X_val, y_val) if has_val else (None, None)
+    if include_heavy_models:
+        try:
+            from app.ml.xgboost_model import XGBoostTouchModel
+
+            model = XGBoostTouchModel(direction=direction, n_estimators=80, early_stopping_rounds=10)
+            model.fit(X_train, y_train, X_es, y_es)
+            predict_candidate("xgboost", model)
+        except Exception:
+            pass
+
+        try:
+            from app.ml.catboost_model import CatBoostTouchModel
+
+            model = CatBoostTouchModel(direction=direction, iterations=80, early_stopping_rounds=10)
+            model.fit(X_train, y_train, X_es, y_es)
+            predict_candidate("catboost", model)
+        except Exception:
+            pass
+
+        has_sequences = all(
+            seq is not None and len(seq) == len(frame)
+            for seq, frame in ((seq_train, X_train), (seq_cal, X_cal), (seq_test, X_test))
+        )
+        if has_sequences:
+            try:
+                from app.ml.lstm_model import LSTMTouchModel
+
+                model = LSTMTouchModel(direction=direction, max_epochs=3, patience=2)
+                use_seq_val = has_val and seq_val is not None and len(seq_val) == len(X_val)
+                model.fit(
+                    seq_train,
+                    y_tr,
+                    seq_val if use_seq_val else None,
+                    np.asarray(y_val, dtype=float) if use_seq_val else None,
+                )
+                cal_predictions = probabilities(model.predict_proba(seq_cal), len(X_cal))
+                test_predictions = probabilities(model.predict_proba(seq_test), len(X_test))
+                raw_cal["lstm"] = cal_predictions
+                raw_test["lstm"] = test_predictions
+            except Exception:
+                pass
+
+    calibrators = fit_candidate_calibrators(raw_cal, y_ca)
+    calibrated = calibrated_candidate_predictions(
+        {name: values for name, values in raw_test.items() if name in calibrators},
+        calibrators,
+    )
+    if "baseline" not in calibrated:
+        return {}
+    scores: dict[str, float] = {}
+    for name, predictions in calibrated.items():
+        score = _brier(y_test, predictions)
+        if score is not None:
+            scores[name] = score
     return scores
 
 
@@ -220,9 +272,11 @@ def evaluate_outer_folds(
     gap_seconds: int,
     n_splits: int = 5,
     include_heavy_models: bool = True,
+    lockbox_fraction: float | None = None,
 ) -> tuple[dict, int]:
     """Score expanding purged folds on the pre-lockbox development prefix."""
-    lock_start = lockbox_start_index(len(features))
+    fraction = 0.12 if lockbox_fraction is None else float(lockbox_fraction)
+    lock_start = lockbox_start_index(len(features), fraction=fraction)
     dev_n = lock_start
     rows: list[dict] = []
     seq_by_time = {
@@ -256,11 +310,20 @@ def evaluate_outer_folds(
             continue
         prep = fit_feature_prep(fold.X_train)
         X_train = apply_feature_prep(fold.X_train, prep)
+        X_val = apply_feature_prep(fold.X_val, prep)
+        X_cal = apply_feature_prep(fold.X_cal, prep)
         X_test = apply_feature_prep(fold.X_test, prep)
         seq_train = _sequences_for(fold.train_times, seq_by_time, sequences.shape[-2] if sequences.ndim == 3 else 0)
+        seq_val = _sequences_for(fold.val_times, seq_by_time, sequences.shape[-2] if sequences.ndim == 3 else 0)
+        seq_cal = _sequences_for(fold.cal_times, seq_by_time, sequences.shape[-2] if sequences.ndim == 3 else 0)
         seq_test = _sequences_for(fold.test_times, seq_by_time, sequences.shape[-2] if sequences.ndim == 3 else 0)
-        if len(seq_train) != len(X_train):
+        if any(
+            len(seq) != len(frame)
+            for seq, frame in ((seq_train, X_train), (seq_val, X_val), (seq_cal, X_cal), (seq_test, X_test))
+        ):
             seq_train = None
+            seq_val = None
+            seq_cal = None
             seq_test = None
         briers = score_fold_briers(
             X_train,
@@ -268,13 +331,19 @@ def evaluate_outer_folds(
             X_test,
             fold.y_test,
             direction=direction,
+            X_val=X_val,
+            y_val=fold.y_val,
+            X_cal=X_cal,
+            y_cal=fold.y_cal,
             seq_train=seq_train,
+            seq_val=seq_val,
+            seq_cal=seq_cal,
             seq_test=seq_test,
             include_heavy_models=include_heavy_models,
         )
         if "baseline" not in briers:
             continue
-        rows.append({"n_test": int(len(X_test)), "briers": briers})
+        rows.append({"n_test": int(len(X_test)), "n_cal": int(len(X_cal)), "briers": briers})
     return aggregate_walk_forward(rows), lock_start
 
 

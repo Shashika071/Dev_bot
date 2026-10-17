@@ -84,11 +84,12 @@ def chronological_split(
     feature_columns: list[str] = None,
     min_cal_samples: int = 0,
     min_test_samples: int = 0,
+    min_val_samples: int = 0,
 ) -> DatasetSplit:
     """
     Split data chronologically with purging and gap enforcement at every boundary.
 
-    When min_cal_samples / min_test_samples are set, slice sizes are grown
+    When minimum validation/calibration/test sizes are set, slices are grown
     (from the end) so short ~1-day datasets still leave usable cal/test blocks
     after boundary purging.
     """
@@ -112,7 +113,10 @@ def chronological_split(
         int(n * cal_frac),
         int(min_cal_samples + purge_buffer) if min_cal_samples else 0,
     )
-    val_n = max(int(n * val_frac), 10)
+    val_n = max(
+        int(n * val_frac), 10,
+        int(min_val_samples + purge_buffer) if min_val_samples else 0,
+    )
     train_n = n - test_n - cal_n - val_n
     if train_n < max(40, int(n * 0.35)):
         # Not enough room — fall back to pure fractions

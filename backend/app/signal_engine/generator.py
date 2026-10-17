@@ -70,6 +70,10 @@ class SignalGenerator:
     def clear_models(self):
         self._models.clear()
 
+    def clear_model(self, direction: str) -> None:
+        """Unload one direction so a revoked/missing active model cannot stay cached."""
+        self._models.pop(str(direction), None)
+
     async def check_prerequisites(
         self,
         session: AsyncSession,

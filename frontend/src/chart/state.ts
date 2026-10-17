@@ -24,7 +24,20 @@ export type LiveSignal = {
   direction: 'upper' | 'lower';
   probability: number | null;
   resolved_barrier: number | null;
+  source?: 'accuracy';
+  resolved?: boolean;
+  outcome?: boolean | null;
+  expiry_epoch?: number | null;
+  barrier_input?: string;
+  feature_profile?: string;
+  feature_groups?: string[];
 };
+
+function optionalNumber(value: unknown): number | null {
+  if (value == null || value === '' || typeof value === 'boolean') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
 
 export function asLiveSignal(row: Record<string, unknown>): LiveSignal | null {
   const direction = String(row.direction || row.touch_direction || '');
@@ -36,16 +49,96 @@ export function asLiveSignal(row: Record<string, unknown>): LiveSignal | null {
     ? fromEpoch
     : Number.isFinite(fromCreated) ? fromCreated : fromQuote;
   if (!Number.isFinite(epoch) || epoch <= 0) return null;
-  const probability = Number(row.calibrated_probability ?? row.probability);
-  const barrier = Number(row.resolved_barrier);
+  const probability = optionalNumber(row.calibrated_probability ?? row.probability);
+  const barrier = optionalNumber(row.resolved_barrier);
   return {
     signal_id: String(row.signal_id || `${epoch}-${direction}`),
     symbol: row.symbol ? String(row.symbol) : undefined,
     epoch,
     direction,
-    probability: Number.isFinite(probability) ? probability : null,
-    resolved_barrier: Number.isFinite(barrier) ? barrier : null,
+    probability: probability !== null && probability >= 0 && probability <= 1 ? probability : null,
+    resolved_barrier: barrier,
   };
+}
+
+/** Accuracy signals use their decision time, not the later alert delivery time. */
+export function asAccuracySignal(row: Record<string, unknown>): LiveSignal | null {
+  const signal = asLiveSignal({
+    ...row,
+    epoch: row.decision_epoch,
+    calibrated_probability: row.estimated_probability,
+    // The reference price is not an accepted contract entry or absolute barrier.
+    resolved_barrier: null,
+  });
+  if (!signal) return null;
+  return {
+    ...signal,
+    source: 'accuracy',
+    resolved: row.resolved === true,
+    outcome: typeof row.outcome === 'boolean' ? row.outcome : null,
+    expiry_epoch: optionalNumber(row.expiry_epoch),
+    barrier_input: typeof row.barrier_input === 'string' ? row.barrier_input : undefined,
+    feature_profile: typeof row.feature_profile === 'string' ? row.feature_profile : undefined,
+    feature_groups: Array.isArray(row.feature_groups)
+      ? row.feature_groups.filter((group): group is string => typeof group === 'string')
+      : undefined,
+  };
+}
+
+export function accuracyProfileLabel(profile?: string): string {
+  if (!profile || profile === 'compact_v1') return 'Compact profile';
+  if (profile === 'technical_v2') return 'Technical analysis profile';
+  return profile.replace(/_/g, ' ');
+}
+
+export function accuracyFeatureGroupLabel(group: string): string {
+  const labels: Record<string, string> = {
+    trend: 'Market trend',
+    structure: 'Market structure',
+    multi_timeframe: 'Multi-timeframe',
+    support_resistance: 'Support/resistance',
+    sweep_proxies: 'Price sweeps',
+    breakouts_retests: 'Breakouts/retests',
+    candlestick: 'Candlestick patterns',
+    indicators: 'Technical indicators',
+    momentum_confirmation: 'Momentum/confirmation',
+  };
+  return labels[group] || group.replace(/_/g, ' ');
+}
+
+/** A slower history response must not erase a new alert or roll back its outcome. */
+export function mergeLiveSignals(current: LiveSignal[], incoming: LiveSignal[], cap = 100): LiveSignal[] {
+  const byId = new Map(current.map((signal) => [signal.signal_id, signal]));
+  incoming.forEach((signal) => {
+    const prior = byId.get(signal.signal_id);
+    byId.set(signal.signal_id, prior?.resolved && !signal.resolved ? prior : signal);
+  });
+  return [...byId.values()].sort((a, b) => b.epoch - a.epoch).slice(0, cap);
+}
+
+export function signalOutcomeLabel(signal: LiveSignal): string {
+  if (!signal.resolved) return 'Pending';
+  return signal.outcome === true ? 'Touched' : signal.outcome === false ? 'Missed' : 'Unresolved data';
+}
+
+/** Coarse candles show the latest signal and a count of others on that candle. */
+export function liveSignalMarkers(signals: LiveSignal[], times: number[]) {
+  const orderedTimes = [...new Set(times.filter(Number.isFinite))].sort((a, b) => a - b);
+  if (!orderedTimes.length) return [];
+  const groups = new Map<number, LiveSignal[]>();
+  [...signals].sort((a, b) => b.epoch - a.epoch).forEach((signal) => {
+    if (signal.epoch < orderedTimes[0]) return;
+    const epoch = snapToBar(signal.epoch, orderedTimes);
+    groups.set(epoch, [...(groups.get(epoch) || []), signal]);
+  });
+  return [...groups.entries()].map(([epoch, group]) => {
+    const signal = group.find((item) => item.source === 'accuracy') || group[0];
+    const probability = signal.probability == null ? '' : ` ${(signal.probability * 100).toFixed(1)}%`;
+    const prefix = signal.source === 'accuracy' ? 'TOUCH ' : '';
+    const outcome = signal.source === 'accuracy' ? ` · ${signalOutcomeLabel(signal)}` : '';
+    const others = group.length > 1 ? ` · +${group.length - 1} more` : '';
+    return { epoch, direction: signal.direction, text: `${prefix}${signal.direction.toUpperCase()}${probability}${outcome}${others}` };
+  });
 }
 
 export function snapToBar(epoch: number, times: number[]): number {

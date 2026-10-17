@@ -20,6 +20,7 @@ class GateThresholds:
     max_unresolved_rate: float = 0.05
     edge_margin: float = 0.02
     brier_epsilon: float = 0.0
+    require_positive_selected_net_return: bool = True
 
 
 @dataclass
@@ -49,8 +50,16 @@ def evaluate_promotion_gates(
     eligible_folds: int,
     fold_win_fraction: float,
     lockbox_beats_baseline: bool,
+    selected_mean_breakeven: float | None = None,
+    quote_based_net_return: float | None = None,
     thresholds: GateThresholds | None = None,
 ) -> GateDecision:
+    """Economic edge must be judged on the selected, quote-matched trades.
+
+    `mean_breakeven` is retained for logging compatibility, but the CI
+    comparison uses `selected_mean_breakeven` when provided. A strategy that
+    loses money on selected matched stakes cannot pass.
+    """
     limits = thresholds or GateThresholds()
     reasons: list[str] = []
 
@@ -96,13 +105,30 @@ def evaluate_promotion_gates(
     if not lockbox_beats_baseline:
         reasons.append("Lockbox Brier is not better than the constant baseline")
 
-    threshold = float(mean_breakeven) + float(limits.edge_margin)
-    if not np_isfinite(mean_breakeven) or float(selected_win_rate_ci_lower) <= threshold:
+    economic_be = (
+        float(selected_mean_breakeven)
+        if selected_mean_breakeven is not None and np_isfinite(selected_mean_breakeven)
+        else float(mean_breakeven)
+    )
+    threshold = economic_be + float(limits.edge_margin)
+    if not np_isfinite(economic_be) or float(selected_win_rate_ci_lower) <= threshold:
         reasons.append(
             "No demonstrated edge: CI lower "
             f"{float(selected_win_rate_ci_lower):.4f} <= {threshold:.4f} "
-            f"(mean matched quote BE={float(mean_breakeven):.4f})"
+            f"(selected matched quote BE={economic_be:.4f})"
         )
+
+    if limits.require_positive_selected_net_return:
+        if quote_based_net_return is None or not np_isfinite(quote_based_net_return):
+            reasons.append(
+                "Selected-trade payout-adjusted net return is unavailable; "
+                "economic edge cannot be claimed"
+            )
+        elif float(quote_based_net_return) <= 0:
+            reasons.append(
+                "Selected matched trades have non-positive payout-adjusted net return: "
+                f"{float(quote_based_net_return):.4f}"
+            )
 
     if reasons:
         return GateDecision(False, reasons)
@@ -112,6 +138,8 @@ def evaluate_promotion_gates(
             "Edge supported: "
             f"selected_win_rate={float(selected_win_rate):.4f}, "
             f"CI_lower={float(selected_win_rate_ci_lower):.4f}, "
+            f"selected_BE={economic_be:.4f}, "
+            f"net_return={float(quote_based_net_return) if quote_based_net_return is not None else float('nan'):.4f}, "
             f"n={int(selected_signal_count)}, "
             f"quote_match={float(quote_match_rate):.2%}, "
             f"folds={int(eligible_folds)}"

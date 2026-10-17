@@ -391,6 +391,106 @@ async def worker_status() -> dict:
     return get_latest_status()
 
 
+@router.get("/readiness")
+async def system_readiness(db: AsyncSession = Depends(get_db)) -> dict:
+    """
+    Single readiness snapshot: settings, active models, data/quote age,
+    daily cap/cooldown, execution permission, and last worker rejection.
+    """
+    import time as _time
+
+    from app.execution.gates import permission_status
+    from app.models.model_version import ModelVersion
+
+    conf = await get_latest_confirmed_settings(db)
+    daily = DailyCapManager()
+    symbol = getattr(conf, "symbol", None) or "R_100"
+    can_signal, daily_reason = await daily.can_issue_signal(db, symbol)
+    status = get_latest_status() or {}
+    exec_status = permission_status()
+
+    active = (
+        await db.execute(
+            select(ModelVersion).where(ModelVersion.is_active.is_(True))
+        )
+    ).scalars().all()
+    models = [
+        {
+            "version_tag": m.version_tag,
+            "symbol": m.symbol,
+            "direction": m.direction,
+            "barrier_distance": m.barrier_distance,
+            "duration_seconds": m.duration_seconds,
+            "has_demonstrated_edge": m.has_demonstrated_edge,
+            "alerts_paused": m.alerts_paused,
+        }
+        for m in active
+    ]
+
+    last_tick_age = None
+    tick_row = (
+        await db.execute(
+            select(Tick)
+            .where(Tick.symbol == symbol)
+            .order_by(Tick.epoch.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if tick_row is not None:
+        last_tick_age = max(0.0, _time.time() - float(tick_row.epoch))
+
+    worker_age = None
+    try:
+        published_at = status.get("published_at") or status.get("ts")
+        if published_at is not None:
+            worker_age = max(0.0, _time.time() - float(published_at))
+    except (TypeError, ValueError):
+        worker_age = None
+
+    settings_ok = conf is not None
+    models_ok = len(models) > 0
+    data_fresh = last_tick_age is not None and last_tick_age < 30
+    worker_fresh = worker_age is not None and worker_age < 120
+    ready = bool(settings_ok and models_ok and data_fresh and can_signal)
+
+    return {
+        "ready": ready,
+        "settings_confirmed": settings_ok,
+        "symbol": getattr(conf, "symbol", None),
+        "barrier_input": getattr(conf, "barrier_input", None),
+        "duration_seconds": getattr(conf, "duration_seconds", None),
+        "active_models": models,
+        "active_model_count": len(models),
+        "last_tick_age_seconds": last_tick_age,
+        "data_fresh": data_fresh,
+        "worker": {
+            "deriv_connected": bool(status.get("deriv_connected")),
+            "age_seconds": worker_age,
+            "fresh": worker_fresh,
+            "last_rejection": status.get("last_rejection") or status.get("last_skip_reason"),
+            "raw": {
+                k: status.get(k)
+                for k in (
+                    "deriv_connected",
+                    "symbol",
+                    "ticks_collected",
+                    "last_error",
+                    "last_rejection",
+                    "last_skip_reason",
+                )
+                if k in status
+            },
+        },
+        "daily": {
+            "can_generate": can_signal,
+            "reason": daily_reason,
+        },
+        "alerts_paused": bool(getattr(conf, "alerts_paused", False)) if conf else False,
+        "pause_reason": getattr(conf, "pause_reason", None) if conf else None,
+        "execution": exec_status,
+    }
+
+
 @router.post("/worker-status")
 async def push_worker_status(
     payload: dict,

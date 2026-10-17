@@ -59,7 +59,7 @@ async def _publish_market(payload: dict) -> None:
                 headers=_auth_headers(),
             )
     except Exception as e:
-        logger.warning("worker_market_publish_failed", error=str(e))
+        logger.warning("worker_market_publish_failed", error=repr(e) or type(e).__name__)
 
 
 async def _publish_status(payload: dict) -> None:
@@ -71,7 +71,7 @@ async def _publish_status(payload: dict) -> None:
                 headers=_auth_headers(),
             )
     except Exception as e:
-        logger.warning("worker_status_publish_failed", error=str(e))
+        logger.warning("worker_status_publish_failed", error=repr(e) or type(e).__name__)
 
 
 async def _publish_signal(signal_data: dict) -> None:
@@ -251,6 +251,13 @@ async def worker_loop():
                                 reg_session, symbol=conf.symbol, direction=direction
                             )
                         if mv is None or not mv.metadata_json:
+                            if loaded_version_tags.pop(direction, None) is not None:
+                                generator.clear_model(direction)
+                                logger.info(
+                                    "model_unloaded",
+                                    direction=direction,
+                                    reason="no_active_registry_version",
+                                )
                             continue
                         meta = json.loads(mv.metadata_json)
                         tag = meta.get("version_tag") or mv.version_tag
@@ -270,6 +277,8 @@ async def worker_loop():
                         )
                         if not contract_ok:
                             logger.info("active_model_contract_mismatch", direction=direction, reason=contract_reason)
+                            if loaded_version_tags.pop(direction, None) is not None:
+                                generator.clear_model(direction)
                             continue
                         bundle = ModelPipelineBundle.load(meta)
                         generator.set_model(
@@ -311,24 +320,6 @@ async def worker_loop():
                 ])
                 barrier_dist = float(barrier_magnitude(conf.barrier_input))
                 current_price = float(df.iloc[-1]["quote"])
-                last_tick_age = time.time() - float(df.iloc[-1]["epoch"])
-
-                features_by_direction = {}
-                sequences_by_direction = {}
-                entry_epoch = int(df.iloc[-1]["epoch"])
-                from app.features.snapshot import build_decision_snapshot
-
-                for direction in configured_directions(conf.barrier_direction):
-                    snap = build_decision_snapshot(
-                        df,
-                        entry_epoch,
-                        barrier_distance=barrier_dist,
-                        barrier_direction=direction,
-                        duration_seconds=int(conf.duration_seconds),
-                        seq_len=settings.lstm_seq_len,
-                    )
-                    features_by_direction[direction] = snap.features
-                    sequences_by_direction[direction] = snap.sequence
 
                 if (
                     candle_cache["data"] is None
@@ -343,6 +334,31 @@ async def worker_loop():
                         candle_cache["symbol"] = active_symbol
                     except Exception as candle_error:
                         logger.warning("official_candles_worker_failed", error=str(candle_error))
+
+                quotes_by_direction = {}
+                for direction, qc in quote_collectors.items():
+                    q = await qc.fetch_single_quote()
+                    if q:
+                        quotes_by_direction[direction] = q
+
+                # Rebuild features immediately before the decision so age is fresh.
+                features_by_direction = {}
+                sequences_by_direction = {}
+                entry_epoch = int(df.iloc[-1]["epoch"])
+                last_tick_age = time.time() - float(df.iloc[-1]["epoch"])
+                from app.features.snapshot import build_decision_snapshot
+
+                for direction in configured_directions(conf.barrier_direction):
+                    snap = build_decision_snapshot(
+                        df,
+                        entry_epoch,
+                        barrier_distance=barrier_dist,
+                        barrier_direction=direction,
+                        duration_seconds=int(conf.duration_seconds),
+                        seq_len=settings.lstm_seq_len,
+                    )
+                    features_by_direction[direction] = snap.features
+                    sequences_by_direction[direction] = snap.sequence
 
                 from app.signal_engine.market_state import evaluate_market_state
 
@@ -374,12 +390,6 @@ async def worker_loop():
                             "market_state": last_market,
                         }
                     )
-
-                quotes_by_direction = {}
-                for direction, qc in quote_collectors.items():
-                    q = await qc.fetch_single_quote()
-                    if q:
-                        quotes_by_direction[direction] = q
 
                 async with async_session() as session:
                     signal_data = await generator.evaluate_and_generate(

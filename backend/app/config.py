@@ -86,6 +86,10 @@ class Settings(BaseSettings):
     train_max_ticks: int = Field(
         0, ge=0, description="Cap ticks loaded for training (0 = all available)"
     )
+    train_use_gpu: bool = Field(
+        True,
+        description="Use CUDA GPU for CatBoost/XGBoost/LSTM when available; else CPU",
+    )
     wf_outer_folds: int = Field(5, ge=2, le=8, description="Expanding walk-forward folds before the lockbox")
     lockbox_fraction: float = Field(0.12, ge=0.05, le=0.25)
     promotion_min_quote_match: float = Field(0.50, ge=0.0, le=1.0)

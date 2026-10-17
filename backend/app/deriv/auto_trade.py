@@ -78,8 +78,16 @@ async def maybe_auto_trade_after_signal(
     if not conf:
         return {"ok": False, "error": "No confirmed contract settings"}
 
-    duration = int(conf.duration_value)
-    duration_unit = str(conf.duration_unit or "m")
+    # Prefer the signal's own contract window (Touch Accuracy uses fixed 540s).
+    if signal_data.get("duration_seconds") is not None:
+        duration = int(signal_data["duration_seconds"])
+        duration_unit = "s"
+    elif signal_data.get("duration_value") is not None:
+        duration = int(signal_data["duration_value"])
+        duration_unit = str(signal_data.get("duration_unit") or conf.duration_unit or "m")
+    else:
+        duration = int(conf.duration_value)
+        duration_unit = str(conf.duration_unit or "m")
     currency = str(prefs.get("trade_currency") or conf.currency or "USD")
 
     use_full = bool(prefs.get("trade_stake_use_full_balance"))

@@ -78,6 +78,19 @@ class TickCollector:
         if not tick_data:
             return
 
+        incoming_symbol = (
+            tick_data.get("symbol")
+            or tick_data.get("underlying_symbol")
+            or data.get("echo_req", {}).get("ticks")
+        )
+        if incoming_symbol and str(incoming_symbol) != str(self.symbol):
+            logger.warning(
+                "tick_collector_symbol_mismatch",
+                expected=self.symbol,
+                got=incoming_symbol,
+            )
+            return
+
         epoch = tick_data.get("epoch")
         quote = tick_data.get("quote")
         ask = tick_data.get("ask")
@@ -161,7 +174,7 @@ class TickCollector:
                     headers={"X-Internal-Secret": settings.internal_api_secret},
                 )
         except Exception as e:
-            logger.warning("tick_chart_push_failed", error=str(e))
+            logger.warning("tick_chart_push_failed", error=repr(e) or type(e).__name__)
 
     @property
     def stats(self) -> dict:

@@ -1161,6 +1161,17 @@ select {
 .analysis-toolbar button, .analysis-side { font-size: 12px; }
 .analysis-toolbar button { background: transparent; color: #787b86; border: 1px solid transparent; border-radius: 4px; padding: 0.25rem 0.55rem; cursor: pointer; }
 .analysis-toolbar button.active { color: #d1d4dc; background: #2a2e39; }
+.chart-touch-status { padding: 0.6rem 0.85rem; display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1.25rem; background: #111b27; border-bottom: 1px solid #2a2e39; color: #b2b5be; font-size: 12px; }
+.chart-touch-heading, .chart-touch-signal { display: flex; align-items: center; flex-wrap: wrap; gap: 0.45rem 0.75rem; }
+.chart-touch-heading > strong { color: #e2eaf8; }
+.chart-touch-state { color: #ffd085; }
+.chart-touch-state::before { content: '●'; margin-right: 0.35rem; font-size: 9px; }
+.chart-touch-state.is-live, .chart-touch-upper { color: #00e5a0; }
+.chart-touch-lower, .chart-touch-outcome.missed { color: #ff7189; }
+.chart-touch-outcome { border: 1px solid #485265; border-radius: 4px; padding: 0.12rem 0.4rem; color: #d1d4dc; }
+.chart-touch-outcome.touched { color: #00e5a0; border-color: #207561; }
+.chart-touch-note, .chart-touch-signal time { color: #98a7bc; }
+.chart-touch-error { color: #ffd085; flex-basis: 100%; }
 .analysis-stage { flex: 1; min-height: 0; display: grid; grid-template-columns: 44px minmax(0, 1fr); }
 .analysis-stage.readings-open { grid-template-columns: 44px minmax(0, 1fr) 320px; }
 .analysis-tools { display: flex; flex-direction: column; gap: 2px; padding: 6px; background: #131722; border-right: 1px solid #2a2e39; }

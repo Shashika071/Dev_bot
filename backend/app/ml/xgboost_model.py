@@ -57,27 +57,25 @@ class XGBoostTouchModel:
         X_train_scaled = self.scaler.fit_transform(X_train_clean)
         self._feature_names = list(X_train.columns)
 
-        # Calculate scale_pos_weight for class imbalance
-        n_pos = y_train.sum()
-        n_neg = len(y_train) - n_pos
-        scale_pos_weight = n_neg / n_pos if n_pos > 0 else 1.0
+        from app.ml.device import xgboost_device_kwargs
 
         has_val = X_val is not None and y_val is not None
+        device_kwargs = xgboost_device_kwargs()
         clf_kwargs = {
             "n_estimators": self.hyperparams["n_estimators"],
             "learning_rate": self.hyperparams["learning_rate"],
             "max_depth": self.hyperparams["max_depth"],
             "reg_lambda": self.hyperparams["reg_lambda"],
-            "scale_pos_weight": scale_pos_weight,
+            # Keep the probability target at the observed event frequency;
+            # inverse-frequency weights instead target a balanced population.
+            "objective": "binary:logistic",
             "eval_metric": "logloss",
             "random_state": self.hyperparams["random_state"],
-            "use_label_encoder": False,
+            **device_kwargs,
         }
         # early_stopping_rounds belongs on the estimator (sklearn API), not fit(callbacks=...)
         if has_val:
             clf_kwargs["early_stopping_rounds"] = self.hyperparams["early_stopping_rounds"]
-
-        self.model = XGBClassifier(**clf_kwargs)
 
         fit_kwargs = {"verbose": False}
         if has_val:
@@ -85,13 +83,26 @@ class XGBoostTouchModel:
             X_val_scaled = self.scaler.transform(X_val_clean)
             fit_kwargs["eval_set"] = [(X_val_scaled, y_val)]
 
-        self.model.fit(X_train_scaled, y_train, **fit_kwargs)
+        try:
+            self.model = XGBClassifier(**clf_kwargs)
+            self.model.fit(X_train_scaled, y_train, **fit_kwargs)
+            used = device_kwargs.get("device", "cpu")
+        except Exception as gpu_err:
+            if not device_kwargs:
+                raise
+            logger.warning("xgboost_gpu_failed_fallback_cpu", error=str(gpu_err))
+            for key in ("device", "tree_method"):
+                clf_kwargs.pop(key, None)
+            self.model = XGBClassifier(**clf_kwargs)
+            self.model.fit(X_train_scaled, y_train, **fit_kwargs)
+            used = "cpu"
         self._is_fitted = True
 
         logger.info("xgboost_fitted",
                      direction=self.direction,
                      n_features=len(self._feature_names),
-                     n_train=len(X_train))
+                     n_train=len(X_train),
+                     device=used)
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         if not self._is_fitted:

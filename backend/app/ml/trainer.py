@@ -1,9 +1,9 @@
 """
 Training orchestrator — multi-model touch probability pipeline.
 
-Trains baseline, XGBoost, CatBoost, LSTM separately; compares weighted and
-stacking ensembles on chronological validation; calibrates the selected
-pipeline; evaluates once on held-out test; persists artefacts + report.
+Trains baseline, XGBoost, CatBoost, LSTM separately; calibrates every candidate
+on a dedicated period; selects on a later period and calibrated outer folds;
+evaluates once on held-out test; persists artefacts + report.
 """
 
 from __future__ import annotations
@@ -15,10 +15,11 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import structlog
-from sklearn.metrics import brier_score_loss, roc_auc_score
+from sklearn.metrics import roc_auc_score
 
 from app.config import settings
 from app.features.dataset import chronological_split, embargo_overlapping_samples
+from app.features.labels import TOUCH_LABEL_SEMANTICS
 from app.features.pipeline import apply_feature_prep, fit_feature_prep
 from app.ml.artifacts import checksum_paths, dataset_manifest_id, write_run_manifest
 from app.ml.dataset_builder import build_touch_dataset
@@ -28,7 +29,13 @@ from app.ml.baseline import (
     LogisticRegressionBaseline,
     VolatilityDistanceBaseline,
 )
-from app.ml.calibration import ProbabilityCalibrator, compute_calibration_metrics
+from app.ml.calibration import compute_calibration_metrics
+from app.ml.candidate_selection import (
+    calibrated_candidate_predictions,
+    candidate_probability_metrics,
+    fit_candidate_calibrators,
+    select_calibrated_candidate,
+)
 from app.ml.catboost_model import CatBoostTouchModel
 from app.ml.ensemble import (
     equal_weights,
@@ -49,8 +56,10 @@ CONTRACT_SEMANTICS = (
     "Instrument default: Deriv Volatility 100 Index (API symbol R_100). "
     "Relative barrier inputs such as 0.09 or 0.2 are price-point offsets from "
     "the entry spot (not percent). Target event: probability that the specific "
-    "signed barrier is touched by ticks within duration_seconds (default 540) "
-    "after contract start, after an assumed manual entry delay. Upper and lower "
+    "signed barrier is touched after the first tick strictly after processing start. "
+    "That tick anchors the relative barrier; expiry is processing start plus "
+    "duration_seconds (default 540), without extending for the entry tick. "
+    "Processing start is decision time plus an assumed manual entry delay. Upper and lower "
     "are separate events and are trained/evaluated separately."
 )
 
@@ -105,6 +114,7 @@ class TrainingOrchestrator:
         quotes_df: pd.DataFrame | None = None,
         min_calibration_samples: int | None = None,
         min_edge_selected: int | None = None,
+        on_progress=None,
     ) -> dict:
         if sampling_interval_seconds is None:
             sampling_interval_seconds = int(settings.train_sampling_interval_seconds)
@@ -124,6 +134,16 @@ class TrainingOrchestrator:
         )
         self._min_cal = max(11, min(200, self._min_cal))
         self._min_edge = max(5, min(200, self._min_edge))
+        from app.ml.device import describe_train_devices
+
+        def _progress(msg: str) -> None:
+            if on_progress is not None:
+                try:
+                    on_progress(msg)
+                except Exception:
+                    pass
+
+        devices = describe_train_devices()
         logger.info(
             "training_pipeline_starting",
             n_ticks=len(ticks_df),
@@ -134,9 +154,16 @@ class TrainingOrchestrator:
             sampling_interval_seconds=sampling_interval_seconds,
             min_calibration_samples=self._min_cal,
             min_edge_selected=self._min_edge,
+            devices=devices,
+        )
+        _progress(
+            f"Devices: torch={devices['torch']} "
+            f"catboost={devices['catboost']} xgboost={devices['xgboost']}"
         )
 
+        _progress("Sampling non-overlapping entry times…")
         entry_times = self._sample_entry_times(ticks_df, sampling_interval_seconds)
+        _progress(f"Building labeled dataset ({len(entry_times):,} candidates)…")
         built = build_touch_dataset(
             ticks_df,
             entry_times,
@@ -146,6 +173,11 @@ class TrainingOrchestrator:
             entry_delay_seconds=self.entry_delay_seconds,
             seq_len=self.seq_len,
             min_window_ticks=settings.min_label_window_ticks,
+            on_progress=on_progress,
+        )
+        _progress(
+            f"Labeled {built.aligned_rows:,} aligned / "
+            f"{built.resolved_before_alignment:,} resolved — fitting models…"
         )
         unresolved = built.unresolved
         resolved_count = built.resolved_before_alignment
@@ -226,6 +258,9 @@ class TrainingOrchestrator:
             entry_epochs,
             quotes_df if quotes_df is not None else pd.DataFrame(),
             direction=self.barrier_direction,
+            barrier_distance=float(self.barrier_distance),
+            duration_seconds=int(self.duration_seconds),
+            contract_type="ONETOUCH",
             max_age_seconds=int(settings.max_quote_age_seconds),
         )
 
@@ -249,6 +284,7 @@ class TrainingOrchestrator:
                 gap_seconds=gap_seconds,
                 n_splits=int(settings.wf_outer_folds),
                 include_heavy_models=True,
+                lockbox_fraction=float(settings.lockbox_fraction),
             )
         except Exception as fold_error:
             logger.warning("walk_forward_failed", error=str(fold_error))
@@ -269,7 +305,10 @@ class TrainingOrchestrator:
                 val_frac=fracs["val_frac"],
                 cal_frac=fracs["cal_frac"],
                 test_frac=fracs["test_frac"],
-                min_cal_samples=min_cal,
+                # Earlier VAL is the probability-calibration period; later CAL
+                # is the independent candidate-selection period.
+                min_val_samples=min_cal,
+                min_cal_samples=11,
                 min_test_samples=min(min_test, max(5, len(features_matrix) - lock_start)),
             )
         except ValueError as e:
@@ -283,13 +322,15 @@ class TrainingOrchestrator:
         split.X_test = apply_feature_prep(split.X_test, feature_prep)
         wf_folds_eligible = int(wf_summary.get("folds_eligible") or 0)
 
-        if len(split.X_cal) < min_cal:
+        # The earlier legacy VAL partition now fits probability calibration;
+        # the later legacy CAL partition selects candidates. Neither sees TEST.
+        if len(split.X_val) < min_cal:
             # Rough days needed at current non-overlapping spacing
             need_n = max(effective_n + 1, int(min_cal / 0.15) + 40)
             need_h = (need_n * max(self.duration_seconds, 1)) / 3600.0
             return {
                 "error": (
-                    f"Insufficient calibration samples after purging: {len(split.X_cal)} "
+                    f"Insufficient calibration samples after purging: {len(split.X_val)} "
                     f"< {min_cal} (total usable samples={effective_n}). "
                     f"Need roughly ~{need_h:.0f}h more continuous coverage, or lower "
                     f"Min calibration samples in the Train UI (Starter), then retrain."
@@ -319,10 +360,10 @@ class TrainingOrchestrator:
             split.X_train, split.y_train, split.train_times, _seqs_for(split.train_times)
         )
         X_val, y_val, t_val, seq_val = _align(
-            split.X_val, split.y_val, split.val_times, _seqs_for(split.val_times)
+            split.X_cal, split.y_cal, split.cal_times, _seqs_for(split.cal_times)
         )
         X_cal, y_cal, t_cal, seq_cal = _align(
-            split.X_cal, split.y_cal, split.cal_times, _seqs_for(split.cal_times)
+            split.X_val, split.y_val, split.val_times, _seqs_for(split.val_times)
         )
         X_test, y_test, t_test, seq_test = _align(
             split.X_test, split.y_test, split.test_times, _seqs_for(split.test_times)
@@ -345,12 +386,7 @@ class TrainingOrchestrator:
             }
         cal_pos, cal_neg = _label_balance(y_cal)
         if cal_pos == 0 or cal_neg == 0:
-            logger.warning(
-                "calibration_single_class",
-                touched=cal_pos,
-                not_touched=cal_neg,
-                note="Using identity calibrator; prefer more diverse data",
-            )
+            return {"error": "Calibration needs both touch and non-touch outcomes; collect a more diverse chronological period."}
 
         results: dict = {}
         baseline_rate = float(y_train.mean())
@@ -364,7 +400,7 @@ class TrainingOrchestrator:
         )
         results["quote_match_rate"] = match_rate
 
-        # Early stopping uses a tail of TRAIN. VAL is diagnostic; CAL calibrates;
+        # Early stopping uses a tail of TRAIN. CAL calibrates; later VAL selects;
         # the lockbox (X_test) is scored once after the pipeline is frozen.
         es_n = max(15, int(len(X_train) * 0.15))
         if len(X_train) - es_n >= 30:
@@ -372,6 +408,9 @@ class TrainingOrchestrator:
             X_es, y_es = X_train.iloc[-es_n:], y_train.iloc[-es_n:]
             seq_fit = seq_train[:-es_n]
             seq_es = seq_train[-es_n:]
+            if len(np.unique(y_fit)) < 2:
+                X_fit, y_fit, X_es, y_es = X_train, y_train, None, None
+                seq_fit, seq_es = seq_train, None
         else:
             X_fit, y_fit, X_es, y_es = X_train, y_train, None, None
             seq_fit, seq_es = seq_train, None
@@ -417,7 +456,6 @@ class TrainingOrchestrator:
 
         val_preds = _preds(X_val, seq_val)
         cal_preds = _preds(X_cal, seq_cal)
-        test_preds = _preds(X_test, seq_test)
 
         # Stacking via chronological OOF on TRAIN only (never on base train predictions in-sample)
         from app.ml.ensemble import MODEL_KEYS
@@ -438,6 +476,8 @@ class TrainingOrchestrator:
             X_te = X_train.iloc[train_end:test_end]
             seq_tr = seq_train[:train_end]
             seq_te = seq_train[train_end:test_end]
+            if len(np.unique(y_tr)) < 2:
+                continue
 
             mx = XGBoostTouchModel(direction=self.barrier_direction, n_estimators=150)
             mx.fit(X_tr, y_tr)
@@ -474,86 +514,88 @@ class TrainingOrchestrator:
                 y_train.values[weight_mask],
             )
         else:
-            weighted = fit_weighted_ensemble(val_preds, y_val.values)
+            # A fixed fallback does not fit weights on candidate-selection labels.
+            from app.ml.ensemble import WeightedEnsemble
+            weighted = WeightedEnsemble(weights=equal_weights())
 
-        # Candidate raw scores on VAL are diagnostic. The frozen choice is the
-        # walk-forward winner when one cleared the baseline on enough folds.
-        candidates_raw_val = {
-            "baseline": np.full(len(y_val), baseline_rate),
-            "logistic_regression": lr_model.predict_proba(X_val),
-            "volatility_distance": vol_model.predict_proba(X_val),
-            "catboost": val_preds["catboost"],
-            "lstm": val_preds["lstm"],
-            "weighted": weighted.predict(val_preds),
-        }
-        if self.include_xgboost:
-            candidates_raw_val["xgboost"] = val_preds["xgboost"]
-        if stacking is not None:
-            candidates_raw_val["stacking"] = stacking.predict(val_preds)
+        def _candidate_raw(predictions, X):
+            out = {
+                "baseline": np.full(len(X), baseline_rate),
+                "logistic_regression": lr_model.predict_proba(X),
+                "volatility_distance": vol_model.predict_proba(X),
+                "catboost": predictions["catboost"],
+                "weighted": weighted.predict(predictions),
+            }
+            if lstm_ok:
+                out["lstm"] = predictions["lstm"]
+            if self.include_xgboost:
+                out["xgboost"] = predictions["xgboost"]
+            if stacking is not None:
+                out["stacking"] = stacking.predict(predictions)
+            return out
 
-        # Select by validation Brier improvement over constant baseline
-        baseline_brier = float(
-            brier_score_loss(y_val.values, np.clip(candidates_raw_val["baseline"], 1e-6, 1 - 1e-6))
+        candidates_raw_cal = _candidate_raw(cal_preds, X_cal)
+        candidate_calibrators = fit_candidate_calibrators(
+            candidates_raw_cal, y_cal.values, min_samples=min_cal,
         )
-        best_name = "catboost"
-        best_brier = float("inf")
-        val_scores = {}
-        for name, preds in candidates_raw_val.items():
-            brier = float(brier_score_loss(y_val.values, np.clip(preds, 1e-6, 1 - 1e-6)))
-            val_scores[name] = brier
-            # Prefer models that beat baseline; among those, lowest Brier
-            if brier < best_brier:
-                best_brier = brier
-                best_name = name
-        if best_brier >= baseline_brier - 1e-9 and "catboost" in candidates_raw_val:
-            # No improvement — still pick best, but mark weak selection
-            logger.warning(
-                "no_val_brier_improvement_over_baseline",
-                best=best_name,
-                best_brier=best_brier,
-                baseline_brier=baseline_brier,
-            )
-        fold_choice = wf_summary.get("selected_pipeline")
-        if fold_choice in candidates_raw_val:
-            best_name = str(fold_choice)
-            best_brier = float(val_scores.get(fold_choice, best_brier))
+        candidates_raw_val = _candidate_raw(val_preds, X_val)
+        candidates_calibrated_val = calibrated_candidate_predictions(
+            candidates_raw_val, candidate_calibrators,
+        )
+        selection_metrics = candidate_probability_metrics(
+            y_val.values, candidates_raw_val, candidates_calibrated_val, candidate_calibrators,
+        )
+        val_scores = {name: metrics["calibrated_brier"] for name, metrics in selection_metrics.items()}
+        baseline_brier = val_scores["baseline"]
+        best_name, selection_note = select_calibrated_candidate(
+            val_scores, wf_summary, min_outer_folds=int(settings.promotion_min_outer_folds),
+        )
+        best_brier = val_scores[best_name]
 
         results["validation_selection"] = {
-            "metric": "walk_forward_then_val_brier",
+            "metric": "calibrated_walk_forward_then_selection_brier",
             "scores": val_scores,
+            "raw_scores": {name: metrics["raw_brier"] for name, metrics in selection_metrics.items()},
+            "candidate_probability_metrics": selection_metrics,
             "baseline_brier": baseline_brier,
+            "baseline_kind": "calibration_frequency",
+            "baseline_probability": float(y_cal.mean()),
             "selected_pipeline": best_name,
+            "selection_note": selection_note,
+            "partition_roles": {
+                "train": "model_fit_and_internal_early_stopping",
+                "cal": "probability_calibration",
+                "val": "candidate_selection",
+                "test": "final_lockbox",
+            },
+            "temporal_order": ["train", "cal", "val", "test"],
+            "partition_ranges": {
+                name: {"start": str(times.min()), "end": str(times.max())}
+                for name, times in (("train", t_train), ("cal", t_cal), ("val", t_val), ("test", t_test))
+            },
             "brier_improvement": baseline_brier - best_brier,
             "equal_weights_baseline": equal_weights(),
             "chosen_weights": weighted.weights,
             "walk_forward_folds": wf_folds_eligible,
             "walk_forward": wf_summary,
         }
+        results["selection_note"] = selection_note
         logger.info("pipeline_selected", selected=best_name, val_brier=best_brier)
 
-        def _selected_raw(preds_map, X=None):
-            if best_name == "baseline":
-                return np.full(len(next(iter(preds_map.values()))), baseline_rate)
-            if best_name == "logistic_regression":
-                return lr_model.predict_proba(X if X is not None else X_cal)
-            if best_name == "volatility_distance":
-                return vol_model.predict_proba(X if X is not None else X_cal)
-            if best_name == "weighted":
-                return weighted.predict(preds_map)
-            if best_name == "stacking":
-                if stacking is None:
-                    return preds_map["catboost"]
-                return stacking.predict(preds_map)
-            return preds_map[best_name]
-
-        # Calibrate selected pipeline on CAL only
-        sel_cal_raw = _selected_raw(cal_preds, X_cal)
-        calibrator = ProbabilityCalibrator(
-            method="auto",
-            min_samples=int(getattr(self, "_min_cal", settings.train_min_calibration_samples)),
+        calibrator = candidate_calibrators[best_name]
+        cal_metrics = compute_calibration_metrics(
+            y_cal.values, calibrator.calibrate(candidates_raw_cal[best_name]),
         )
-        calibrator.fit(sel_cal_raw, y_cal.values)
-        cal_metrics = compute_calibration_metrics(y_cal.values, calibrator.calibrate(sel_cal_raw))
+
+        # Only now touch the final lockbox. Candidate names and maps are frozen.
+        test_preds = _preds(X_test, seq_test)
+        candidates_raw_test = _candidate_raw(test_preds, X_test)
+        candidates_calibrated_test = calibrated_candidate_predictions(
+            candidates_raw_test, candidate_calibrators,
+        )
+        results["candidate_probability_metrics"] = candidate_probability_metrics(
+            y_test.values, candidates_raw_test, candidates_calibrated_test, candidate_calibrators,
+        )
 
         # Map global quote_match arrays onto test indices
         time_to_i = {pd.Timestamp(t): i for i, t in enumerate(times_aligned)}
@@ -564,19 +606,7 @@ class TrainingOrchestrator:
         test_matched = quote_match["matched"][test_idx]
 
         candidate_reports = {}
-        builders = [
-            ("baseline", lambda p, X: np.full(len(y_test), baseline_rate)),
-            ("logistic_regression", lambda p, X: lr_model.predict_proba(X)),
-            ("volatility_distance", lambda p, X: vol_model.predict_proba(X)),
-            ("catboost", lambda p, X: p["catboost"]),
-            ("lstm", lambda p, X: p["lstm"]),
-            ("weighted", lambda p, X: weighted.predict(p)),
-        ]
-        if self.include_xgboost:
-            builders.insert(2, ("xgboost", lambda p, X: p["xgboost"]))
-        for name, raw_map_builder in builders:
-            raw = raw_map_builder(test_preds, X_test)
-            proba = calibrator.calibrate(raw) if name == best_name else raw
+        for name, proba in candidates_calibrated_test.items():
             rep = evaluate_model(
                 name,
                 self.barrier_direction,
@@ -592,27 +622,13 @@ class TrainingOrchestrator:
             candidate_reports[name] = rep
             results[name] = _report_to_dict(rep)
 
-        if stacking is not None:
-            raw = stacking.predict(test_preds)
-            proba = calibrator.calibrate(raw) if best_name == "stacking" else raw
-            rep = evaluate_model(
-                "stacking",
-                self.barrier_direction,
-                y_test.values,
-                proba,
-                breakeven_probs=test_be,
-                quote_prices=np.where(test_matched, test_prices, np.nan),
-                quote_payouts=np.where(test_matched, test_payouts, np.nan),
-                times=t_test,
-                margin_over_breakeven=float(settings.train_edge_margin),
-                quote_matched=test_matched,
-            )
-            candidate_reports["stacking"] = rep
-            results["stacking"] = _report_to_dict(rep)
-
         selected_report = candidate_reports[best_name]
         baseline_report = candidate_reports["baseline"]
-        if bool(test_matched.any()):
+        selected_mean_be = getattr(selected_report, "selected_mean_breakeven", None)
+        if selected_mean_be is not None and np.isfinite(float(selected_mean_be)):
+            mean_be = float(selected_mean_be)
+        elif bool(test_matched.any()):
+            # Fallback only for logging when no selected matched trades exist.
             mean_be = float(np.mean(test_be[test_matched]))
         else:
             mean_be = float("nan")
@@ -690,6 +706,7 @@ class TrainingOrchestrator:
                 "barrier_distance": self.barrier_distance,
                 "duration_seconds": self.duration_seconds,
                 "entry_delay_seconds": self.entry_delay_seconds,
+                "label_semantics": TOUCH_LABEL_SEMANTICS,
                 "entry_epochs": entry_epochs.tolist(),
             }
         )
@@ -703,6 +720,7 @@ class TrainingOrchestrator:
             "barrier_unit": BARRIER_UNIT,
             "duration_seconds": self.duration_seconds,
             "entry_delay_seconds": self.entry_delay_seconds,
+            "label_semantics": TOUCH_LABEL_SEMANTICS,
             "feature_columns": feature_cols,
             "feature_prep": feature_prep,
             "strict_features": True,
@@ -717,10 +735,13 @@ class TrainingOrchestrator:
             "paths": paths,
             "ensemble_weights": weighted.weights,
             "baseline_touch_rate": baseline_rate,
+            "baseline_calibration_rate": float(y_cal.mean()),
             "has_demonstrated_edge": has_edge,
             "edge_description": edge_description,
             "contract_semantics": CONTRACT_SEMANTICS,
             "validation_selection": results["validation_selection"],
+            "candidate_probability_metrics": results["candidate_probability_metrics"],
+            "selection_note": selection_note,
             "metrics": {
                 "brier_score": selected_report.brier_score,
                 "log_loss": selected_report.log_loss_val,
@@ -794,6 +815,9 @@ class TrainingOrchestrator:
                 "walk_forward": wf_summary,
                 "lockbox_beats_baseline": lockbox_beats,
                 "contract_semantics": CONTRACT_SEMANTICS,
+                "validation_selection": results["validation_selection"],
+                "candidate_probability_metrics": results["candidate_probability_metrics"],
+                "selection_note": selection_note,
                 "calibration": {
                     **{k: cal_metrics.get(k) for k in ("brier_score", "log_loss", "calibration_slope", "calibration_intercept", "prob_true", "prob_pred")},
                     "n_samples": len(X_cal),
@@ -810,9 +834,10 @@ class TrainingOrchestrator:
                     for name, rep in candidate_reports.items()
                 },
                 "limitations": (
-                    "Final test was evaluated once after selection on validation. "
-                    "A saved model is turned on without an edge flag or a 14-day wait. "
-                    "Live quote, candle, confluence, and trend checks still apply."
+                    "Every candidate was calibrated on an earlier dedicated period, then selected "
+                    "on a later period and calibrated outer folds. Final test was scored after "
+                    "selection and was not used to choose a candidate. Training saves an inactive "
+                    "model; exact-contract quote coverage and promotion gates are still required."
                 ),
                 "version_tag": version_tag,
             },
@@ -861,11 +886,16 @@ class TrainingOrchestrator:
         fold_win_fraction: float = 0.0,
         lockbox_beats_baseline: bool = False,
     ) -> tuple[bool, str]:
+        selected_be = getattr(report, "selected_mean_breakeven", None)
         decision = evaluate_promotion_gates(
             selected_signal_count=int(report.selected_signal_count),
             selected_win_rate=float(report.selected_win_rate),
             selected_win_rate_ci_lower=float(report.selected_win_rate_ci_lower),
             mean_breakeven=float(mean_breakeven),
+            selected_mean_breakeven=(
+                float(selected_be) if selected_be is not None else float(mean_breakeven)
+            ),
+            quote_based_net_return=getattr(report, "quote_based_net_return", None),
             quote_match_rate=float(quote_match_rate),
             selected_quote_match_rate=float(
                 quote_match_rate if selected_quote_match_rate is None else selected_quote_match_rate

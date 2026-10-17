@@ -9,8 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-# CPU torch wheel keeps the image smaller than the default CUDA build
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.4.1 \
+# Default: CPU torch (smaller). For GPU LSTM set build-arg:
+#   --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu121
+ARG TORCH_INDEX=https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir --index-url ${TORCH_INDEX} torch==2.4.1 \
     && pip install --no-cache-dir -r requirements.txt
 
 COPY . .

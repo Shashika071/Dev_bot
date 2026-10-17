@@ -11,6 +11,7 @@ import {
 } from 'recharts';
 import { playSignalAlertSound, unlockSignalAudio } from './signalAlert';
 import { AnalysisPage } from './pages/AnalysisPage';
+import { AccuracyPage } from './pages/AccuracyPage';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -190,7 +191,7 @@ interface DownloadStatus {
   target_ticks?: number | null;
 }
 interface DailyStatus { signals_today: number; max_signals: number; cooldown_active: boolean; timezone: string; }
-type Tab = 'analysis' | 'dashboard' | 'train' | 'setup';
+type Tab = 'analysis' | 'dashboard' | 'train' | 'setup' | 'accuracy';
 
 function hoursBetween(oldest?: string, newest?: string): number | null {
   if (!oldest || !newest) return null;
@@ -410,9 +411,9 @@ export default function App() {
         noteWs.onmessage = e => {
           try {
             const msg = JSON.parse(e.data);
-            if (msg?.type !== 'signal_alert') return;
+            if (msg?.type !== 'signal_alert' && msg?.type !== 'accuracy_signal') return;
             const d = msg.data || {};
-            const line = `${d.symbol || ''} ${d.direction || ''} ${d.barrier_input || ''} · p=${((d.calibrated_probability||0)*100).toFixed(1)}%`;
+            const line = `${msg.type === 'accuracy_signal' ? 'Touch Accuracy · ' : ''}${d.symbol || ''} ${d.direction || ''} ${d.barrier_input || ''} · p=${((d.estimated_probability ?? d.calibrated_probability ?? 0)*100).toFixed(1)}%`;
             setSignalFlash(line.trim());
             void playSignalAlertSound();
             if (typeof Notification !== 'undefined') {
@@ -462,6 +463,7 @@ export default function App() {
     { id: 'analysis',  label: 'Home',         icon: <Home size={16}/> },
     { id: 'dashboard', label: 'Dashboard',    icon: <Activity size={16}/> },
     { id: 'train',     label: 'Train Model',  icon: <Brain size={16}/>    },
+    { id: 'accuracy',  label: 'Touch Accuracy', icon: <Signal size={16}/> },
     { id: 'setup',     label: 'Configuration',icon: <Settings size={16}/> },
   ];
 
@@ -528,7 +530,7 @@ export default function App() {
         </nav>
 
         {/* Cap widget */}
-        <div className="cap-widget">
+        {tab !== 'accuracy' && <div className="cap-widget">
           <div className="cap-header">Daily Signal Cap</div>
           <div className="cap-numbers">
             <span className="cap-count">{daily?.signals_today ?? '–'}</span>
@@ -539,7 +541,7 @@ export default function App() {
           </div>
           <div className="cap-bar"><div className="cap-bar-fill" style={{width:`${capPct}%`}}/></div>
           <div className="cap-meta">Resets midnight · {daily?.timezone ?? 'Asia/Colombo'}</div>
-        </div>
+        </div>}
       </aside>}
       {!sidebarOpen && tab !== 'analysis' && (
         <button type="button" className="sidebar-show" title="Show sidebar" onClick={() => setSidebarOpen(true)}>
@@ -558,6 +560,7 @@ export default function App() {
         )}
         {tab === 'dashboard' && <DashboardView apiStatus={status} />}
         {tab === 'train'     && <TrainView />}
+        {tab === 'accuracy'  && <AccuracyPage />}
         {tab === 'setup'     && <SetupView online={online} />}
       </main>
     </div>
@@ -2758,6 +2761,7 @@ const DEFAULT_OPS: OpsPrefs = {
 
 type TradePrefs = {
   auto_trade_enabled: boolean;
+  accuracy_auto_trade_enabled?: boolean;
   trade_stake: number;
   trade_stake_use_full_balance: boolean;
   force_min_probability: number;
@@ -2780,6 +2784,7 @@ type TradeAccount = TradeAccountInfo;
 
 const DEFAULT_TRADE: TradePrefs = {
   auto_trade_enabled: false,
+  accuracy_auto_trade_enabled: false,
   trade_stake: 1,
   trade_stake_use_full_balance: false,
   force_min_probability: 0.8,
@@ -2863,6 +2868,7 @@ function SetupView({ online }: { online: boolean }) {
       .then(r => {
         setTrade({
           auto_trade_enabled: !!r.auto_trade_enabled,
+          accuracy_auto_trade_enabled: !!r.accuracy_auto_trade_enabled,
           trade_stake: Number(r.trade_stake ?? 1),
           trade_stake_use_full_balance: !!r.trade_stake_use_full_balance,
           force_min_probability: Number(r.force_min_probability ?? 0.8),
@@ -2909,6 +2915,7 @@ function SetupView({ online }: { online: boolean }) {
         method: 'PUT',
         body: JSON.stringify({
           auto_trade_enabled: trade.auto_trade_enabled,
+          accuracy_auto_trade_enabled: !!trade.accuracy_auto_trade_enabled,
           trade_stake: trade.trade_stake,
           trade_stake_use_full_balance: trade.trade_stake_use_full_balance,
           force_min_probability: trade.force_min_probability,
@@ -2928,6 +2935,7 @@ function SetupView({ online }: { online: boolean }) {
       setTrade(prev => ({
         ...prev,
         auto_trade_enabled: !!r.auto_trade_enabled,
+        accuracy_auto_trade_enabled: !!r.accuracy_auto_trade_enabled,
         trade_stake: Number(r.trade_stake ?? prev.trade_stake),
         trade_stake_use_full_balance: !!r.trade_stake_use_full_balance,
         force_min_probability: Number(r.force_min_probability ?? prev.force_min_probability),
@@ -3313,8 +3321,8 @@ function SetupView({ online }: { online: boolean }) {
             : <span className="badge badge-dim">No token</span>}
         </div>
         <p className="text-xs text-dim mb-3">
-          Optional buy after Dashboard signals. Balance / P&amp;L live on the Dashboard.
-          Barriers &amp; confidence are picked there when you start Analyze / Force / Cross.
+          Optional buy after Dashboard Analyze / Force / Cross, and (separately) Touch Accuracy.
+          Balance / P&amp;L live on the Dashboard.
         </p>
 
         <label className="text-sm flex items-center gap-2 mb-3" style={{ cursor: 'pointer' }}>
@@ -3324,6 +3332,14 @@ function SetupView({ online }: { online: boolean }) {
             onChange={e => setTrade(prev => ({ ...prev, auto_trade_enabled: e.target.checked }))}
           />
           Enable auto-trade (still blocked unless the server gate and confirmation are both on)
+        </label>
+        <label className="text-sm flex items-center gap-2 mb-3" style={{ cursor: 'pointer' }}>
+          <input
+            type="checkbox"
+            checked={!!trade.accuracy_auto_trade_enabled}
+            onChange={e => setTrade(prev => ({ ...prev, accuracy_auto_trade_enabled: e.target.checked }))}
+          />
+          Also auto-trade Touch Accuracy signals (±0.01 / 9m)
         </label>
         <label className="text-sm flex items-center gap-2 mb-3" style={{ cursor: 'pointer' }}>
           <input

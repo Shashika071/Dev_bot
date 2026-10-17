@@ -322,6 +322,20 @@ class DerivWSClient:
 
                     await self._route_message(data)
 
+                # Clean stream exhaustion (no exception) still needs reconnect.
+                logger.warning("deriv_ws_stream_exhausted")
+                if self.ws is ws or self.ws is None:
+                    self._connected = False
+                    self._listen_ws = None
+                    try:
+                        if self.ws is not None:
+                            await self.ws.close()
+                    except Exception:
+                        pass
+                    self.ws = None
+                if self._running:
+                    await asyncio.sleep(2)
+
             except websockets.exceptions.ConnectionClosed as e:
                 logger.warning("deriv_ws_connection_closed", code=e.code, reason=e.reason)
                 # Don't clobber a newer socket that replaced this one mid-listen
@@ -469,8 +483,24 @@ class DerivWSClient:
         out.sort(key=lambda x: x["epoch"])
         return out
 
+    async def forget_tick_subscriptions(self) -> None:
+        """Drop prior tick stream subscriptions before switching symbols."""
+        self._subscriptions = [
+            (msg, handler_type)
+            for (msg, handler_type) in self._subscriptions
+            if "ticks" not in msg
+        ]
+        self._handlers.pop("tick", None)
+        if not self.connected or self.ws is None:
+            return
+        try:
+            await self.send({"forget_all": "ticks"})
+        except Exception as exc:
+            logger.warning("deriv_ws_forget_ticks_failed", error=str(exc))
+
     async def subscribe_ticks(self, symbol: str, handler: Callable):
         """Subscribe to live tick stream (request key 'ticks', stream msg_type 'tick')."""
+        await self.forget_tick_subscriptions()
         await self.send_and_subscribe(
             {"ticks": symbol},
             handler,

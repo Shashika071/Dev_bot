@@ -54,6 +54,7 @@ class EvaluationReport:
 
     # Financial metrics (where quotes exist)
     quote_based_net_return: Optional[float] = None
+    selected_mean_breakeven: Optional[float] = None
     max_drawdown: Optional[float] = None
     max_losing_streak: int = 0
 
@@ -133,15 +134,15 @@ def evaluate_model(
     selected_win_rate = 0.0
     ci_lower, ci_upper = 0.0, 0.0
     net_return = None
+    selected_mean_breakeven = None
     max_dd = None
     max_losing = 0
     selected_quote_match_rate = 0.0
     selected_matched_count = 0
 
     if breakeven_probs is not None:
-        selected_mask = y_pred_proba > (
-            np.asarray(breakeven_probs, dtype=float) + float(margin_over_breakeven)
-        )
+        be_arr = np.asarray(breakeven_probs, dtype=float)
+        selected_mask = y_pred_proba > (be_arr + float(margin_over_breakeven))
         selected_count = int(selected_mask.sum())
         matched = None
         if quote_matched is not None:
@@ -166,12 +167,15 @@ def evaluate_model(
                 sel_prices = quote_prices[economic]
                 sel_payouts = quote_payouts[economic]
                 sel_outcomes = y_true[economic]
+                sel_be = be_arr[economic]
                 finite = np.isfinite(sel_prices) & np.isfinite(sel_payouts)
                 sel_prices = sel_prices[finite]
                 sel_payouts = sel_payouts[finite]
                 sel_outcomes = sel_outcomes[finite]
+                sel_be = sel_be[finite]
 
                 if len(sel_outcomes):
+                    selected_mean_breakeven = float(np.nanmean(sel_be))
                     pnl = np.where(
                         sel_outcomes == 1,
                         sel_payouts - sel_prices,
@@ -213,6 +217,7 @@ def evaluate_model(
         selected_win_rate_ci_lower=ci_lower,
         selected_win_rate_ci_upper=ci_upper,
         quote_based_net_return=net_return,
+        selected_mean_breakeven=selected_mean_breakeven,
         max_drawdown=max_dd,
         max_losing_streak=max_losing,
         baseline_win_rate=baseline_rate,

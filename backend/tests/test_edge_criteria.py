@@ -25,6 +25,8 @@ def test_edge_passes_with_quotes_and_ci():
         selected_win_rate=0.99,
         selected_win_rate_ci_lower=0.98,
         selected_win_rate_ci_upper=0.995,
+        selected_mean_breakeven=0.95,
+        quote_based_net_return=1.0,
     )
     ok, reason = orch._compute_edge(
         report,

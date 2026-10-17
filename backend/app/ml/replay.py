@@ -41,6 +41,9 @@ class TouchReplayRunner:
             epochs,
             quotes_df if quotes_df is not None else pd.DataFrame(),
             direction=direction,
+            barrier_distance=float(barrier_distance),
+            duration_seconds=int(self.duration_seconds),
+            contract_type="ONETOUCH",
         )
         for index, epoch in enumerate(epochs.tolist()):
             snap = build_decision_snapshot(

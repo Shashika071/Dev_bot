@@ -64,12 +64,17 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _add_source(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--ticks", default=None, help="CSV or Parquet tick file")
+    parser.add_argument("--ticks", default=None, help="CSV, Parquet, or SQLite tick file")
+    parser.add_argument("--sqlite", default=None, help="Path to candel/market.sqlite style DB")
     parser.add_argument("--database-url", default=None, help="Postgres URL. Defaults to DATABASE_URL if set.")
     parser.add_argument("--symbol", default=None)
 
 
 def _load_raw(args) -> pd.DataFrame:
+    if args.sqlite:
+        from app.ml.sqlite_ticks import load_sqlite_ticks
+
+        return load_sqlite_ticks(args.sqlite, symbol=args.symbol or "R_100")
     if args.ticks:
         return load_ticks(args.ticks)
     dsn = args.database_url or os.environ.get("DATABASE_URL")
@@ -78,9 +83,8 @@ def _load_raw(args) -> pd.DataFrame:
         return load_postgres(dsn, symbol)
     raise FileNotFoundError(
         "No tick file was provided and no database query could be run. "
-        "Pass --ticks path.csv (columns: epoch or timestamp, quote or price, optional symbol) "
-        "or pass --database-url and --symbol to read the ticks table. "
-        "This pipeline does not invent market data."
+        "Pass --sqlite candel/market.sqlite, --ticks path.csv, "
+        "or --database-url and --symbol. This pipeline does not invent market data."
     )
 
 

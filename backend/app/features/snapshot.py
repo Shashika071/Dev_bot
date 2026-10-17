@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 from app.features.pipeline import build_features
-from app.features.sequences import build_price_sequence
+from app.features.sequences import build_price_sequence, build_price_sequence_from_frame
 
 HISTORY_TICKS = 600
 MIN_HISTORY_TICKS = 100
@@ -30,11 +30,23 @@ def decision_frame(
     decision_epoch: int,
     history: int = HISTORY_TICKS,
 ) -> pd.DataFrame:
-    """Ticks with epoch <= decision_epoch, capped to the live history length."""
+    """Ticks with epoch <= decision_epoch, capped to the live history length.
+
+    Uses binary search when epochs are sorted ascending (training path).
+    """
     if ticks_df is None or ticks_df.empty:
         return pd.DataFrame(columns=["epoch", "tick_time", "quote"])
     epoch = int(decision_epoch)
-    frame = ticks_df.loc[ticks_df["epoch"].astype(np.int64) <= epoch].tail(int(history))
+    hist = int(history)
+    epochs = ticks_df["epoch"].to_numpy(dtype=np.int64, copy=False)
+    # Fast path: sorted ascending → O(log n) cut + slice of last `history` rows.
+    if len(epochs) > 1 and bool(np.all(epochs[1:] >= epochs[:-1])):
+        end = int(np.searchsorted(epochs, epoch, side="right"))
+        start = max(0, end - hist)
+        if end <= 0:
+            return pd.DataFrame(columns=ticks_df.columns)
+        return ticks_df.iloc[start:end].copy()
+    frame = ticks_df.loc[ticks_df["epoch"].astype(np.int64) <= epoch].tail(hist)
     return frame.copy()
 
 
@@ -73,12 +85,21 @@ def build_decision_snapshot(
         barrier_distance=float(barrier_distance),
         barrier_direction=barrier_direction,
     )
-    sequence = build_price_sequence(
-        ticks_df,
-        entry_epoch=epoch,
+    # Prefer the already-sliced frame so we do not re-scan the full tick table.
+    sequence = build_price_sequence_from_frame(
+        frame,
         barrier_distance=float(barrier_distance),
         barrier_direction=barrier_direction,
         duration_seconds=int(duration_seconds),
         seq_len=int(seq_len),
     )
+    if sequence is None:
+        sequence = build_price_sequence(
+            ticks_df,
+            entry_epoch=epoch,
+            barrier_distance=float(barrier_distance),
+            barrier_direction=barrier_direction,
+            duration_seconds=int(duration_seconds),
+            seq_len=int(seq_len),
+        )
     return DecisionSnapshot(epoch, frame, features, sequence)

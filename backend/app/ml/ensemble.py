@@ -167,7 +167,6 @@ def fit_stacking_ensemble(
         penalty="l2",
         solver="lbfgs",
         max_iter=1000,
-        class_weight="balanced",
     )
     meta.fit(X[mask], y[mask])
     logger.info("stacking_ensemble_fit", n_oof=int(mask.sum()))

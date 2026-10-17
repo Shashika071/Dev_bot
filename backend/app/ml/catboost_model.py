@@ -67,24 +67,48 @@ class CatBoostTouchModel:
             X_val_clean = X_val.replace([np.inf, -np.inf], np.nan)
             eval_set = Pool(X_val_clean, label=y_val)
 
-        self.model = CatBoostClassifier(
+        from app.ml.device import catboost_task_type
+
+        task_type = catboost_task_type()
+        clf_kwargs = dict(
             iterations=self.hyperparams["iterations"],
             learning_rate=self.hyperparams["learning_rate"],
             depth=self.hyperparams["depth"],
             l2_leaf_reg=self.hyperparams["l2_leaf_reg"],
+            # Estimate the observed event probability. Class balancing changes
+            # that probability target when touches are much more common.
+            loss_function="Logloss",
             eval_metric="Logloss",
             use_best_model=True if eval_set else False,
             random_seed=self.hyperparams["random_seed"],
-        verbose=False if int(self.hyperparams["iterations"]) < 200 else 100,
+            verbose=False if int(self.hyperparams["iterations"]) < 200 else 100,
             nan_mode="Min",
-            auto_class_weights="Balanced",
+            allow_writing_files=False,
+            task_type=task_type,
         )
+        if task_type == "GPU":
+            clf_kwargs["devices"] = "0"
 
-        self.model.fit(
-            train_pool,
-            eval_set=eval_set,
-            early_stopping_rounds=self.hyperparams["early_stopping_rounds"] if eval_set else None,
-        )
+        try:
+            self.model = CatBoostClassifier(**clf_kwargs)
+            self.model.fit(
+                train_pool,
+                eval_set=eval_set,
+                early_stopping_rounds=self.hyperparams["early_stopping_rounds"] if eval_set else None,
+            )
+        except Exception as gpu_err:
+            if task_type != "GPU":
+                raise
+            logger.warning("catboost_gpu_failed_fallback_cpu", error=str(gpu_err))
+            clf_kwargs["task_type"] = "CPU"
+            clf_kwargs.pop("devices", None)
+            self.model = CatBoostClassifier(**clf_kwargs)
+            self.model.fit(
+                train_pool,
+                eval_set=eval_set,
+                early_stopping_rounds=self.hyperparams["early_stopping_rounds"] if eval_set else None,
+            )
+            task_type = "CPU"
         self._is_fitted = True
 
         best_iter = self.model.get_best_iteration() if eval_set else self.hyperparams["iterations"]
@@ -92,7 +116,8 @@ class CatBoostTouchModel:
                      direction=self.direction,
                      best_iteration=best_iter,
                      n_features=len(self._feature_names),
-                     n_train=len(X_train))
+                     n_train=len(X_train),
+                     task_type=task_type)
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         """Predict touch probability (uncalibrated)."""

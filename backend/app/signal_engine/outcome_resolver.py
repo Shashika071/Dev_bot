@@ -65,13 +65,22 @@ async def resolve_pending_outcomes(
             continue
         if created.tzinfo is None:
             created = created.replace(tzinfo=timezone.utc)
-        window_end = created.timestamp() + int(sig.duration_seconds or 540)
+        # Prefer recorded broker/manual entry time over signal creation.
+        decision_time = created
+        entry_delay = int(settings.manual_entry_delay_seconds)
+        if sig.entry_time is not None:
+            decision_time = sig.entry_time
+            if decision_time.tzinfo is None:
+                decision_time = decision_time.replace(tzinfo=timezone.utc)
+            entry_delay = 0  # entry_time is already the accepted entry
+        duration = int(sig.duration_seconds or 540)
+        window_end = decision_time.timestamp() + entry_delay + duration
         if now.timestamp() < window_end + 2:
             continue  # still in window
 
-        # Load ticks covering entry → window end (+small pad)
-        entry_epoch = int(created.timestamp())
-        pad_start = entry_epoch - 30
+        # Load ticks covering decision → window end (+small pad)
+        decision_epoch = int(decision_time.timestamp())
+        pad_start = decision_epoch - 30
         pad_end = int(window_end) + 30
         ticks = (
             await session.execute(
@@ -87,6 +96,7 @@ async def resolve_pending_outcomes(
             continue
 
         import pandas as pd
+        import re
 
         ticks_df = pd.DataFrame(
             [{"epoch": t.epoch, "tick_time": t.tick_time, "quote": float(t.quote)} for t in ticks]
@@ -99,11 +109,11 @@ async def resolve_pending_outcomes(
 
         labels = label_touch_outcomes(
             ticks_df=ticks_df,
-            entry_times=pd.Series([created]),
-            duration_seconds=int(sig.duration_seconds or 540),
+            entry_times=pd.Series([decision_time]),
+            duration_seconds=duration,
             barrier_distance=dist,
             barrier_direction=direction,
-            entry_delay_seconds=settings.manual_entry_delay_seconds,
+            entry_delay_seconds=entry_delay,
             min_window_ticks=settings.min_label_window_ticks,
         )
         if labels.empty:
@@ -117,25 +127,36 @@ async def resolve_pending_outcomes(
         payout = float(sig.total_payout or 0)
         net = (payout - purchase) if touched else (-purchase if purchase else None)
 
+        # Tick-verified paths are hypothetical unless a broker contract id was recorded.
+        notes = str(sig.entry_notes or "")
+        broker_contract = bool(re.search(r"contract_id=(\d+)", notes))
+        is_hypothetical = not broker_contract
         outcome = {
             "touched": touched,
             "touch_time": row.get("touch_time") if touched else None,
             "touch_epoch": int(row["touch_time"].timestamp()) if touched and hasattr(row.get("touch_time"), "timestamp") else None,
             "touch_price": float(row["touch_price"]) if touched and row.get("touch_price") == row.get("touch_price") else None,
-            "window_start": created,
+            "window_start": decision_time,
             "window_end": datetime.fromtimestamp(window_end, tz=timezone.utc),
             "ticks_in_window": int(row.get("ticks_in_window") or 0),
             "max_price": float(row["max_price"]) if row.get("max_price") == row.get("max_price") else None,
             "min_price": float(row["min_price"]) if row.get("min_price") == row.get("min_price") else None,
-            "price_at_start": float(row.get("entry_price") or 0) or None,
+            "price_at_start": float(row.get("entry_price") or sig.entry_price or 0) or None,
             "price_at_end": float(row["price_at_end"]) if row.get("price_at_end") == row.get("price_at_end") else None,
             "max_favorable_excursion": float(row["max_favorable_excursion"]) if row.get("max_favorable_excursion") == row.get("max_favorable_excursion") else None,
             "purchase_price": purchase or None,
             "payout": payout or None,
             "net_pnl": net,
-            "is_hypothetical": not bool(sig.manually_entered),
+            "is_hypothetical": is_hypothetical,
         }
         await lifecycle.resolve_outcome(session, sig.signal_id, outcome)
+        if not is_hypothetical and net is not None and float(net) < 0:
+            try:
+                from app.execution.risk import record_realized_loss
+
+                record_realized_loss(abs(float(net)))
+            except Exception:
+                pass
         resolved += 1
 
     if resolved:

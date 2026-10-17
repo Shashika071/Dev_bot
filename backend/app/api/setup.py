@@ -126,6 +126,7 @@ async def put_ops_prefs(body: OpsPrefsBody) -> dict:
 
 class TradePrefsBody(BaseModel):
     auto_trade_enabled: bool = False
+    accuracy_auto_trade_enabled: bool = False
     trade_stake: float = Field(1.0, ge=0.35, le=10000.0)
     trade_stake_use_full_balance: bool = False
     force_min_probability: float = Field(0.80, ge=0.50, le=0.99)
@@ -157,7 +158,8 @@ async def get_trade_prefs() -> dict:
             "Enable only with a token that has trade scope. Default is OFF."
         ),
         "guide": {
-            "auto_trade_enabled": "When on, Analyze / Force signal may place a buy after a signal is created.",
+            "auto_trade_enabled": "When on, Analyze / Force / Cross may place a buy after a signal is created.",
+            "accuracy_auto_trade_enabled": "When on (and auto-trade + confirmation are on), Touch Accuracy signals may also place a buy.",
             "trade_stake": "Fixed stake when full-balance mode is off.",
             "trade_stake_use_full_balance": "Each trade stakes ~full live balance (25→27→29 as balance changes). High risk.",
             "force_min_probability": "Force (model + candles) mode min calibrated probability (e.g. 0.8 = 80%).",

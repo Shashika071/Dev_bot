@@ -180,10 +180,13 @@ class DerivTradeClient:
                 "No real account on this PAT — only demo found. "
                 "Link a real trading account to the app / use a token with real access."
             )
-        # demo (default, safer)
+        # demo (default, safer) — never fall back to a real account
         if demos:
             return demos[0]
-        return accounts[0]
+        raise RuntimeError(
+            "No demo account on this PAT — refusing to fall back to a real account. "
+            "Link a demo account or set prefer=real explicitly."
+        )
 
     async def fetch_account_summary(self) -> dict[str, Any]:
         """Balance / account details for Setup UI."""

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
+from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
@@ -11,6 +13,9 @@ from app.features.labels import filter_resolved_labels, label_touch_outcomes
 from app.features.pipeline import select_feature_matrix, validate_no_future_leakage
 from app.features.sequences import stack_sequences
 from app.features.snapshot import build_decision_snapshot
+
+
+ProgressFn = Callable[[str], None]
 
 
 @dataclass
@@ -35,10 +40,23 @@ def build_touch_dataset(
     entry_delay_seconds: int,
     seq_len: int,
     min_window_ticks: int,
+    on_progress: Optional[ProgressFn] = None,
 ) -> TouchDataset:
     """Label entries and build inclusive decision snapshots for each one."""
+
+    def _progress(msg: str) -> None:
+        if on_progress is not None:
+            try:
+                on_progress(msg)
+            except Exception:
+                pass
+
+    _progress(f"Labeling {len(entry_times):,} candidate entries…")
+    t0 = time.monotonic()
+    # Ensure epochs are sorted once for binary-search snapshots.
+    ticks = ticks_df.sort_values("epoch").reset_index(drop=True)
     labels_df = label_touch_outcomes(
-        ticks_df=ticks_df,
+        ticks_df=ticks,
         entry_times=entry_times,
         duration_seconds=duration_seconds,
         barrier_distance=barrier_distance,
@@ -48,12 +66,18 @@ def build_touch_dataset(
     )
     unresolved = int((~labels_df["resolved"]).sum()) if not labels_df.empty else 0
     resolved = filter_resolved_labels(labels_df)
+    _progress(
+        f"Labels done in {time.monotonic() - t0:.1f}s — "
+        f"{len(resolved):,} resolved, {unresolved:,} unresolved. Building snapshots…"
+    )
     rows: list[dict] = []
     feature_epochs: list[int] = []
     entry_epochs: list[int] = []
     sequences: list[np.ndarray] = []
+    total = len(resolved)
+    report_every = max(1, total // 20) if total else 1
 
-    for _, row in resolved.iterrows():
+    for i, (_, row) in enumerate(resolved.iterrows()):
         entry_time = row["entry_time"]
         entry_epoch = (
             int(entry_time.timestamp())
@@ -61,7 +85,7 @@ def build_touch_dataset(
             else int(entry_time)
         )
         snap = build_decision_snapshot(
-            ticks_df,
+            ticks,
             entry_epoch,
             barrier_distance=barrier_distance,
             barrier_direction=barrier_direction,
@@ -82,6 +106,12 @@ def build_touch_dataset(
                 "entry_time": entry_time,
             }
         )
+        if (i + 1) % report_every == 0 or (i + 1) == total:
+            _progress(
+                f"Snapshots {i + 1:,}/{total:,} "
+                f"({100.0 * (i + 1) / max(1, total):.0f}%) — "
+                f"{len(rows):,} aligned · {time.monotonic() - t0:.0f}s"
+            )
 
     leakage_ok = validate_no_future_leakage(feature_epochs, entry_epochs)
     if not rows:
@@ -98,6 +128,9 @@ def build_touch_dataset(
         )
 
     features = select_feature_matrix(pd.DataFrame([r["features"] for r in rows]))
+    _progress(
+        f"Dataset ready: {len(rows):,} aligned rows in {time.monotonic() - t0:.1f}s"
+    )
     return TouchDataset(
         features=features,
         sequences=stack_sequences(sequences),

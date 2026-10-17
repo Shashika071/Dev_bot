@@ -51,6 +51,8 @@ def _fernet() -> Fernet:
 def _defaults() -> dict[str, Any]:
     return {
         "auto_trade_enabled": False,
+        # Separate opt-in for Touch Accuracy signals (still needs auto_trade + confirmation).
+        "accuracy_auto_trade_enabled": False,
         "trade_stake": 1.0,
         # When true, each buy uses nearly the full live account balance (ignores fixed stake)
         "trade_stake_use_full_balance": False,
@@ -82,6 +84,7 @@ def _clamp(prefs: dict[str, Any]) -> dict[str, Any]:
     out = _defaults()
     out.update({k: prefs[k] for k in prefs if k in _KEYS})
     out["auto_trade_enabled"] = bool(out["auto_trade_enabled"])
+    out["accuracy_auto_trade_enabled"] = bool(out.get("accuracy_auto_trade_enabled", False))
     out["trade_stake"] = max(0.35, min(10000.0, float(out["trade_stake"])))
     out["trade_stake_use_full_balance"] = bool(out.get("trade_stake_use_full_balance", False))
     out["force_min_probability"] = max(0.50, min(0.99, float(out["force_min_probability"])))

@@ -11,6 +11,38 @@ import numpy as np
 import pandas as pd
 
 
+def build_price_sequence_from_frame(
+    frame: pd.DataFrame,
+    *,
+    barrier_distance: float,
+    barrier_direction: str,
+    duration_seconds: int,
+    seq_len: int = 64,
+) -> np.ndarray | None:
+    """Build a sequence from an already-sliced decision frame (no full-table scan)."""
+    if frame is None or frame.empty or len(frame) < int(seq_len):
+        return None
+    recent = frame.tail(int(seq_len))
+    prices = recent["quote"].astype(float).to_numpy()
+    last = float(prices[-1])
+    if last == 0 or np.isnan(last):
+        return None
+    norm = (prices / last) - 1.0
+    direction = 1.0 if barrier_direction == "upper" else -1.0
+    barrier_rel = float(barrier_distance) / last
+    duration_rel = float(duration_seconds) / 540.0
+    n = int(seq_len)
+    seq = np.column_stack(
+        [
+            norm,
+            np.full(n, barrier_rel, dtype=float),
+            np.full(n, direction, dtype=float),
+            np.full(n, duration_rel, dtype=float),
+        ]
+    )
+    return seq.astype(np.float32)
+
+
 def build_price_sequence(
     ticks_df: pd.DataFrame,
     entry_epoch: int,
@@ -28,29 +60,23 @@ def build_price_sequence(
       2: direction (+1 upper / -1 lower)
       3: duration_seconds / 540
     """
-    recent = ticks_df[ticks_df["epoch"] <= int(entry_epoch)].tail(seq_len)
-    if len(recent) < seq_len:
-        return None
-
-    prices = recent["quote"].astype(float).values
-    last = prices[-1]
-    if last == 0 or np.isnan(last):
-        return None
-
-    norm = (prices / last) - 1.0
-    direction = 1.0 if barrier_direction == "upper" else -1.0
-    barrier_rel = float(barrier_distance) / last
-    duration_rel = float(duration_seconds) / 540.0
-
-    seq = np.column_stack(
-        [
-            norm,
-            np.full(seq_len, barrier_rel, dtype=float),
-            np.full(seq_len, direction, dtype=float),
-            np.full(seq_len, duration_rel, dtype=float),
-        ]
+    epoch = int(entry_epoch)
+    epochs = ticks_df["epoch"].to_numpy(dtype=np.int64, copy=False) if not ticks_df.empty else np.array([], dtype=np.int64)
+    if len(epochs) > 1 and bool(np.all(epochs[1:] >= epochs[:-1])):
+        end = int(np.searchsorted(epochs, epoch, side="right"))
+        start = max(0, end - int(seq_len))
+        if end - start < int(seq_len):
+            return None
+        recent = ticks_df.iloc[start:end]
+    else:
+        recent = ticks_df[ticks_df["epoch"] <= epoch].tail(seq_len)
+    return build_price_sequence_from_frame(
+        recent,
+        barrier_distance=barrier_distance,
+        barrier_direction=barrier_direction,
+        duration_seconds=duration_seconds,
+        seq_len=seq_len,
     )
-    return seq.astype(np.float32)
 
 
 def stack_sequences(sequences: list[np.ndarray]) -> np.ndarray:

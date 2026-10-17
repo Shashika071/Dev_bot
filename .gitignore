@@ -27,6 +27,11 @@ frontend/dist/
 
 # Data & models (large / generated)
 data/
+# Local SQLite tick dumps (too large for GitHub; keep on disk only)
+candel/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
 # Postgres host data — NEVER delete if you want to keep ticks
 pgdata/
 *.cbm

@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import setup, signals, train, ws
 from app.api.analysis import router as analysis_router
 from app.api.market import router as market_router
+from app.api.accuracy import router as accuracy_router, service as accuracy_service
 from app.config import settings
 from app.database import init_db
 
@@ -34,6 +35,7 @@ app.include_router(ws.router)
 app.include_router(train.router)
 app.include_router(market_router)
 app.include_router(analysis_router)
+app.include_router(accuracy_router)
 
 
 @app.on_event("startup")
@@ -61,6 +63,7 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
+    await accuracy_service.stop()
     try:
         from app.execution.session_ctl import stop_session
 

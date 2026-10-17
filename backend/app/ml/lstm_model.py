@@ -57,7 +57,28 @@ class LSTMTouchModel:
             ) from e
         self._torch = torch
         self._nn = nn
+        try:
+            from app.ml.device import torch_device
+
+            self._device = torch_device()
+        except Exception:
+            self._device = "cpu"
         return torch
+
+    def _sync_device(self) -> str:
+        """Keep weights and inputs on one device (fixes cuda/cpu Cross-barrier crash)."""
+        torch = self._ensure_torch()
+        if self._model is None:
+            return self._device
+        try:
+            param_device = next(self._model.parameters()).device
+            want = torch.device(self._device)
+            if param_device != want:
+                self._model.to(want)
+        except Exception:
+            self._device = "cpu"
+            self._model.to("cpu")
+        return self._device
 
     def _build_net(self, input_size: int):
         torch = self._ensure_torch()
@@ -105,14 +126,15 @@ class LSTMTouchModel:
         self._model = self._build_net(self._input_size).to(self._device)
         opt = torch.optim.Adam(self._model.parameters(), lr=self.lr)
         loss_fn = self._nn.BCEWithLogitsLoss()
+        device = self._device
 
-        X_t = torch.tensor(X_seq_train, dtype=torch.float32)
-        y_t = torch.tensor(np.asarray(y_train, dtype=np.float32).ravel())
+        X_t = torch.tensor(X_seq_train, dtype=torch.float32, device=device)
+        y_t = torch.tensor(np.asarray(y_train, dtype=np.float32).ravel(), device=device)
 
         has_val = X_seq_val is not None and y_val is not None and len(X_seq_val) > 0
         if has_val:
-            Xv = torch.tensor(X_seq_val, dtype=torch.float32)
-            yv = torch.tensor(np.asarray(y_val, dtype=np.float32).ravel())
+            Xv = torch.tensor(X_seq_val, dtype=torch.float32, device=device)
+            yv = torch.tensor(np.asarray(y_val, dtype=np.float32).ravel(), device=device)
 
         best_state = None
         best_val = float("inf")
@@ -167,9 +189,12 @@ class LSTMTouchModel:
         torch = self._ensure_torch()
         if len(X_seq) == 0:
             return np.array([], dtype=float)
+        # Inference stays on CPU — avoids Cross/live cuda↔cpu mismatches after GPU train.
+        device = "cpu"
+        self._model.to(device)
         self._model.eval()
         with torch.no_grad():
-            xt = torch.tensor(X_seq, dtype=torch.float32)
+            xt = torch.tensor(X_seq, dtype=torch.float32, device=device)
             logits = self._model(xt)
             probs = torch.sigmoid(logits).cpu().numpy()
         return np.asarray(probs, dtype=float).ravel()
@@ -179,8 +204,10 @@ class LSTMTouchModel:
             raise RuntimeError("Refusing to save unfitted LSTM")
         torch = self._ensure_torch()
         os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
+        # Always persist CPU weights so load is portable.
+        state = {k: v.detach().cpu() for k, v in self._model.state_dict().items()}
         payload = {
-            "state_dict": self._model.state_dict(),
+            "state_dict": state,
             "input_size": self._input_size,
             "hidden_size": self.hidden_size,
             "num_layers": self.num_layers,
@@ -199,6 +226,9 @@ class LSTMTouchModel:
         self._input_size = payload["input_size"]
         self._model = self._build_net(self._input_size)
         self._model.load_state_dict(payload["state_dict"])
+        # Keep loaded weights on CPU for stable live/Cross inference.
+        self._device = "cpu"
+        self._model.to("cpu")
         self._model.eval()
         self._is_fitted = True
-        logger.info("lstm_loaded", path=path)
+        logger.info("lstm_loaded", path=path, device="cpu")

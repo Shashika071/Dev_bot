@@ -1,10 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, wsUrl } from '../api/client';
 import { PriceChart } from '../components/chart/PriceChart';
-import { CandleBar, LiveSignal, OverlayKey, asLiveSignal, coverChart, defaultOverlays, indicatorOverlay, mergeCandles, snapToBar, toggleOverlay } from '../chart/state';
+import { CandleBar, LiveSignal, OverlayKey, accuracyFeatureGroupLabel, accuracyProfileLabel, asAccuracySignal, asLiveSignal, coverChart, defaultOverlays, indicatorOverlay, liveSignalMarkers, mergeCandles, mergeLiveSignals, signalOutcomeLabel, toggleOverlay } from '../chart/state';
 
 type Interval = 'tick' | '1m' | '5m' | '15m' | '30m' | '1h' | '1d';
 type DrawMode = 'none' | 'hline' | 'label' | 'trendline' | 'rectangle';
+
+type AccuracyChartStatus = {
+  running: boolean;
+  feed_fresh: boolean;
+  history_loading?: boolean;
+  feature_profile?: string;
+  feature_groups?: string[];
+  signals_today: number;
+  max_per_day: number;
+  reason: string;
+  error: string | null;
+  signals: Record<string, unknown>[];
+};
 
 type Snapshot = {
   interval?: string;
@@ -54,6 +67,9 @@ export function AnalysisPage({
   const [execution, setExecution] = useState<Record<string, any> | null>(null);
   const [older, setOlder] = useState<CandleBar[]>([]);
   const [liveSignals, setLiveSignals] = useState<LiveSignal[]>([]);
+  const [accuracySignals, setAccuracySignals] = useState<LiveSignal[]>([]);
+  const [accuracyStatus, setAccuracyStatus] = useState<AccuracyChartStatus | null>(null);
+  const [accuracyError, setAccuracyError] = useState('');
   const historyLock = useRef(false);
   const historyExhausted = useRef(false);
   const historyRetryAt = useRef(0);
@@ -80,11 +96,11 @@ export function AnalysisPage({
       setExecution(await api('/setup/execution-status'));
       try {
         const history = await api<Array<Record<string, unknown>>>('/signals/?limit=20');
-        setLiveSignals(
+        setLiveSignals((current) => mergeLiveSignals(current,
           history
             .map(asLiveSignal)
             .filter((row): row is LiveSignal => row !== null && (!row.symbol || row.symbol === symbol)),
-        );
+        ));
       } catch {
         /* chart still works if signal history is unavailable */
       }
@@ -154,6 +170,34 @@ export function AnalysisPage({
     return () => window.clearInterval(timer);
   }, [load]);
 
+  // Hydrate independently of chart snapshots, including after a missed socket event.
+  useEffect(() => {
+    if (symbol !== 'R_100') return;
+    let stopped = false;
+    let timer: number | undefined;
+    let controller: AbortController | null = null;
+    const refresh = async () => {
+      controller = new AbortController();
+      const timeout = window.setTimeout(() => controller?.abort(), 10000);
+      try {
+        const status = await api<AccuracyChartStatus>('/accuracy/status', { signal: controller.signal });
+        if (stopped) return;
+        const signals = (status.signals || []).map(asAccuracySignal)
+          .filter((row): row is LiveSignal => row !== null && row.symbol === symbol);
+        setAccuracySignals((current) => mergeLiveSignals(current, signals));
+        setAccuracyStatus(status);
+        setAccuracyError('');
+      } catch {
+        if (!stopped) setAccuracyError('Touch Accuracy feed unavailable — reconnecting');
+      } finally {
+        window.clearTimeout(timeout);
+        if (!stopped) timer = window.setTimeout(refresh, 5000);
+      }
+    };
+    void refresh();
+    return () => { stopped = true; window.clearTimeout(timer); controller?.abort(); };
+  }, [symbol]);
+
   useEffect(() => {
     let socket: WebSocket | null = null;
     let stopped = false;
@@ -170,12 +214,14 @@ export function AnalysisPage({
           } else if (message.type === 'signal_alert') {
             const incoming = asLiveSignal(message.data || {});
             if (incoming && (!incoming.symbol || incoming.symbol === symbol)) {
-              setLiveSignals((current) => {
-                const rest = current.filter((row) => row.signal_id !== incoming.signal_id);
-                return [incoming, ...rest].slice(0, 20);
-              });
+              setLiveSignals((current) => mergeLiveSignals(current, [incoming]));
             }
             load();
+          } else if (message.type === 'accuracy_signal' || message.type === 'accuracy_outcome') {
+            const incoming = asAccuracySignal(message.data || {});
+            if (incoming?.symbol === symbol) {
+              setAccuracySignals((current) => mergeLiveSignals(current, [incoming]));
+            }
           }
         } catch {
           /* ignore malformed frames */
@@ -256,15 +302,12 @@ export function AnalysisPage({
     const barTimes = (interval === 'tick' ? ticks.map((point) => point.epoch) : chartCandles.map((bar) => bar.epoch))
       .filter((epoch) => Number.isFinite(epoch))
       .sort((a, b) => a - b);
-    [...liveSignals].reverse().forEach((signal) => {
-      if (!barTimes.length || signal.epoch < barTimes[0]) return;
-      const epoch = snapToBar(signal.epoch, barTimes);
-      const pct = signal.probability == null ? '' : ` ${Math.round(signal.probability * 100)}%`;
-      const text = `${signal.direction === 'upper' ? 'UPPER' : 'LOWER'}${pct}`;
-      merged.set(epoch, { epoch, direction: signal.direction, text });
+    const signals = [...liveSignals, ...accuracySignals].filter((row) => !row.symbol || row.symbol === symbol);
+    liveSignalMarkers(signals, barTimes).forEach((marker) => {
+      merged.set(marker.epoch, marker);
     });
     return [...merged.values()];
-  }, [chartCandles, interval, liveSignals, overlays.patterns, overlays.signals, snapshot, ticks]);
+  }, [accuracySignals, chartCandles, interval, liveSignals, overlays.patterns, overlays.signals, snapshot, symbol, ticks]);
 
   const chartOverlay = useMemo(
     () => indicatorOverlay(interval === 'tick'
@@ -278,8 +321,8 @@ export function AnalysisPage({
     const sells = snapshot?.sell_signals || [];
     const latestBuy = buys.length ? buys[buys.length - 1] : undefined;
     const latestSell = sells.length ? sells[sells.length - 1] : undefined;
-    const latestCross = liveSignals[0];
-    const crossLine = latestCross && Number.isFinite(Number(latestCross.resolved_barrier))
+    const latestCross = liveSignals.find((row) => !row.symbol || row.symbol === symbol);
+    const crossLine = latestCross && latestCross.resolved_barrier != null && Number.isFinite(latestCross.resolved_barrier)
       ? [{
           id: 'cross-barrier',
           price: Number(latestCross.resolved_barrier),
@@ -332,7 +375,7 @@ export function AnalysisPage({
         ]
       : [];
     return [...fromEvents, ...atrLines, ...sideLines, ...crossLine, ...drawn].filter((item) => Number.isFinite(item.price));
-  }, [drawings, liveSignals, overlays.levels, overlays.signals, snapshot]);
+  }, [drawings, liveSignals, overlays.levels, overlays.signals, snapshot, symbol]);
 
   async function onPick(pick: { epoch: number | null; price: number | null }) {
     if (drawMode === 'none' || pick.price == null) return;
@@ -360,6 +403,10 @@ export function AnalysisPage({
   }
 
   const heads = snapshot?.ml?.heads || {};
+  const latestAccuracy = accuracySignals.find((row) => row.symbol === symbol);
+  const accuracyLive = !accuracyError && accuracyStatus?.running && accuracyStatus.feed_fresh && !accuracyStatus.history_loading;
+  const accuracyState = accuracyError ? 'Reconnecting' : !accuracyStatus ? 'Connecting'
+    : accuracyStatus.running ? accuracyStatus.history_loading ? 'Loading model history' : accuracyStatus.feed_fresh ? 'Watching live' : 'Waiting for ticks' : 'Stopped';
   return (
     <section className="analysis-workspace">
       <div className="analysis-toolbar">
@@ -375,6 +422,37 @@ export function AnalysisPage({
         ))}
         <button className={showReadings ? 'active' : ''} onClick={() => setShowReadings((open) => !open)}>readings</button>
       </div>
+      {symbol === 'R_100' && <div className="chart-touch-status" aria-label="Touch Accuracy signals">
+        <div className="chart-touch-heading">
+          <strong>Touch Accuracy</strong>
+          <span className={`chart-touch-state${accuracyLive ? ' is-live' : ''}`}>{accuracyState}</span>
+          {accuracyStatus && <span>{accuracyStatus.signals_today} / {accuracyStatus.max_per_day} today</span>}
+          {accuracyStatus && <span className="chart-touch-note" title={(accuracyStatus.feature_groups || []).map(accuracyFeatureGroupLabel).join(', ')}>
+            {accuracyProfileLabel(accuracyStatus.feature_profile)}
+            {!!accuracyStatus.feature_groups?.length && ` · ${accuracyStatus.feature_groups.length} input groups`}
+          </span>}
+        </div>
+        {latestAccuracy ? <div className="chart-touch-signal" aria-live="polite">
+          <span>Latest</span>
+          <strong className={`chart-touch-${latestAccuracy.direction}`}>
+            {latestAccuracy.direction === 'upper' ? '↑ UPPER' : '↓ LOWER'} {latestAccuracy.barrier_input}
+          </strong>
+          <span>{latestAccuracy.probability == null ? '—' : `${(latestAccuracy.probability * 100).toFixed(2)}%`} estimated · 9 min</span>
+          <span className={`chart-touch-outcome ${latestAccuracy.resolved ? latestAccuracy.outcome === true ? 'touched' : latestAccuracy.outcome === false ? 'missed' : '' : ''}`}>
+            {signalOutcomeLabel(latestAccuracy)}
+          </span>
+          <time dateTime={new Date(latestAccuracy.epoch * 1000).toISOString()}>
+            {new Date(latestAccuracy.epoch * 1000).toLocaleString('en-GB', { timeZone: 'Asia/Colombo', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })} Colombo
+          </time>
+          <span className="chart-touch-note">Simulated outcome</span>
+          <span className="chart-touch-note" title={latestAccuracy.feature_groups?.map(accuracyFeatureGroupLabel).join(', ')}>
+            {accuracyProfileLabel(latestAccuracy.feature_profile)}
+          </span>
+        </div> : <span className="chart-touch-note">
+          {accuracyStatus?.running ? 'Waiting for a qualifying signal — arrows appear automatically.' : 'Start signals from the Touch Accuracy tab.'}
+        </span>}
+        {(accuracyError || accuracyStatus?.error) && <span className="chart-touch-error">{accuracyError || accuracyStatus?.error}</span>}
+      </div>}
       {error && <div className="alert alert-warning">{error}</div>}
       <div className={`analysis-stage${showReadings ? ' readings-open' : ''}`}>
         <div className="analysis-tools">

@@ -62,6 +62,7 @@ class LogisticRegressionBaseline:
     """
     Baseline D: Simple logistic regression model.
     Fitted with StandardScaler on training data only.
+    Unweighted log loss preserves the observed class frequency as the target.
     """
 
     name = "logistic_regression"
@@ -73,7 +74,6 @@ class LogisticRegressionBaseline:
                 C=C,
                 max_iter=max_iter,
                 solver="lbfgs",
-                class_weight="balanced",
             ))
         ])
         self._is_fitted = False

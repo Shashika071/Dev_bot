@@ -1,0 +1,14 @@
+# Optional GPU passthrough for training.
+# Requires: Docker Desktop + WSL2 + NVIDIA Container Toolkit, and a CUDA torch image.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+#
+# Current default Dockerfile still installs CPU torch. For LSTM CUDA, rebuild with:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml build --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu121
+
+services:
+  backend:
+    environment:
+      - TRAIN_USE_GPU=true
+    gpus: all

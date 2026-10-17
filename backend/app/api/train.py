@@ -7,8 +7,10 @@ import asyncio
 import json
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import structlog
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -123,9 +125,12 @@ def _model_row_from_meta(
     is_latest: bool = False,
     meta_path: str | None = None,
 ) -> dict:
+    from app.ml.promotion import promotion_blockers
+
     cal = meta.get("calibrator_path")
     paths = meta.get("paths") or {}
     loadable = bool(cal and os.path.exists(cal))
+    blockers = promotion_blockers(meta)
     return {
         "direction": meta.get("direction"),
         "selected_pipeline": meta.get("selected_pipeline"),
@@ -139,6 +144,9 @@ def _model_row_from_meta(
         "created_at": meta.get("created_at"),
         "metrics": meta.get("metrics") or {},
         "is_latest": is_latest,
+        "is_active": False,
+        "promotion_ready": bool(meta.get("promotion_ready")) and not blockers,
+        "promotion_blockers": blockers,
         "loadable": loadable,
         "meta_path": meta_path,
         "paths_present": {
@@ -184,15 +192,17 @@ def _retarget_latest(direction: str, model_dir: str) -> None:
 
 
 @router.get("/models")
-async def list_trained_models() -> dict:
+async def list_trained_models(db: AsyncSession = Depends(get_db)) -> dict:
     """
     List saved models for the dashboard picker.
     Includes every distinct (direction, barrier) from meta_*.json (not only latest_*),
     so Cross can still pick an older 0.9 train after a newer 0.09 overwrite of latest_*.
+    Registry supplies is_active / eligibility for promote.
     """
     import glob
     import json
     from app.config import settings
+    from app.models.model_version import ModelVersion
 
     model_dir = settings.model_dir
     latest_tags: set[str] = set()
@@ -240,9 +250,27 @@ async def list_trained_models() -> dict:
             continue
         by_tag[tag] = _model_row_from_meta(meta, is_latest=True, meta_path=path)
 
+    # Overlay registry active / eligibility state
+    try:
+        reg_rows = (await db.execute(select(ModelVersion))).scalars().all()
+        for reg in reg_rows:
+            tag = str(reg.version_tag or "")
+            if not tag:
+                continue
+            row = by_tag.get(tag)
+            if row is None:
+                continue
+            row["is_active"] = bool(reg.is_active)
+            row["registry_id"] = int(reg.id)
+            if reg.has_demonstrated_edge is not None:
+                row["has_demonstrated_edge"] = bool(reg.has_demonstrated_edge)
+    except Exception as exc:
+        logger.warning("model_list_registry_overlay_failed", error=str(exc))
+
     models = sorted(
         by_tag.values(),
         key=lambda m: (
+            0 if m.get("is_active") else 1,
             str(m.get("symbol") or ""),
             float(m.get("barrier_distance") or 0),
             str(m.get("direction") or ""),
@@ -268,19 +296,28 @@ async def list_trained_models() -> dict:
 
 
 @router.delete("/models/{version_tag}")
-async def delete_trained_model(version_tag: str) -> dict:
+async def delete_trained_model(
+    version_tag: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
     """
     Delete one trained model version (artefacts + all meta/latest pointers).
-    Works for history rows and the current latest_* model.
+    Deactivates the registry row first so the worker unloads any cached pack.
     """
     import glob
     import json
     from fastapi import HTTPException
     from app.config import settings
+    from app.ml.registry import deactivate_model_version
 
     tag = str(version_tag or "").strip()
     if not tag or "/" in tag or "\\" in tag or ".." in tag:
         raise HTTPException(status_code=400, detail="Invalid version_tag")
+
+    try:
+        await deactivate_model_version(db, tag)
+    except Exception as exc:
+        logger.warning("model_registry_deactivate_failed", version_tag=tag, error=str(exc))
 
     model_dir = settings.model_dir
     matches: list[tuple[str, dict]] = []
@@ -506,52 +543,152 @@ async def delete_ticks(body: TickDeleteBody, db: AsyncSession = Depends(get_db))
 
 @router.get("/data-info")
 async def data_info(db: AsyncSession = Depends(get_db)) -> dict:
-    """Check how many ticks are available in the database for training."""
+    """Check how many ticks are available for training (live DB + staged parquet)."""
+    from app.ml.history_manifest import count_parquet_ticks, parquet_epoch_span
+
     coverage = await tick_coverage_stats(db)
     storage = await _ticks_storage_bytes(db)
-    symbols_raw = coverage.get("symbols") or []
-    if not symbols_raw:
-        return {
-            "has_data": False,
-            "message": (
-                "No tick data collected yet. Confirm Setup so the live worker "
-                "starts saving ticks, then return here to train."
-            ),
-            "symbols": [],
-            **storage,
-        }
+    symbols_raw = list(coverage.get("symbols") or [])
 
     # Non-overlapping sample spacing is clamped to ≥ contract duration in trainer.
     duration = int(settings.contract_duration_seconds)
     interval = max(int(settings.train_sampling_interval_seconds), duration)
     min_labels = 100
-    # entry_epochs = arange(min+600, max-duration, interval)
     min_span_seconds = min_labels * interval + 600 + duration
+
+    def _normalize_gap_flags(raw: Any) -> dict:
+        """tick_coverage_stats returns an int gap count; parquet returns a dict."""
+        if isinstance(raw, dict):
+            return raw
+        try:
+            n = int(raw or 0)
+        except (TypeError, ValueError):
+            return {}
+        return {"gap_ticks": n, "has_large_gaps": n > 100}
+
+    # Merge staged parquet sources (often much longer than live Postgres).
+    # Use metadata span only — never load 6.5M rows for a status poll.
+    hist_sources: dict[str, dict] = {}
+    seen_symbols = {str(s["symbol"]) for s in symbols_raw}
+    for sym in list(seen_symbols) or ["R_100"]:
+        pq_n = count_parquet_ticks(sym)
+        if pq_n <= 0:
+            continue
+        info: dict[str, Any] = {
+            "symbol": sym,
+            "parquet_ticks": pq_n,
+            "tick_count": pq_n,
+            "source": "parquet",
+            "ready_to_train": pq_n >= 1000,
+        }
+        try:
+            span = parquet_epoch_span(sym)
+            if span:
+                span_s = int(span["span_seconds"])
+                e0 = int(span["oldest_epoch"])
+                e1 = int(span["newest_epoch"])
+                est_labels = max(0, int((span_s - 600 - duration) // interval)) if span_s > 0 else 0
+                info.update(
+                    {
+                        "tick_count": int(span["tick_count"]),
+                        "oldest": datetime.fromtimestamp(e0, tz=timezone.utc).isoformat(),
+                        "newest": datetime.fromtimestamp(e1, tz=timezone.utc).isoformat(),
+                        "span_hours": round(span_s / 3600.0, 2),
+                        "span_days": round(span_s / 86400.0, 2),
+                        "est_labels": est_labels,
+                        "usable_windows": est_labels,
+                        "gap_flags": {},
+                        "ready_to_train": est_labels >= min_labels and int(span["tick_count"]) >= 1000,
+                    }
+                )
+        except Exception as exc:
+            logger.warning("data_info_parquet_scan_failed", symbol=sym, error=str(exc))
+        hist_sources[sym] = info
+
+    if not symbols_raw and not hist_sources:
+        return {
+            "has_data": False,
+            "message": (
+                "No tick data collected yet. Confirm Setup so the live worker "
+                "starts saving ticks, or Stage SQLite / Download history, then train."
+            ),
+            "symbols": [],
+            "history_sources": [],
+            **storage,
+        }
 
     symbols = []
     for s in symbols_raw:
         span_s = float(s.get("span_days") or 0) * 86400.0
         est_labels = max(0, int((span_s - 600 - duration) // interval)) if span_s > 0 else 0
-        ready = est_labels >= min_labels and int(s["tick_count"]) >= 1000
+        gap_flags = _normalize_gap_flags(s.get("gap_flags"))
+        # Only block readiness on extreme live-table gap counts (not parquet).
+        gap_blocked = bool(gap_flags.get("has_large_gaps"))
+        usable = 0 if gap_blocked else est_labels
+        ready = (not gap_blocked) and usable >= min_labels and int(s["tick_count"]) >= 1000
+        hist = hist_sources.get(str(s["symbol"]))
+        tick_count = int(s["tick_count"])
+        oldest = s.get("oldest")
+        newest = s.get("newest")
+        span_hours = round(span_s / 3600.0, 2)
+        span_days = s.get("span_days")
+        # Prefer longer staged history for readiness + UI counters.
+        if hist and int(hist.get("tick_count") or hist.get("parquet_ticks") or 0) > tick_count:
+            ready = bool(hist.get("ready_to_train"))
+            usable = int(hist.get("usable_windows") or hist.get("est_labels") or 0)
+            est_labels = int(hist.get("est_labels") or est_labels)
+            tick_count = int(hist.get("tick_count") or hist.get("parquet_ticks") or tick_count)
+            oldest = hist.get("oldest") or oldest
+            newest = hist.get("newest") or newest
+            span_hours = float(hist.get("span_hours") or span_hours)
+            span_days = hist.get("span_days") if hist.get("span_days") is not None else span_days
+            gap_flags = _normalize_gap_flags(hist.get("gap_flags"))
         symbols.append(
             {
                 "symbol": s["symbol"],
-                "tick_count": s["tick_count"],
-                "oldest": s.get("oldest"),
-                "newest": s.get("newest"),
+                "tick_count": tick_count,
+                "oldest": oldest,
+                "newest": newest,
                 "ready_to_train": ready,
                 "est_labels": est_labels,
+                "usable_windows": usable,
                 "min_labels_required": min_labels,
                 "est_ticks_per_day": s.get("est_ticks_per_day"),
-                "span_days": s.get("span_days"),
-                "span_hours": round(span_s / 3600.0, 2),
+                "span_days": span_days,
+                "span_hours": span_hours,
                 "min_span_hours": round(min_span_seconds / 3600.0, 1),
-                "gap_flags": s.get("gap_flags"),
+                "gap_flags": gap_flags,
+                "staged_parquet_ticks": (hist or {}).get("parquet_ticks")
+                or (hist or {}).get("tick_count"),
+                "history_source": "parquet" if hist and tick_count > int(s["tick_count"]) else "database",
             }
         )
-    total_ticks = sum(s["tick_count"] for s in symbols)
+
+    # Symbols only present in parquet
+    for sym, hist in hist_sources.items():
+        if any(s["symbol"] == sym for s in symbols):
+            continue
+        symbols.append(
+            {
+                "symbol": sym,
+                "tick_count": int(hist.get("tick_count") or hist.get("parquet_ticks") or 0),
+                "oldest": hist.get("oldest"),
+                "newest": hist.get("newest"),
+                "ready_to_train": bool(hist.get("ready_to_train")),
+                "est_labels": int(hist.get("est_labels") or 0),
+                "usable_windows": int(hist.get("usable_windows") or hist.get("est_labels") or 0),
+                "min_labels_required": min_labels,
+                "span_days": hist.get("span_days"),
+                "span_hours": hist.get("span_hours"),
+                "min_span_hours": round(min_span_seconds / 3600.0, 1),
+                "gap_flags": hist.get("gap_flags"),
+                "staged_parquet_ticks": hist.get("parquet_ticks") or hist.get("tick_count"),
+                "source": "parquet",
+            }
+        )
+
+    total_ticks = sum(int(s.get("tick_count") or 0) for s in symbols)
     max_span_h = max((s.get("span_hours") or 0) for s in symbols) if symbols else 0.0
-    # Suggest stricter gates as coverage grows (UI can still override).
     if max_span_h >= 72:
         rec_cal, rec_edge, rec_label = 50, 30, "3+ days — stricter (recommended)"
     elif max_span_h >= 48:
@@ -572,6 +709,7 @@ async def data_info(db: AsyncSession = Depends(get_db)) -> dict:
         "train_sampling_interval_seconds": interval,
         "ready": any(s["ready_to_train"] for s in symbols),
         "symbols": symbols,
+        "history_sources": list(hist_sources.values()),
         "train_max_ticks": settings.train_max_ticks,
         "train_defaults": {
             "min_calibration_samples": settings.train_min_calibration_samples,
@@ -586,8 +724,9 @@ async def data_info(db: AsyncSession = Depends(get_db)) -> dict:
         },
         "env_is_default_only": True,
         "note": (
-            f"Training needs ≥{min_labels} non-overlapping labels "
+            f"Training needs ≥{min_labels} non-overlapping usable windows "
             f"(one every {interval}s) ≈{min_span_seconds/3600.0:.1f}h continuous coverage. "
+            "Staged parquet/SQLite history is preferred when longer than the live table. "
             "After deploy, change calibration/edge only in this UI — not in .env."
         ),
     }
@@ -694,6 +833,11 @@ async def _run_training_background(
                         "quote_epoch": q.quote_epoch or q.spot_time,
                         "spot_time": q.spot_time,
                         "barrier_direction": q.barrier_direction,
+                        "contract_type": q.contract_type,
+                        "barrier_input": q.barrier_input,
+                        "duration_value": q.duration_value,
+                        "duration_unit": q.duration_unit,
+                        "currency": q.currency,
                         "ask_price": float(q.ask_price),
                         "payout": float(q.payout),
                         "breakeven_prob": float(q.breakeven_prob) if q.breakeven_prob is not None else None,
@@ -725,6 +869,14 @@ async def _run_training_background(
             symbol=symbol,
         )
 
+        def _on_train_progress(msg: str) -> None:
+            global _training_state
+            _training_state = {
+                **_training_state,
+                "status": "running",
+                "progress": str(msg),
+            }
+
         _training_state["progress"] = (
             "Training with non-overlapping samples + walk-forward metadata "
             "(XGBoost/CatBoost/LSTM/ensembles)…"
@@ -738,6 +890,7 @@ async def _run_training_background(
                 quotes_df=quotes_df,
                 min_calibration_samples=min_calibration_samples,
                 min_edge_selected=min_edge_selected,
+                on_progress=_on_train_progress,
             ),
         )
 
@@ -783,7 +936,22 @@ async def _run_training_background(
                     "barrier_unit": results.get("barrier_unit"),
                     "contract_semantics": results.get("contract_semantics"),
                     "validation_selection": results.get("validation_selection"),
+                    "selection_note": results.get("selection_note"),
+                    "candidate_probability_metrics": {
+                        name: {
+                            key: value
+                            for key, value in metrics.items()
+                            if key in (
+                                "raw_brier", "calibrated_brier", "raw_auc",
+                                "calibrated_auc", "calibration_method", "n_samples",
+                            )
+                        }
+                        for name, metrics in (results.get("candidate_probability_metrics") or {}).items()
+                        if isinstance(metrics, dict)
+                    },
                     "baseline": _slim(results.get("baseline")),
+                    "logistic_regression": _slim(results.get("logistic_regression")),
+                    "volatility_distance": _slim(results.get("volatility_distance")),
                     "xgboost": _slim(results.get("xgboost")),
                     "catboost": _slim(results.get("catboost")),
                     "lstm": _slim(results.get("lstm")),
@@ -1070,6 +1238,117 @@ async def download_options(symbol: str = "R_100") -> dict:
             "ALL = download everything the API still has."
         ),
         "presets": presets,
+    }
+
+
+_sqlite_stage_state: dict = {
+    "status": "idle",
+    "progress": "",
+    "error": None,
+    "result": None,
+}
+
+
+@router.get("/stage-sqlite-status")
+async def stage_sqlite_status() -> dict:
+    return dict(_sqlite_stage_state)
+
+
+@router.post("/stage-sqlite")
+async def stage_sqlite(
+    symbol: str = Query(default="R_100", min_length=1, max_length=32),
+    path: str | None = Query(default=None),
+) -> dict:
+    """Copy market.sqlite ticks into parquet in the background (does not block the chart)."""
+    from app.ml.history_manifest import count_parquet_ticks
+    from app.ml.sqlite_ticks import (
+        count_sqlite_ticks,
+        default_sqlite_path,
+        export_sqlite_to_parquet,
+        load_sqlite_ticks,
+    )
+
+    if _sqlite_stage_state["status"] == "running":
+        raise HTTPException(status_code=409, detail="SQLite staging already running.")
+
+    source = Path(path) if path else default_sqlite_path()
+    if source is None or not Path(source).is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "market.sqlite not found. Put it at data/market.sqlite "
+                "(or candel/market.sqlite with the candel volume mounted)."
+            ),
+        )
+
+    sqlite_n = count_sqlite_ticks(source, symbol=symbol)
+    parquet_n = count_parquet_ticks(symbol)
+    if parquet_n >= sqlite_n and sqlite_n > 0:
+        return {
+            "ok": True,
+            "already_staged": True,
+            "source": str(source),
+            "symbol": symbol,
+            "tick_count": int(parquet_n),
+            "message": (
+                f"Parquet already has {parquet_n:,} ticks "
+                f"(≥ SQLite {sqlite_n:,}). No reload needed — press Train."
+            ),
+        }
+
+    _sqlite_stage_state.update(
+        {
+            "status": "running",
+            "progress": f"Loading {sqlite_n:,} ticks from SQLite…",
+            "error": None,
+            "result": None,
+        }
+    )
+
+    async def _run() -> None:
+        try:
+            frame = await asyncio.to_thread(load_sqlite_ticks, source, symbol)
+            dest = await asyncio.to_thread(
+                export_sqlite_to_parquet,
+                source,
+                settings.parquet_data_dir,
+                symbol,
+                frame,
+            )
+            span_hours = (int(frame["epoch"].iloc[-1]) - int(frame["epoch"].iloc[0])) / 3600.0
+            result = {
+                "ok": True,
+                "source": str(source),
+                "parquet": str(dest),
+                "symbol": symbol,
+                "tick_count": int(len(frame)),
+                "start_utc": frame["tick_time"].iloc[0].isoformat(),
+                "end_utc": frame["tick_time"].iloc[-1].isoformat(),
+                "span_hours": round(span_hours, 2),
+                "message": (
+                    f"Staged {len(frame):,} ticks into parquet. "
+                    "Train will prefer this file when it is longer than the database."
+                ),
+            }
+            _sqlite_stage_state.update(
+                {"status": "done", "progress": result["message"], "result": result, "error": None}
+            )
+        except Exception as exc:
+            _sqlite_stage_state.update(
+                {"status": "error", "progress": "", "error": str(exc), "result": None}
+            )
+
+    asyncio.create_task(_run())
+    return {
+        "ok": True,
+        "started": True,
+        "symbol": symbol,
+        "source": str(source),
+        "sqlite_tick_count": sqlite_n,
+        "message": (
+            f"Staging {sqlite_n:,} ticks in the background. "
+            "Chart stays live — poll /train/stage-sqlite-status or wait, then Train."
+        ),
     }
 
 

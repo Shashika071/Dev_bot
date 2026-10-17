@@ -31,6 +31,7 @@ class ProbabilityCalibrator:
         self._true_labels: Optional[np.ndarray] = None
         self._calibrated_probs: Optional[np.ndarray] = None
         self._chosen_method: str = method
+        self._constant_probability: Optional[float] = None
 
     @property
     def is_fitted(self) -> bool:
@@ -43,8 +44,25 @@ class ProbabilityCalibrator:
         """
         raw = np.asarray(raw_probabilities, dtype=float).ravel()
         y = np.asarray(true_labels, dtype=float).ravel()
+        if len(raw) != len(y) or not np.isfinite(raw).all() or not np.isfinite(y).all():
+            raise ValueError("Calibration predictions and labels must be aligned and finite")
+        if not np.isin(y, [0, 1]).all():
+            raise ValueError("Calibration labels must be binary outcomes")
         if len(raw) < 11:
             raise ValueError(f"Need at least 11 calibration samples, got {len(raw)}")
+
+        self._constant_probability = None
+        if self.method == "frequency":
+            # This comparator has exactly the same recent label information as
+            # the calibrated candidates, without learning any feature ranking.
+            self._constant_probability = float(np.clip(y.mean(), 1e-6, 1 - 1e-6))
+            self._calibrator = None
+            self._chosen_method = "frequency"
+            self._raw_probs = raw
+            self._true_labels = y
+            self._calibrated_probs = np.full(len(raw), self._constant_probability)
+            self._is_fitted = True
+            return
 
         n_pos = int((y >= 0.5).sum())
         n_neg = int(len(y) - n_pos)
@@ -65,10 +83,16 @@ class ProbabilityCalibrator:
             )
             return
 
-        # Prefer Platt when cal set is small (isotonic overfits); isotonic when large.
+        # Prefer Platt when cal set is small (isotonic overfits).
+        # scikit-learn warns isotonic needs substantially more than ~1000 points.
         choose = self.method
         if choose == "auto":
-            choose = "isotonic" if len(raw) >= self.min_samples else "platt"
+            minority = int(min(n_pos, n_neg))
+            choose = (
+                "isotonic"
+                if len(raw) >= max(1000, int(self.min_samples)) and minority >= 50
+                else "platt"
+            )
         self._chosen_method = choose
 
         if choose == "isotonic":
@@ -102,6 +126,8 @@ class ProbabilityCalibrator:
         if not self._is_fitted:
             raise RuntimeError("Calibrator not fitted")
         raw = np.asarray(raw_probabilities, dtype=float).ravel()
+        if self._constant_probability is not None:
+            return np.full(len(raw), self._constant_probability, dtype=float)
         if self._calibrator is None:
             # Identity fallback (single-class calibration set)
             return np.clip(raw, 1e-6, 1 - 1e-6)
@@ -162,6 +188,7 @@ class ProbabilityCalibrator:
             "raw_probs": self._raw_probs,
             "true_labels": self._true_labels,
             "calibrated_probs": self._calibrated_probs,
+            "constant_probability": self._constant_probability,
             "is_fitted": True,
         }
         with open(path, "wb") as f:
@@ -174,6 +201,7 @@ class ProbabilityCalibrator:
 
         # Backward compatible: old files stored bare IsotonicRegression
         if isinstance(payload, IsotonicRegression):
+            self._constant_probability = None
             self._calibrator = payload
             self._is_fitted = True
             self._raw_probs = None
@@ -191,6 +219,9 @@ class ProbabilityCalibrator:
         self._raw_probs = payload.get("raw_probs")
         self._true_labels = payload.get("true_labels")
         self._calibrated_probs = payload.get("calibrated_probs")
+        self._constant_probability = payload.get("constant_probability")
+        if self.method == "frequency" and self._constant_probability is None:
+            raise RuntimeError("Frequency calibrator is missing its saved probability")
         self._is_fitted = True
 
 

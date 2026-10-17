@@ -16,8 +16,12 @@ def load_ticks(path: str | Path) -> pd.DataFrame:
         frame = pd.read_csv(source)
     elif suffix == ".parquet":
         frame = pd.read_parquet(source)
+    elif suffix in (".sqlite", ".db"):
+        from app.ml.sqlite_ticks import load_sqlite_ticks
+
+        return load_sqlite_ticks(source)
     else:
-        raise ValueError("Tick file must be .csv or .parquet")
+        raise ValueError("Tick file must be .csv, .parquet, or .sqlite")
     return frame
 
 

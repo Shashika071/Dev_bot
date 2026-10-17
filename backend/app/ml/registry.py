@@ -155,6 +155,41 @@ async def promote_model_version(
     logger.info("model_version_promoted", version_tag=version_tag, id=row.id)
     return row
 
+
+async def deactivate_model_version(
+    session: AsyncSession,
+    version_tag: str,
+) -> Optional[ModelVersion]:
+    """Deactivate a registry row before artifact deletion (no-op if missing)."""
+    existing = await session.execute(
+        select(ModelVersion).where(ModelVersion.version_tag == version_tag)
+    )
+    row = existing.scalar_one_or_none()
+    if row is None:
+        return None
+    was_active = bool(row.is_active)
+    row.is_active = False
+    await session.commit()
+    await session.refresh(row)
+    logger.info(
+        "model_version_deactivated",
+        version_tag=version_tag,
+        was_active=was_active,
+        id=row.id,
+    )
+    return row
+
+
+async def get_model_version_by_tag(
+    session: AsyncSession,
+    version_tag: str,
+) -> Optional[ModelVersion]:
+    existing = await session.execute(
+        select(ModelVersion).where(ModelVersion.version_tag == version_tag)
+    )
+    return existing.scalar_one_or_none()
+
+
 async def get_active_model_version(
     session: AsyncSession,
     *,
