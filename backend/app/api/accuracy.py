@@ -31,6 +31,11 @@ class AccuracyTradeBody(BaseModel):
     accuracy_auto_trade_enabled: bool = False
 
 
+class AccuracyCooldownBody(BaseModel):
+    # Optional / loose type — clamp in the handler so empty UI edits don't 422.
+    accuracy_cooldown_seconds: int | float | None = Field(5760)
+
+
 class AccuracyTrainBody(BaseModel):
     profile: str = Field("technical_v2", pattern="^(compact_v1|technical_v2)$")
     activate: bool = True
@@ -96,6 +101,32 @@ async def set_accuracy_auto_trade(body: AccuracyTradeBody):
             if saved.get("accuracy_auto_trade_enabled")
             else "Accuracy auto-trade off — signals only."
         ),
+        "status": service.status(),
+    }
+
+
+@router.put("/cooldown")
+async def set_accuracy_cooldown(body: AccuracyCooldownBody):
+    """Set Touch Accuracy market-rest cooldown between signals (min 600s)."""
+    if body.accuracy_cooldown_seconds is None:
+        raw = 5760
+    else:
+        try:
+            raw = int(float(body.accuracy_cooldown_seconds))
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=422,
+                detail="Cooldown must be a number of seconds (600–7200).",
+            ) from None
+    cool = max(600, min(7200, raw))
+    prefs = load_trade_prefs()
+    prefs["accuracy_cooldown_seconds"] = cool
+    saved = save_trade_prefs(prefs)
+    cool = int(saved.get("accuracy_cooldown_seconds", cool))
+    service.apply_cooldown(cool)
+    return {
+        "accuracy_cooldown_seconds": cool,
+        "message": f"Accuracy cooldown set to {cool}s ({cool / 60:.0f} min between signals).",
         "status": service.status(),
     }
 

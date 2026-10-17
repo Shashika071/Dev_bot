@@ -2762,6 +2762,7 @@ const DEFAULT_OPS: OpsPrefs = {
 type TradePrefs = {
   auto_trade_enabled: boolean;
   accuracy_auto_trade_enabled?: boolean;
+  server_execution_allowed?: boolean;
   trade_stake: number;
   trade_stake_use_full_balance: boolean;
   force_min_probability: number;
@@ -2785,6 +2786,7 @@ type TradeAccount = TradeAccountInfo;
 const DEFAULT_TRADE: TradePrefs = {
   auto_trade_enabled: false,
   accuracy_auto_trade_enabled: false,
+  server_execution_allowed: false,
   trade_stake: 1,
   trade_stake_use_full_balance: false,
   force_min_probability: 0.8,
@@ -2869,6 +2871,7 @@ function SetupView({ online }: { online: boolean }) {
         setTrade({
           auto_trade_enabled: !!r.auto_trade_enabled,
           accuracy_auto_trade_enabled: !!r.accuracy_auto_trade_enabled,
+          server_execution_allowed: !!r.server_execution_allowed,
           trade_stake: Number(r.trade_stake ?? 1),
           trade_stake_use_full_balance: !!r.trade_stake_use_full_balance,
           force_min_probability: Number(r.force_min_probability ?? 0.8),
@@ -2916,6 +2919,7 @@ function SetupView({ online }: { online: boolean }) {
         body: JSON.stringify({
           auto_trade_enabled: trade.auto_trade_enabled,
           accuracy_auto_trade_enabled: !!trade.accuracy_auto_trade_enabled,
+          server_execution_allowed: !!trade.server_execution_allowed,
           trade_stake: trade.trade_stake,
           trade_stake_use_full_balance: trade.trade_stake_use_full_balance,
           force_min_probability: trade.force_min_probability,
@@ -2936,6 +2940,7 @@ function SetupView({ online }: { online: boolean }) {
         ...prev,
         auto_trade_enabled: !!r.auto_trade_enabled,
         accuracy_auto_trade_enabled: !!r.accuracy_auto_trade_enabled,
+        server_execution_allowed: !!r.server_execution_allowed,
         trade_stake: Number(r.trade_stake ?? prev.trade_stake),
         trade_stake_use_full_balance: !!r.trade_stake_use_full_balance,
         force_min_probability: Number(r.force_min_probability ?? prev.force_min_probability),
@@ -3328,10 +3333,18 @@ function SetupView({ online }: { online: boolean }) {
         <label className="text-sm flex items-center gap-2 mb-3" style={{ cursor: 'pointer' }}>
           <input
             type="checkbox"
+            checked={!!trade.server_execution_allowed}
+            onChange={e => setTrade(prev => ({ ...prev, server_execution_allowed: e.target.checked }))}
+          />
+          Allow server execution (replaces EXECUTION_ALLOWED in .env)
+        </label>
+        <label className="text-sm flex items-center gap-2 mb-3" style={{ cursor: 'pointer' }}>
+          <input
+            type="checkbox"
             checked={trade.auto_trade_enabled}
             onChange={e => setTrade(prev => ({ ...prev, auto_trade_enabled: e.target.checked }))}
           />
-          Enable auto-trade (still blocked unless the server gate and confirmation are both on)
+          Enable auto-trade (still needs confirmation + daily loss limit + token)
         </label>
         <label className="text-sm flex items-center gap-2 mb-3" style={{ cursor: 'pointer' }}>
           <input

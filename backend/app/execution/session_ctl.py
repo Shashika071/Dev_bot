@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from app.config import settings
+from app.execution.gates import server_execution_allowed
 
 
 async def start_if_allowed() -> bool:
-    if not settings.execution_allowed:
+    if not server_execution_allowed():
         return False
     from app.deriv.trade_session import trade_account_session
     from app.trade_prefs import token_status
@@ -18,7 +18,7 @@ async def start_if_allowed() -> bool:
 
 
 async def restart_if_allowed() -> bool:
-    if not settings.execution_allowed:
+    if not server_execution_allowed():
         return False
     from app.deriv.trade_session import trade_account_session
 

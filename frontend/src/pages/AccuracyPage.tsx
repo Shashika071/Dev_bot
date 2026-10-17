@@ -12,7 +12,8 @@ type AccuracyStatus = {
   feed_fresh: boolean; feed_age_seconds: number | null;
   history_loading?: boolean;
   feature_profile?: string; feature_groups?: string[];
-  signals_today: number; last_tick: { epoch: number; price: number } | null;
+  signals_today: number; cooldown_seconds?: number;
+  last_tick: { epoch: number; price: number } | null;
   auto_trade?: {
     accuracy_enabled?: boolean;
     setup_enabled?: boolean;
@@ -52,6 +53,10 @@ export function AccuracyPage() {
   const [tradeMsg, setTradeMsg] = useState('');
   const [trainBusy, setTrainBusy] = useState(false);
   const [trainMsg, setTrainMsg] = useState('');
+  const [cooldown, setCooldown] = useState(5760);
+  const [cooldownDirty, setCooldownDirty] = useState(false);
+  const [cooldownBusy, setCooldownBusy] = useState(false);
+  const [cooldownMsg, setCooldownMsg] = useState('');
   useEffect(() => {
     let alive = true;
     const refresh = async () => {
@@ -59,13 +64,19 @@ export function AccuracyPage() {
         const response = await fetch(`${API}/accuracy/status`);
         if (!response.ok) throw new Error('Accuracy mode is unavailable; restart the updated backend.');
         const data: AccuracyStatus = await response.json();
-        if (alive) { setStatus(data); setError(''); }
+        if (alive) {
+          setStatus(data);
+          setError('');
+          if (typeof data.cooldown_seconds === 'number' && !cooldownDirty && !cooldownBusy) {
+            setCooldown(data.cooldown_seconds);
+          }
+        }
       } catch (e) { if (alive) setError(e instanceof Error ? e.message : String(e)); }
     };
     void refresh();
     const timer = setInterval(refresh, 3000);
     return () => { alive = false; clearInterval(timer); };
-  }, []);
+  }, [cooldownDirty, cooldownBusy]);
   const control = async (action: 'start' | 'stop') => {
     setBusy(true); setError('');
     try {
@@ -109,6 +120,37 @@ export function AccuracyPage() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setTradeBusy(false);
+    }
+  };
+  const saveCooldown = async () => {
+    setCooldownBusy(true); setCooldownMsg(''); setError('');
+    const seconds = Math.max(600, Math.min(7200, Math.round(Number(cooldown) || 5760)));
+    setCooldown(seconds);
+    try {
+      const response = await fetch(`${API}/accuracy/cooldown`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accuracy_cooldown_seconds: seconds }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        const detail = data.detail;
+        const msg = typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((d: { msg?: string }) => d.msg).filter(Boolean).join('; ')
+            : 'Could not update cooldown';
+        throw new Error(msg);
+      }
+      const saved = Number(data.accuracy_cooldown_seconds ?? seconds);
+      setCooldown(saved);
+      setCooldownDirty(false);
+      setCooldownMsg(data.message || `Cooldown set to ${saved}s`);
+      if (data.status) setStatus(data.status);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCooldownBusy(false);
     }
   };
   const report = status?.report;
@@ -172,14 +214,41 @@ export function AccuracyPage() {
         feature profile below shows the inputs supplied to that model.
       </p>
       <p className="text-sm text-dim" style={{ marginBottom: '1rem' }}>
-        Target: 10–15 signals per day, capped at 15, with at least 96 minutes between signals.
-        Entries below the trained confidence threshold are skipped. Signals and simulated outcomes are recorded here.
+        Target: 10–15 signals per day, capped at 15, with a configurable market-rest cooldown between signals
+        (default 96 minutes / 5760s). Entries below the trained confidence threshold are skipped.
+        Signals and simulated outcomes are recorded here.
       </p>
       <div style={{ display: 'flex', gap: '.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
         <button className="btn btn-primary" disabled={busy || training || !status?.ready || status.running} onClick={() => void control('start')}>Start accuracy signals</button>
         <button className="btn btn-ghost" disabled={busy || !status?.running} onClick={() => void control('stop')}>Stop</button>
         <span>{status?.signals_today ?? 0} / 15 today · Asia/Colombo</span>
       </div>
+      <div style={{ display: 'flex', gap: '.75rem', alignItems: 'flex-end', flexWrap: 'wrap', marginTop: '1rem' }}>
+        <div>
+          <label className="form-label">Cooldown (seconds)</label>
+          <input
+            type="number"
+            className="form-input"
+            min={600}
+            max={7200}
+            step={60}
+            value={cooldown}
+            disabled={cooldownBusy}
+            onChange={e => {
+              setCooldown(Number(e.target.value));
+              setCooldownDirty(true);
+            }}
+            style={{ width: 140 }}
+          />
+          <div className="form-hint">
+            Min 600s (10 min). Current ≈ {(cooldown / 60).toFixed(0)} min between signals.
+          </div>
+        </div>
+        <button className="btn btn-ghost" disabled={cooldownBusy} onClick={() => void saveCooldown()}>
+          {cooldownBusy ? 'Saving…' : 'Save cooldown'}
+        </button>
+      </div>
+      {cooldownMsg && <p className="text-sm text-dim" style={{ marginTop: '.5rem' }}>{cooldownMsg}</p>}
       <p className="text-sm text-dim" style={{ marginTop: '.75rem' }}>{status?.reason || 'Loading profile…'}</p>
       {(error || status?.error) && <div className="alert alert-error" style={{ marginTop: '.75rem' }}>{error || status?.error}</div>}
       {status && !status.ready && !training && <p style={{ marginTop: '1rem' }}>No accuracy profile yet — use <strong>Train accuracy model</strong> above (needs staged parquet).</p>}
@@ -215,7 +284,7 @@ export function AccuracyPage() {
       {tradeMsg && <p className="text-sm text-dim" style={{ marginTop: '.75rem' }}>{tradeMsg}</p>}
       {accuracyTradeOn && !tradeAllowed && (
         <div className="alert alert-warning" style={{ marginTop: '.75rem' }}>
-          Turn on Setup → Auto-trade (enable + confirm + daily loss limit + token). Server must also have EXECUTION_ALLOWED=true.
+          Turn on Setup → Auto-trade: Allow server execution + enable + confirm + daily loss limit + token.
         </div>
       )}
     </div>

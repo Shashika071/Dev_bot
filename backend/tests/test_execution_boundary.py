@@ -39,10 +39,10 @@ def test_analysis_modules_do_not_import_order_code():
 
 
 def test_execution_requires_server_gate_and_user_confirmation(monkeypatch, tmp_path):
-    monkeypatch.setattr("app.config.settings.execution_allowed", False)
     monkeypatch.setattr("app.config.settings.model_dir", str(tmp_path))
     monkeypatch.setattr("app.execution.risk.settings.model_dir", str(tmp_path))
     blocked = permission_status({
+        "server_execution_allowed": False,
         "auto_trade_enabled": True,
         "execution_confirmed": True,
         "daily_loss_limit": 25,
@@ -52,9 +52,9 @@ def test_execution_requires_server_gate_and_user_confirmation(monkeypatch, tmp_p
     assert blocked["allowed"] is False
     assert blocked["reason"] == "server_execution_disabled"
 
-    monkeypatch.setattr("app.config.settings.execution_allowed", True)
     monkeypatch.setattr("app.execution.gates.get_trade_token", lambda: "token-value")
     missing_confirm = permission_status({
+        "server_execution_allowed": True,
         "auto_trade_enabled": True,
         "execution_confirmed": False,
         "daily_loss_limit": 25,
@@ -64,6 +64,7 @@ def test_execution_requires_server_gate_and_user_confirmation(monkeypatch, tmp_p
     assert missing_confirm["reason"] == "execution_not_confirmed"
 
     missing_limit = permission_status({
+        "server_execution_allowed": True,
         "auto_trade_enabled": True,
         "execution_confirmed": True,
         "daily_loss_limit": 0,
@@ -73,6 +74,7 @@ def test_execution_requires_server_gate_and_user_confirmation(monkeypatch, tmp_p
     assert missing_limit["reason"] == "daily_loss_limit_required"
 
     allowed = permission_status({
+        "server_execution_allowed": True,
         "auto_trade_enabled": True,
         "execution_confirmed": True,
         "daily_loss_limit": 25,

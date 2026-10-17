@@ -127,6 +127,7 @@ async def put_ops_prefs(body: OpsPrefsBody) -> dict:
 class TradePrefsBody(BaseModel):
     auto_trade_enabled: bool = False
     accuracy_auto_trade_enabled: bool = False
+    server_execution_allowed: bool = False
     trade_stake: float = Field(1.0, ge=0.35, le=10000.0)
     trade_stake_use_full_balance: bool = False
     force_min_probability: float = Field(0.80, ge=0.50, le=0.99)
@@ -160,6 +161,7 @@ async def get_trade_prefs() -> dict:
         "guide": {
             "auto_trade_enabled": "When on, Analyze / Force / Cross may place a buy after a signal is created.",
             "accuracy_auto_trade_enabled": "When on (and auto-trade + confirmation are on), Touch Accuracy signals may also place a buy.",
+            "server_execution_allowed": "Server execution gate (same as EXECUTION_ALLOWED). Must be on before any order can place.",
             "trade_stake": "Fixed stake when full-balance mode is off.",
             "trade_stake_use_full_balance": "Each trade stakes ~full live balance (25→27→29 as balance changes). High risk.",
             "force_min_probability": "Force (model + candles) mode min calibrated probability (e.g. 0.8 = 80%).",
@@ -181,7 +183,8 @@ async def get_trade_prefs() -> dict:
 @router.put("/trade-prefs")
 async def put_trade_prefs(body: TradePrefsBody) -> dict:
     before = load_trade_prefs()
-    saved = save_trade_prefs(body.model_dump())
+    # Merge so Accuracy-only keys (e.g. cooldown) are not reset by Setup saves.
+    saved = save_trade_prefs({**before, **body.model_dump()})
     # Account prefer / id change → drop cache so next load can hit Deriv once
     account_changed = (
         before.get("trade_account_prefer") != saved.get("trade_account_prefer")
@@ -265,7 +268,9 @@ async def get_trade_account(refresh: bool = False, force: bool = False) -> dict:
     live = trade_account_session.status()
     from app.config import settings
 
-    if settings.execution_allowed and not live.get("want_running"):
+    from app.execution.gates import server_execution_allowed
+
+    if server_execution_allowed() and not live.get("want_running"):
         try:
             await trade_account_session.start()
             live = trade_account_session.status()
@@ -346,7 +351,9 @@ async def put_trade_token(body: TradeTokenBody) -> dict:
     clear_account_cache()
     started = await restart_if_allowed()
     account: dict = {"ok": False, "error": "Live session starting…"}
-    if started and settings.execution_allowed:
+    from app.execution.gates import server_execution_allowed as _server_exec_ok
+
+    if started and _server_exec_ok():
         for _ in range(20):
             await asyncio.sleep(0.5)
             snap = trade_account_session.snapshot()

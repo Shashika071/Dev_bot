@@ -19,6 +19,16 @@ HISTORY_TIMEOUT_SECONDS = 120.0
 HISTORY_PAGE_TIMEOUT_SECONDS = 15.0
 MAX_HISTORY_RECOVERY_ATTEMPTS = 3
 HISTORY_RECOVERY_BACKOFF_SECONDS = 5.0
+DEFAULT_COOLDOWN_SECONDS = 5760
+
+
+def _accuracy_cooldown_seconds() -> int:
+    try:
+        from app.trade_prefs import load_trade_prefs
+
+        return int(load_trade_prefs().get("accuracy_cooldown_seconds", DEFAULT_COOLDOWN_SECONDS))
+    except Exception:
+        return DEFAULT_COOLDOWN_SECONDS
 
 
 class AccuracyService:
@@ -78,12 +88,18 @@ class AccuracyService:
                     report=json.loads((self.output/run/"report.json").read_text(encoding="utf-8"))
             except (FileNotFoundError,KeyError,ValueError):
                 pass
+        cool = _accuracy_cooldown_seconds()
         if report is not None and self.policy is None:
-            self.policy=SignalPolicy(min_probability=report["selection"]["threshold"])
+            self.policy=SignalPolicy(
+                min_probability=report["selection"]["threshold"],
+                cooldown_seconds=cool,
+            )
             try:
                 self._restore()
             except (ValueError,KeyError) as exc:
                 self.error=f"Signal history needs repair: {exc}"
+        elif self.policy is not None and int(self.policy.cooldown_seconds) != cool:
+            self.policy.cooldown_seconds = cool
         today=(int(time.time())+COLOMBO_OFFSET)//86400
         feed_age=time.time()-self.last_tick["epoch"] if self.last_tick else None
         groups=(report or {}).get("feature_groups") or []
@@ -111,19 +127,28 @@ class AccuracyService:
                 "reason":self.reason,"error":self.error,"last_tick":self.last_tick,
                 "feed_age_seconds":feed_age,"feed_fresh":feed_age is not None and abs(feed_age)<=5,
                 "signals_today":self.policy.counts.get(today,0) if self.policy else 0,
-                "max_per_day":15,"cooldown_seconds":5760,"timezone":"Asia/Colombo",
+                "max_per_day":15,"cooldown_seconds":cool,"timezone":"Asia/Colombo",
                 "feature_profile":(report or {}).get("feature_profile","compact_v1"),
                 "feature_groups":groups,"history_loading":self.loading_history,
                 "history_seconds":self.history_seconds,"history_ticks":len(self.ticks),
                 "report":report,"signals":list(reversed(self.recent)),"mode":"accuracy_signals",
                 "auto_trade":auto_trade}
 
+    def apply_cooldown(self, seconds: int) -> None:
+        """Apply UI cooldown to the live policy without restarting the watcher."""
+        cool = max(600, min(7200, int(seconds)))
+        if self.policy is not None:
+            self.policy.cooldown_seconds = cool
+
     async def start(self):
         async with self.lock:
             if self.task and not self.task.done():
                 return self.status()
             self.bundle=load_artifact(self.output)
-            self.policy=SignalPolicy(min_probability=self.bundle["threshold"])
+            self.policy=SignalPolicy(
+                min_probability=self.bundle["threshold"],
+                cooldown_seconds=_accuracy_cooldown_seconds(),
+            )
             self._restore()
             self.history_seconds=int(getattr(self.bundle["predictor"],"history_seconds",900))
             if not 900 <= self.history_seconds <= 86400:
