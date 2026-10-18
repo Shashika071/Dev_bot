@@ -36,6 +36,10 @@ class AccuracyCooldownBody(BaseModel):
     accuracy_cooldown_seconds: int | float | None = Field(5760)
 
 
+class AccuracyMaxPerDayBody(BaseModel):
+    accuracy_max_per_day: int | float | None = Field(15)
+
+
 class AccuracyTrainBody(BaseModel):
     profile: str = Field("technical_v2", pattern="^(compact_v1|technical_v2)$")
     activate: bool = True
@@ -140,6 +144,32 @@ async def set_accuracy_cooldown(body: AccuracyCooldownBody):
     return {
         "accuracy_cooldown_seconds": cool,
         "message": f"Accuracy cooldown set to {cool}s ({cool / 60:.0f} min between signals).",
+        "status": service.status(),
+    }
+
+
+@router.put("/max-per-day")
+async def set_accuracy_max_per_day(body: AccuracyMaxPerDayBody):
+    """Set Touch Accuracy daily signal cap (1–15)."""
+    if body.accuracy_max_per_day is None:
+        raw = 15
+    else:
+        try:
+            raw = int(float(body.accuracy_max_per_day))
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=422,
+                detail="Daily cap must be a number from 1 to 15.",
+            ) from None
+    cap = max(1, min(15, raw))
+    prefs = load_trade_prefs()
+    prefs["accuracy_max_per_day"] = cap
+    saved = save_trade_prefs(prefs)
+    cap = int(saved.get("accuracy_max_per_day", cap))
+    service.apply_max_per_day(cap)
+    return {
+        "accuracy_max_per_day": cap,
+        "message": f"Accuracy daily cap set to {cap} signals/day.",
         "status": service.status(),
     }
 

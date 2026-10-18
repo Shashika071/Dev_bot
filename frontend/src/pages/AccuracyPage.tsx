@@ -12,7 +12,7 @@ type AccuracyStatus = {
   feed_fresh: boolean; feed_age_seconds: number | null;
   history_loading?: boolean;
   feature_profile?: string; feature_groups?: string[];
-  signals_today: number; cooldown_seconds?: number;
+  signals_today: number; max_per_day?: number; cooldown_seconds?: number;
   last_tick: { epoch: number; price: number } | null;
   auto_trade?: {
     accuracy_enabled?: boolean;
@@ -57,6 +57,10 @@ export function AccuracyPage() {
   const [cooldownDirty, setCooldownDirty] = useState(false);
   const [cooldownBusy, setCooldownBusy] = useState(false);
   const [cooldownMsg, setCooldownMsg] = useState('');
+  const [maxPerDay, setMaxPerDay] = useState(15);
+  const [maxPerDayDirty, setMaxPerDayDirty] = useState(false);
+  const [maxPerDayBusy, setMaxPerDayBusy] = useState(false);
+  const [maxPerDayMsg, setMaxPerDayMsg] = useState('');
   const [resetBusy, setResetBusy] = useState(false);
   const [resetMsg, setResetMsg] = useState('');
   useEffect(() => {
@@ -72,13 +76,16 @@ export function AccuracyPage() {
           if (typeof data.cooldown_seconds === 'number' && !cooldownDirty && !cooldownBusy) {
             setCooldown(data.cooldown_seconds);
           }
+          if (typeof data.max_per_day === 'number' && !maxPerDayDirty && !maxPerDayBusy) {
+            setMaxPerDay(data.max_per_day);
+          }
         }
       } catch (e) { if (alive) setError(e instanceof Error ? e.message : String(e)); }
     };
     void refresh();
     const timer = setInterval(refresh, 3000);
     return () => { alive = false; clearInterval(timer); };
-  }, [cooldownDirty, cooldownBusy]);
+  }, [cooldownDirty, cooldownBusy, maxPerDayDirty, maxPerDayBusy]);
   const control = async (action: 'start' | 'stop') => {
     setBusy(true); setError('');
     try {
@@ -173,6 +180,37 @@ export function AccuracyPage() {
       setCooldownBusy(false);
     }
   };
+  const saveMaxPerDay = async () => {
+    setMaxPerDayBusy(true); setMaxPerDayMsg(''); setError('');
+    const cap = Math.max(1, Math.min(15, Math.round(Number(maxPerDay) || 15)));
+    setMaxPerDay(cap);
+    try {
+      const response = await fetch(`${API}/accuracy/max-per-day`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accuracy_max_per_day: cap }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        const detail = data.detail;
+        const msg = typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((d: { msg?: string }) => d.msg).filter(Boolean).join('; ')
+            : 'Could not update daily cap';
+        throw new Error(msg);
+      }
+      const saved = Number(data.accuracy_max_per_day ?? cap);
+      setMaxPerDay(saved);
+      setMaxPerDayDirty(false);
+      setMaxPerDayMsg(data.message || `Daily cap set to ${saved}`);
+      if (data.status) setStatus(data.status);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setMaxPerDayBusy(false);
+    }
+  };
   const report = status?.report;
   const test = report?.test.policy;
   const featureGroups = Object.entries(report?.feature_groups || {});
@@ -241,9 +279,30 @@ export function AccuracyPage() {
       <div style={{ display: 'flex', gap: '.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
         <button className="btn btn-primary" disabled={busy || training || !status?.ready || status.running} onClick={() => void control('start')}>Start accuracy signals</button>
         <button className="btn btn-ghost" disabled={busy || !status?.running} onClick={() => void control('stop')}>Stop</button>
-        <span>{status?.signals_today ?? 0} / 15 today · Asia/Colombo</span>
+        <span>{status?.signals_today ?? 0} / {status?.max_per_day ?? maxPerDay} today · Asia/Colombo</span>
       </div>
       <div style={{ display: 'flex', gap: '.75rem', alignItems: 'flex-end', flexWrap: 'wrap', marginTop: '1rem' }}>
+        <div>
+          <label className="form-label">Daily cap (signals)</label>
+          <input
+            type="number"
+            className="form-input"
+            min={1}
+            max={15}
+            step={1}
+            value={maxPerDay}
+            disabled={maxPerDayBusy}
+            onChange={e => {
+              setMaxPerDay(Number(e.target.value));
+              setMaxPerDayDirty(true);
+            }}
+            style={{ width: 140 }}
+          />
+          <div className="form-hint">Max signals per Colombo day (1–15).</div>
+        </div>
+        <button className="btn btn-ghost" disabled={maxPerDayBusy} onClick={() => void saveMaxPerDay()}>
+          {maxPerDayBusy ? 'Saving…' : 'Save daily cap'}
+        </button>
         <div>
           <label className="form-label">Cooldown (seconds)</label>
           <input
@@ -268,7 +327,11 @@ export function AccuracyPage() {
           {cooldownBusy ? 'Saving…' : 'Save cooldown'}
         </button>
       </div>
-      {cooldownMsg && <p className="text-sm text-dim" style={{ marginTop: '.5rem' }}>{cooldownMsg}</p>}
+      {(maxPerDayMsg || cooldownMsg) && (
+        <p className="text-sm text-dim" style={{ marginTop: '.5rem' }}>
+          {[maxPerDayMsg, cooldownMsg].filter(Boolean).join(' · ')}
+        </p>
+      )}
       <p className="text-sm text-dim" style={{ marginTop: '.75rem' }}>{status?.reason || 'Loading profile…'}</p>
       {(error || status?.error) && <div className="alert alert-error" style={{ marginTop: '.75rem' }}>{error || status?.error}</div>}
       {status && !status.ready && !training && <p style={{ marginTop: '1rem' }}>No accuracy profile yet — use <strong>Train accuracy model</strong> above (needs staged parquet).</p>}

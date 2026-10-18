@@ -55,6 +55,8 @@ def _defaults() -> dict[str, Any]:
         "accuracy_auto_trade_enabled": False,
         # Touch Accuracy signal spacing (default 5760s = 96 minutes).
         "accuracy_cooldown_seconds": 5760,
+        # Touch Accuracy daily signal cap (default 15).
+        "accuracy_max_per_day": 15,
         # UI override for the old EXECUTION_ALLOWED server gate (None = use .env).
         "server_execution_allowed": False,
         "trade_stake": 1.0,
@@ -92,6 +94,11 @@ def _clamp(prefs: dict[str, Any]) -> dict[str, Any]:
     out["accuracy_cooldown_seconds"] = max(
         600, min(7200, int(out.get("accuracy_cooldown_seconds", 5760) or 5760))
     )
+    try:
+        cap_raw = int(out.get("accuracy_max_per_day", 15))
+    except (TypeError, ValueError):
+        cap_raw = 15
+    out["accuracy_max_per_day"] = max(1, min(15, cap_raw))
     out["server_execution_allowed"] = bool(out.get("server_execution_allowed", False))
     out["trade_stake"] = max(0.35, min(10000.0, float(out["trade_stake"])))
     out["trade_stake_use_full_balance"] = bool(out.get("trade_stake_use_full_balance", False))

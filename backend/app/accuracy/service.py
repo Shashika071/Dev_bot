@@ -20,15 +20,28 @@ HISTORY_PAGE_TIMEOUT_SECONDS = 15.0
 MAX_HISTORY_RECOVERY_ATTEMPTS = 3
 HISTORY_RECOVERY_BACKOFF_SECONDS = 5.0
 DEFAULT_COOLDOWN_SECONDS = 5760
+DEFAULT_MAX_PER_DAY = 15
 
 
-def _accuracy_cooldown_seconds() -> int:
+def _accuracy_prefs() -> tuple[int, int]:
+    cool, cap = DEFAULT_COOLDOWN_SECONDS, DEFAULT_MAX_PER_DAY
     try:
         from app.trade_prefs import load_trade_prefs
 
-        return int(load_trade_prefs().get("accuracy_cooldown_seconds", DEFAULT_COOLDOWN_SECONDS))
+        prefs = load_trade_prefs()
+        cool = int(prefs.get("accuracy_cooldown_seconds", DEFAULT_COOLDOWN_SECONDS))
+        cap = int(prefs.get("accuracy_max_per_day", DEFAULT_MAX_PER_DAY))
     except Exception:
-        return DEFAULT_COOLDOWN_SECONDS
+        pass
+    return max(600, min(7200, cool)), max(1, min(15, cap))
+
+
+def _accuracy_cooldown_seconds() -> int:
+    return _accuracy_prefs()[0]
+
+
+def _accuracy_max_per_day() -> int:
+    return _accuracy_prefs()[1]
 
 
 class AccuracyService:
@@ -88,18 +101,22 @@ class AccuracyService:
                     report=json.loads((self.output/run/"report.json").read_text(encoding="utf-8"))
             except (FileNotFoundError,KeyError,ValueError):
                 pass
-        cool = _accuracy_cooldown_seconds()
+        cool, cap = _accuracy_prefs()
         if report is not None and self.policy is None:
             self.policy=SignalPolicy(
                 min_probability=report["selection"]["threshold"],
                 cooldown_seconds=cool,
+                max_per_day=cap,
             )
             try:
                 self._restore()
             except (ValueError,KeyError) as exc:
                 self.error=f"Signal history needs repair: {exc}"
-        elif self.policy is not None and int(self.policy.cooldown_seconds) != cool:
-            self.policy.cooldown_seconds = cool
+        elif self.policy is not None:
+            if int(self.policy.cooldown_seconds) != cool:
+                self.policy.cooldown_seconds = cool
+            if int(self.policy.max_per_day) != cap:
+                self.policy.max_per_day = cap
         today=(int(time.time())+COLOMBO_OFFSET)//86400
         feed_age=time.time()-self.last_tick["epoch"] if self.last_tick else None
         groups=(report or {}).get("feature_groups") or []
@@ -127,7 +144,7 @@ class AccuracyService:
                 "reason":self.reason,"error":self.error,"last_tick":self.last_tick,
                 "feed_age_seconds":feed_age,"feed_fresh":feed_age is not None and abs(feed_age)<=5,
                 "signals_today":self.policy.counts.get(today,0) if self.policy else 0,
-                "max_per_day":15,"cooldown_seconds":cool,"timezone":"Asia/Colombo",
+                "max_per_day":cap,"cooldown_seconds":cool,"timezone":"Asia/Colombo",
                 "feature_profile":(report or {}).get("feature_profile","compact_v1"),
                 "feature_groups":groups,"history_loading":self.loading_history,
                 "history_seconds":self.history_seconds,"history_ticks":len(self.ticks),
@@ -139,6 +156,12 @@ class AccuracyService:
         cool = max(600, min(7200, int(seconds)))
         if self.policy is not None:
             self.policy.cooldown_seconds = cool
+
+    def apply_max_per_day(self, cap: int) -> None:
+        """Apply UI daily signal cap to the live policy without restarting."""
+        value = max(1, min(15, int(cap)))
+        if self.policy is not None:
+            self.policy.max_per_day = value
 
     async def reset_signals(self):
         """Delete forward-signal history and reset daily/cooldown slots."""
@@ -169,9 +192,11 @@ class AccuracyService:
             if self.task and not self.task.done():
                 return self.status()
             self.bundle=load_artifact(self.output)
+            cool, cap = _accuracy_prefs()
             self.policy=SignalPolicy(
                 min_probability=self.bundle["threshold"],
-                cooldown_seconds=_accuracy_cooldown_seconds(),
+                cooldown_seconds=cool,
+                max_per_day=cap,
             )
             self._restore()
             self.history_seconds=int(getattr(self.bundle["predictor"],"history_seconds",900))
