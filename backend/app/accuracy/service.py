@@ -10,7 +10,10 @@ import time
 
 import numpy as np
 
-from .core import BARRIER, COLOMBO_OFFSET, DELAY, DURATION, SYMBOL, SignalPolicy, touch_labels, validate_ticks
+from .core import (
+    BARRIER, COLOMBO_OFFSET, DELAY, DURATION, SYMBOL, SignalPolicy,
+    market_trend_bias, touch_labels, validate_ticks,
+)
 from .training import load_artifact
 
 HISTORY_PAGE_COUNT = 5000
@@ -122,11 +125,13 @@ class AccuracyService:
         groups=(report or {}).get("feature_groups") or []
         groups=list(groups) if isinstance(groups,(list,tuple,dict)) else []
         auto_trade = {"accuracy_enabled": False, "allowed": False, "reason": "unknown"}
+        trend_filter = True
         try:
             from app.execution.gates import permission_status
             from app.trade_prefs import load_trade_prefs
 
             prefs = load_trade_prefs()
+            trend_filter = bool(prefs.get("accuracy_trend_filter_enabled", True))
             status = permission_status(prefs)
             auto_trade = {
                 "accuracy_enabled": bool(prefs.get("accuracy_auto_trade_enabled")),
@@ -145,6 +150,7 @@ class AccuracyService:
                 "feed_age_seconds":feed_age,"feed_fresh":feed_age is not None and abs(feed_age)<=5,
                 "signals_today":self.policy.counts.get(today,0) if self.policy else 0,
                 "max_per_day":cap,"cooldown_seconds":cool,"timezone":"Asia/Colombo",
+                "trend_filter_enabled":trend_filter,
                 "feature_profile":(report or {}).get("feature_profile","compact_v1"),
                 "feature_groups":groups,"history_loading":self.loading_history,
                 "history_seconds":self.history_seconds,"history_ticks":len(self.ticks),
@@ -382,9 +388,26 @@ class AccuracyService:
         if not 0 <= time.time()-decision <= 3:
             self.reason="Waiting for fresh ticks"; return
         self.last_evaluated=decision
-        side=self.policy.choose(decision,probability)
+        trend = 0
+        try:
+            from app.trade_prefs import load_trade_prefs
+            if bool(load_trade_prefs().get("accuracy_trend_filter_enabled", True)):
+                trend = market_trend_bias(t, p, decision)
+        except Exception:
+            trend = 0
+        preferred = "upper" if probability[0] >= probability[1] else "lower"
+        side = self.policy.choose(decision, probability, trend_bias=trend if trend else None)
         if side is None:
-            self.reason="Waiting: confidence threshold, spacing, or daily cap"; return
+            if trend and (
+                (trend < 0 and preferred == "upper") or (trend > 0 and preferred == "lower")
+            ):
+                self.reason = (
+                    f"Skipped {preferred} against "
+                    f"{'down' if trend < 0 else 'up'}trend (trend filter on)"
+                )
+            else:
+                self.reason = "Waiting: confidence threshold, spacing, or daily cap"
+            return
         report=self.bundle["report"]
         groups=report.get("feature_groups") or []
         groups=list(groups) if isinstance(groups,(list,tuple,dict)) else []
@@ -396,6 +419,7 @@ class AccuracyService:
                 "model":self.bundle["predictor"].name,"run_id":report["run_id"],
                 "feature_profile":report.get("feature_profile","compact_v1"),"feature_groups":groups,
                 "reference_price":price,"resolved":False,"outcome":None,
+                "trend_bias":int(trend),
                 "created_at":datetime.now(timezone.utc).isoformat(),
                 "evaluation":"simulated 5-second entry delay; fresh forward touch outcome"}
         self._log(signal); self.pending[signal["signal_id"]]=signal; self.recent.append(signal)

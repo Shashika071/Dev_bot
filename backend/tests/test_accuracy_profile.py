@@ -6,8 +6,8 @@ import pickle
 import numpy as np
 import pytest
 
-from app.accuracy.core import (COLOMBO_OFFSET, SignalPolicy, features, side_matrix,
-                               touch_labels, validate_ticks)
+from app.accuracy.core import (COLOMBO_OFFSET, SignalPolicy, features, market_trend_bias,
+                               side_matrix, touch_labels, validate_ticks)
 from app.accuracy.service import AccuracyService
 from app.accuracy.training import Predictor, summarize
 
@@ -67,6 +67,25 @@ def test_policy_does_not_fill_quota_or_accept_invalid_probabilities():
     assert policy.choose(0,[.98,.99])=="lower"
     assert policy.choose(5759,[.99,.99]) is None
     assert policy.choose(5760,[.99,.98])=="upper"
+
+
+def test_trend_filter_blocks_counter_trend_without_consuming_slot():
+    policy=SignalPolicy(min_probability=.95,cooldown_seconds=600)
+    assert policy.choose(0,[.99,.90],trend_bias=-1) is None  # upper vs downtrend
+    assert policy.counts=={} and policy.last_epoch==-10**18
+    assert policy.choose(0,[.90,.99],trend_bias=-1)=="lower"
+    assert policy.choose(700,[.99,.90],trend_bias=1)=="upper"
+    assert policy.choose(1400,[.90,.99],trend_bias=1) is None  # lower vs uptrend
+
+
+def test_market_trend_bias_needs_short_and_long_agreement():
+    t=np.arange(0,3601,1,dtype=np.int64)
+    down=100-t.astype(float)*0.001
+    assert market_trend_bias(t,down,3600)==-1
+    up=100+t.astype(float)*0.001
+    assert market_trend_bias(t,up,3600)==1
+    flat=np.full(len(t),100.0)
+    assert market_trend_bias(t,flat,3600)==0
 
 
 def test_cap_resets_at_colombo_midnight_but_cooldown_survives_it():

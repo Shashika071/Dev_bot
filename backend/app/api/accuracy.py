@@ -40,6 +40,10 @@ class AccuracyMaxPerDayBody(BaseModel):
     accuracy_max_per_day: int | float | None = Field(15)
 
 
+class AccuracyTrendFilterBody(BaseModel):
+    accuracy_trend_filter_enabled: bool = True
+
+
 class AccuracyTrainBody(BaseModel):
     profile: str = Field("technical_v2", pattern="^(compact_v1|technical_v2)$")
     activate: bool = True
@@ -170,6 +174,24 @@ async def set_accuracy_max_per_day(body: AccuracyMaxPerDayBody):
     return {
         "accuracy_max_per_day": cap,
         "message": f"Accuracy daily cap set to {cap} signals/day.",
+        "status": service.status(),
+    }
+
+
+@router.put("/trend-filter")
+async def set_accuracy_trend_filter(body: AccuracyTrendFilterBody):
+    """Only allow Touch Upper in uptrends / Lower in downtrends when enabled."""
+    prefs = load_trade_prefs()
+    prefs["accuracy_trend_filter_enabled"] = bool(body.accuracy_trend_filter_enabled)
+    saved = save_trade_prefs(prefs)
+    enabled = bool(saved.get("accuracy_trend_filter_enabled", True))
+    return {
+        "accuracy_trend_filter_enabled": enabled,
+        "message": (
+            "Trend filter on — skip signals against the overall 15m/45m move."
+            if enabled
+            else "Trend filter off — model may signal either direction."
+        ),
         "status": service.status(),
     }
 

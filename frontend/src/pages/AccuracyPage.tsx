@@ -13,6 +13,7 @@ type AccuracyStatus = {
   history_loading?: boolean;
   feature_profile?: string; feature_groups?: string[];
   signals_today: number; max_per_day?: number; cooldown_seconds?: number;
+  trend_filter_enabled?: boolean;
   last_tick: { epoch: number; price: number } | null;
   auto_trade?: {
     accuracy_enabled?: boolean;
@@ -61,6 +62,8 @@ export function AccuracyPage() {
   const [maxPerDayDirty, setMaxPerDayDirty] = useState(false);
   const [maxPerDayBusy, setMaxPerDayBusy] = useState(false);
   const [maxPerDayMsg, setMaxPerDayMsg] = useState('');
+  const [trendFilterBusy, setTrendFilterBusy] = useState(false);
+  const [trendFilterMsg, setTrendFilterMsg] = useState('');
   const [resetBusy, setResetBusy] = useState(false);
   const [resetMsg, setResetMsg] = useState('');
   useEffect(() => {
@@ -180,6 +183,24 @@ export function AccuracyPage() {
       setCooldownBusy(false);
     }
   };
+  const setTrendFilter = async (enabled: boolean) => {
+    setTrendFilterBusy(true); setTrendFilterMsg(''); setError('');
+    try {
+      const response = await fetch(`${API}/accuracy/trend-filter`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accuracy_trend_filter_enabled: enabled }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Could not update trend filter');
+      setTrendFilterMsg(data.message || (enabled ? 'Trend filter on' : 'Trend filter off'));
+      if (data.status) setStatus(data.status);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTrendFilterBusy(false);
+    }
+  };
   const saveMaxPerDay = async () => {
     setMaxPerDayBusy(true); setMaxPerDayMsg(''); setError('');
     const cap = Math.max(1, Math.min(15, Math.round(Number(maxPerDay) || 15)));
@@ -274,13 +295,24 @@ export function AccuracyPage() {
       <p className="text-sm text-dim" style={{ marginBottom: '1rem' }}>
         Target: 10–15 signals per day, capped at 15, with a configurable market-rest cooldown between signals
         (default 96 minutes / 5760s). Entries below the trained confidence threshold are skipped.
-        Signals and simulated outcomes are recorded here.
+        With trend filter on, Touch Upper only fires in uptrends and Touch Lower only in downtrends
+        (15m + 45m net move must agree). Flat ranges still allow either side.
       </p>
       <div style={{ display: 'flex', gap: '.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
         <button className="btn btn-primary" disabled={busy || training || !status?.ready || status.running} onClick={() => void control('start')}>Start accuracy signals</button>
         <button className="btn btn-ghost" disabled={busy || !status?.running} onClick={() => void control('stop')}>Stop</button>
         <span>{status?.signals_today ?? 0} / {status?.max_per_day ?? maxPerDay} today · Asia/Colombo</span>
       </div>
+      <label className="text-sm flex items-center gap-2" style={{ cursor: 'pointer', marginTop: '.85rem' }}>
+        <input
+          type="checkbox"
+          checked={status?.trend_filter_enabled !== false}
+          disabled={trendFilterBusy}
+          onChange={e => void setTrendFilter(e.target.checked)}
+        />
+        Trend filter — block signals against the overall market move
+      </label>
+      {trendFilterMsg && <p className="text-sm text-dim" style={{ marginTop: '.4rem' }}>{trendFilterMsg}</p>}
       <div style={{ display: 'flex', gap: '.75rem', alignItems: 'flex-end', flexWrap: 'wrap', marginTop: '1rem' }}>
         <div>
           <label className="form-label">Daily cap (signals)</label>

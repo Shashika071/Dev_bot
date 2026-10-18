@@ -102,6 +102,37 @@ def wilson(wins: int, count: int) -> tuple[float, float]:
     return max(0.0, center-half), min(1.0, center+half)
 
 
+def _price_at_or_before(t: np.ndarray, p: np.ndarray, epoch: int) -> float | None:
+    ix = int(np.searchsorted(t, epoch, side="right") - 1)
+    if ix < 0:
+        return None
+    if int(epoch) - int(t[ix]) > 5:
+        return None
+    return float(p[ix])
+
+
+def market_trend_bias(t: np.ndarray, p: np.ndarray, decision: int,
+                      *, short_seconds: int = 900, long_seconds: int = 2700,
+                      min_move: float = 0.08) -> int:
+    """Overall trend from recent net moves: +1 up, -1 down, 0 flat/unknown.
+
+    Requires short and long lookbacks to agree (and clear the min move) so
+    choppy ranges stay neutral and do not over-filter.
+    """
+    now = _price_at_or_before(t, p, int(decision))
+    short = _price_at_or_before(t, p, int(decision) - int(short_seconds))
+    long = _price_at_or_before(t, p, int(decision) - int(long_seconds))
+    if now is None or short is None or long is None:
+        return 0
+    short_move = now - short
+    long_move = now - long
+    if short_move >= min_move and long_move >= min_move:
+        return 1
+    if short_move <= -min_move and long_move <= -min_move:
+        return -1
+    return 0
+
+
 @dataclass
 class SignalPolicy:
     min_probability: float = .95
@@ -116,7 +147,7 @@ class SignalPolicy:
         if self.cooldown_seconds < 600:
             raise ValueError("Cooldown must be at least 600 seconds")
 
-    def choose(self, epoch: int, probabilities) -> str | None:
+    def choose(self, epoch: int, probabilities, *, trend_bias: int | None = None) -> str | None:
         q = np.asarray(probabilities, dtype=float)
         if q.shape != (2,) or not np.isfinite(q).all() or (q < 0).any() or (q > 1).any():
             return None
@@ -125,8 +156,14 @@ class SignalPolicy:
             return None
         if int(epoch)-self.last_epoch < self.cooldown_seconds:
             return None
+        side = "upper" if q[0] >= q[1] else "lower"
+        if trend_bias is not None and int(trend_bias) != 0:
+            if int(trend_bias) > 0 and side != "upper":
+                return None
+            if int(trend_bias) < 0 and side != "lower":
+                return None
         self.record(int(epoch))
-        return "upper" if q[0] >= q[1] else "lower"
+        return side
 
     def record(self, epoch: int):
         day = (int(epoch)+COLOMBO_OFFSET)//86400
