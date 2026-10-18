@@ -132,3 +132,8 @@ class SignalPolicy:
         day = (int(epoch)+COLOMBO_OFFSET)//86400
         self.counts[day] = self.counts.get(day,0)+1
         self.last_epoch = max(self.last_epoch, int(epoch))
+
+    def reset_slots(self):
+        """Clear daily caps and cooldown so a fresh forward session can start."""
+        self.counts.clear()
+        self.last_epoch = -10**18

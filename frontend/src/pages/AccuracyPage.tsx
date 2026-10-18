@@ -57,6 +57,8 @@ export function AccuracyPage() {
   const [cooldownDirty, setCooldownDirty] = useState(false);
   const [cooldownBusy, setCooldownBusy] = useState(false);
   const [cooldownMsg, setCooldownMsg] = useState('');
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetMsg, setResetMsg] = useState('');
   useEffect(() => {
     let alive = true;
     const refresh = async () => {
@@ -120,6 +122,24 @@ export function AccuracyPage() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setTradeBusy(false);
+    }
+  };
+  const resetSignals = async () => {
+    const ok = window.confirm(
+      'Clear all Forward signals history and reset today’s slots (daily cap + cooldown)? The trained model is kept.',
+    );
+    if (!ok) return;
+    setResetBusy(true); setResetMsg(''); setError('');
+    try {
+      const response = await fetch(`${API}/accuracy/reset-signals`, { method: 'POST' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Could not reset signals');
+      setStatus(data);
+      setResetMsg(data.message || 'Forward signals and slots reset.');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setResetBusy(false);
     }
   };
   const saveCooldown = async () => {
@@ -343,11 +363,23 @@ export function AccuracyPage() {
       </div>
     </>}
     <div className="glass">
-      <h3 className="section-title">Forward signals</h3>
+      <div style={{ display: 'flex', gap: '.75rem', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'space-between' }}>
+        <h3 className="section-title" style={{ margin: 0 }}>Forward signals</h3>
+        <button
+          className="btn btn-ghost"
+          disabled={resetBusy}
+          onClick={() => void resetSignals()}
+          title="Delete forward history and reset daily/cooldown slots"
+        >
+          {resetBusy ? 'Resetting…' : 'Reset signals'}
+        </button>
+      </div>
       <p className="text-sm text-dim" style={{ margin: '.75rem 0' }}>
         The outcome uses the first tick after an assumed 5-second entry delay and monitors the following contract window.
         Actual entry timing can differ. Enable signal sound in the sidebar for alerts while the app is open.
+        Reset clears this table, today’s count, and cooldown so a new session can start.
       </p>
+      {resetMsg && <p className="text-sm text-dim" style={{ marginBottom: '.75rem' }}>{resetMsg}</p>}
       {!status?.signals.length ? <p>No forward signals recorded in this session yet.</p> : <div style={{ overflowX: 'auto' }}>
         <table style={{ width: '100%', textAlign: 'left', borderSpacing: '0 .75rem' }}>
           <thead><tr><th>Time (Colombo)</th><th>Touch</th><th>Estimated probability</th><th>Outcome</th><th>Auto-trade</th></tr></thead>

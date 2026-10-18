@@ -140,6 +140,30 @@ class AccuracyService:
         if self.policy is not None:
             self.policy.cooldown_seconds = cool
 
+    async def reset_signals(self):
+        """Delete forward-signal history and reset daily/cooldown slots."""
+        async with self.lock:
+            events = self.output / "signals.jsonl"
+            cleared = 0
+            if events.exists():
+                try:
+                    cleared = sum(1 for line in events.read_text(encoding="utf-8").splitlines() if line.strip())
+                except OSError:
+                    cleared = 0
+                events.unlink(missing_ok=True)
+            self.pending = {}
+            self.recent.clear()
+            if self.policy is not None:
+                self.policy.reset_slots()
+            self.reason = "Forward signals reset — slots cleared"
+            self.error = None
+            return {
+                **self.status(),
+                "reset": True,
+                "cleared_events": cleared,
+                "message": f"Cleared {cleared} history events; daily cap and cooldown reset.",
+            }
+
     async def start(self):
         async with self.lock:
             if self.task and not self.task.done():

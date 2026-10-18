@@ -86,6 +86,19 @@ async def stop():
     return await service.stop()
 
 
+@router.post("/reset-signals")
+async def reset_signals():
+    """Clear Forward signals history and reset daily/cooldown slots (model kept)."""
+    out = await service.reset_signals()
+    out["train"] = {
+        "status": _train_state["status"],
+        "progress": _train_state["progress"],
+        "error": _train_state["error"],
+        "result": _train_state["result"],
+    }
+    return out
+
+
 @router.put("/auto-trade")
 async def set_accuracy_auto_trade(body: AccuracyTradeBody):
     """Toggle Touch Accuracy auto-trade (still needs Setup auto-trade gates)."""

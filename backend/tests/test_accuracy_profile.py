@@ -97,6 +97,21 @@ def test_restart_restores_caps_and_pending_outcomes(tmp_path):
     assert "a" in service.pending
 
 
+def test_reset_signals_clears_history_and_slots(tmp_path):
+    signal={"type":"signal","signal_id":"a","decision_epoch":10000,"resolved":False}
+    (tmp_path/"signals.jsonl").write_text(json.dumps(signal)+"\n",encoding="utf-8")
+    service=AccuracyService(tmp_path); service.policy=SignalPolicy(); service._restore()
+    assert "a" in service.pending
+    out=asyncio.run(service.reset_signals())
+    assert out["reset"] is True
+    assert out["cleared_events"]==1
+    assert not service.pending and list(service.recent)==[]
+    assert service.policy.last_epoch==-10**18
+    assert service.policy.counts=={}
+    assert not (tmp_path/"signals.jsonl").exists()
+    assert service.policy.choose(10001,[.99,.99])=="upper"
+
+
 def test_replay_is_online_and_does_not_rank_later_entries_into_earlier_slots():
     d=np.arange(-COLOMBO_OFFSET,86400-COLOMBO_OFFSET,600)
     q=np.tile([.96,.95],(len(d),1)); y=np.tile([1,0],(len(d),1))
