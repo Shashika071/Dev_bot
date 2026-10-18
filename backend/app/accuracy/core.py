@@ -142,8 +142,8 @@ class SignalPolicy:
     counts: dict[int, int] = field(default_factory=dict)
 
     def __post_init__(self):
-        if not .5 <= self.min_probability < 1 or not 1 <= self.max_per_day <= 15:
-            raise ValueError("Probability must be [0.5,1); daily cap must be 1–15")
+        if not .5 <= self.min_probability < 1 or not 1 <= self.max_per_day <= 50:
+            raise ValueError("Probability must be [0.5,1); daily cap must be 1–50")
         if self.cooldown_seconds < 600:
             raise ValueError("Cooldown must be at least 600 seconds")
 

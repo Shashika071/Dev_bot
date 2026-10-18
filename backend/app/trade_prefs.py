@@ -100,7 +100,7 @@ def _clamp(prefs: dict[str, Any]) -> dict[str, Any]:
         cap_raw = int(out.get("accuracy_max_per_day", 15))
     except (TypeError, ValueError):
         cap_raw = 15
-    out["accuracy_max_per_day"] = max(1, min(15, cap_raw))
+    out["accuracy_max_per_day"] = max(1, min(50, cap_raw))
     out["accuracy_trend_filter_enabled"] = bool(out.get("accuracy_trend_filter_enabled", True))
     out["server_execution_allowed"] = bool(out.get("server_execution_allowed", False))
     out["trade_stake"] = max(0.35, min(10000.0, float(out["trade_stake"])))

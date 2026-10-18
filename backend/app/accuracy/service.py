@@ -36,7 +36,7 @@ def _accuracy_prefs() -> tuple[int, int]:
         cap = int(prefs.get("accuracy_max_per_day", DEFAULT_MAX_PER_DAY))
     except Exception:
         pass
-    return max(600, min(7200, cool)), max(1, min(15, cap))
+    return max(600, min(7200, cool)), max(1, min(50, cap))
 
 
 def _accuracy_cooldown_seconds() -> int:
@@ -165,7 +165,7 @@ class AccuracyService:
 
     def apply_max_per_day(self, cap: int) -> None:
         """Apply UI daily signal cap to the live policy without restarting."""
-        value = max(1, min(15, int(cap)))
+        value = max(1, min(50, int(cap)))
         if self.policy is not None:
             self.policy.max_per_day = value
 

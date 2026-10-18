@@ -154,7 +154,7 @@ async def set_accuracy_cooldown(body: AccuracyCooldownBody):
 
 @router.put("/max-per-day")
 async def set_accuracy_max_per_day(body: AccuracyMaxPerDayBody):
-    """Set Touch Accuracy daily signal cap (1–15)."""
+    """Set Touch Accuracy daily signal cap (1–50)."""
     if body.accuracy_max_per_day is None:
         raw = 15
     else:
@@ -163,9 +163,9 @@ async def set_accuracy_max_per_day(body: AccuracyMaxPerDayBody):
         except (TypeError, ValueError):
             raise HTTPException(
                 status_code=422,
-                detail="Daily cap must be a number from 1 to 15.",
+                detail="Daily cap must be a number from 1 to 50.",
             ) from None
-    cap = max(1, min(15, raw))
+    cap = max(1, min(50, raw))
     prefs = load_trade_prefs()
     prefs["accuracy_max_per_day"] = cap
     saved = save_trade_prefs(prefs)

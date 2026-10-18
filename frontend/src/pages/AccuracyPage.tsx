@@ -203,7 +203,7 @@ export function AccuracyPage() {
   };
   const saveMaxPerDay = async () => {
     setMaxPerDayBusy(true); setMaxPerDayMsg(''); setError('');
-    const cap = Math.max(1, Math.min(15, Math.round(Number(maxPerDay) || 15)));
+    const cap = Math.max(1, Math.min(50, Math.round(Number(maxPerDay) || 15)));
     setMaxPerDay(cap);
     try {
       const response = await fetch(`${API}/accuracy/max-per-day`, {
@@ -320,7 +320,7 @@ export function AccuracyPage() {
             type="number"
             className="form-input"
             min={1}
-            max={15}
+            max={50}
             step={1}
             value={maxPerDay}
             disabled={maxPerDayBusy}
@@ -330,7 +330,7 @@ export function AccuracyPage() {
             }}
             style={{ width: 140 }}
           />
-          <div className="form-hint">Max signals per Colombo day (1–15).</div>
+          <div className="form-hint">Max signals per Colombo day (1–50).</div>
         </div>
         <button className="btn btn-ghost" disabled={maxPerDayBusy} onClick={() => void saveMaxPerDay()}>
           {maxPerDayBusy ? 'Saving…' : 'Save daily cap'}
