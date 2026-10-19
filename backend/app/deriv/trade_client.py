@@ -753,6 +753,8 @@ class DerivTradeClient:
         stake: float,
         currency: str = "USD",
     ) -> dict[str, Any]:
+        if settings.bot_mode == "forex":
+            return {"ok": False, "error": "Touch orders are disabled in Forex mode"}
         try:
             await self.connect()
             if not self._use_pat and not self._authorized_loginid:

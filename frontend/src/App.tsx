@@ -12,6 +12,7 @@ import {
 import { playSignalAlertSound, unlockSignalAudio } from './signalAlert';
 import { AnalysisPage } from './pages/AnalysisPage';
 import { AccuracyPage } from './pages/AccuracyPage';
+import { ForexPage } from './pages/ForexPage';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -191,7 +192,7 @@ interface DownloadStatus {
   target_ticks?: number | null;
 }
 interface DailyStatus { signals_today: number; max_signals: number; cooldown_active: boolean; timezone: string; }
-type Tab = 'analysis' | 'dashboard' | 'train' | 'setup' | 'accuracy';
+type Tab = 'forex' | 'analysis' | 'dashboard' | 'train' | 'setup' | 'accuracy';
 
 function hoursBetween(oldest?: string, newest?: string): number | null {
   if (!oldest || !newest) return null;
@@ -349,7 +350,7 @@ async function api<T>(path: string, opts?: RequestInit): Promise<T> {
 
 // ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [tab, setTab]           = useState<Tab>('analysis');
+  const [tab, setTab]           = useState<Tab>('forex');
   const [status, setStatus]     = useState<ApiStatus|null>(null);
   const [daily, setDaily]       = useState<DailyStatus|null>(null);
   const [online, setOnline]     = useState(false);
@@ -378,13 +379,16 @@ export default function App() {
 
   const poll = useCallback(async () => {
     try { await api('/health'); setOnline(true); } catch { setOnline(false); }
+    if (tab === 'forex') return;
     try { setDaily(await api<DailyStatus>('/signals/status')); } catch {}
     try { applyStatus(await api<ApiStatus>('/signals/worker-status')); } catch {}
-  }, [applyStatus]);
+  }, [applyStatus, tab]);
 
   useEffect(() => { poll(); const id = setInterval(poll, 5000); return () => clearInterval(id); }, [poll]);
 
   useEffect(() => {
+    if (tab === 'forex') return;
+    let disposed = false;
     const WS = (import.meta.env.VITE_WS_URL || 'ws://localhost:8000').replace(/^http/, 'ws');
     let statusWs: WebSocket; let noteWs: WebSocket;
     let statusTimer: ReturnType<typeof setTimeout>;
@@ -400,7 +404,7 @@ export default function App() {
             applyStatus(msg?.data ?? msg);
           } catch {}
         };
-        statusWs.onclose = () => { statusTimer = setTimeout(connectStatus, 5000); };
+        statusWs.onclose = () => { if (!disposed) statusTimer = setTimeout(connectStatus, 5000); };
         statusWs.onerror = () => statusWs.close();
       } catch {}
     };
@@ -428,7 +432,7 @@ export default function App() {
             }
           } catch {}
         };
-        noteWs.onclose = () => { noteTimer = setTimeout(connectNotes, 5000); };
+        noteWs.onclose = () => { if (!disposed) noteTimer = setTimeout(connectNotes, 5000); };
         noteWs.onerror = () => noteWs.close();
       } catch {}
     };
@@ -436,12 +440,13 @@ export default function App() {
     connectStatus();
     connectNotes();
     return () => {
+      disposed = true;
       clearTimeout(statusTimer);
       clearTimeout(noteTimer);
       statusWs?.close();
       noteWs?.close();
     };
-  }, [applyStatus]);
+  }, [applyStatus, tab]);
 
   // Auto-hide big on-screen signal banner
   useEffect(() => {
@@ -460,18 +465,19 @@ export default function App() {
   };
 
   const navItems: { id: Tab; label: string; icon: JSX.Element }[] = [
-    { id: 'analysis',  label: 'Home',         icon: <Home size={16}/> },
-    { id: 'dashboard', label: 'Dashboard',    icon: <Activity size={16}/> },
-    { id: 'train',     label: 'Train Model',  icon: <Brain size={16}/>    },
-    { id: 'accuracy',  label: 'Touch Accuracy', icon: <Signal size={16}/> },
-    { id: 'setup',     label: 'Configuration',icon: <Settings size={16}/> },
+    { id: 'forex',     label: 'Forex Rise / Fall', icon: <TrendingUp size={16}/> },
+    { id: 'analysis',  label: 'Legacy Touch · Home', icon: <Home size={16}/> },
+    { id: 'dashboard', label: 'Legacy Dashboard', icon: <Activity size={16}/> },
+    { id: 'train',     label: 'Legacy Training', icon: <Brain size={16}/> },
+    { id: 'accuracy',  label: 'Legacy Accuracy', icon: <Signal size={16}/> },
+    { id: 'setup',     label: 'Legacy Settings', icon: <Settings size={16}/> },
   ];
 
   const capPct = daily ? Math.min(100, (daily.signals_today / daily.max_signals) * 100) : 0;
 
   return (
     <div className={`app-shell fade-in${sidebarOpen ? '' : ' sidebar-hidden'}`}>
-      {signalFlash && (
+      {signalFlash && tab !== 'forex' && (
         <div className="signal-flash-banner" role="alert" onClick={() => setSignalFlash(null)}>
           <Volume2 size={28} />
           <div>
@@ -488,14 +494,14 @@ export default function App() {
           <div className="logo-icon"><Zap size={18} color="#fff" /></div>
           <div>
             <span className="logo-text">DerivQuant</span>
-            <span className="logo-sub">ML Signal Engine</span>
+            <span className="logo-sub">Forex Rise / Fall</span>
           </div>
           <button type="button" className="sidebar-hide" title="Hide sidebar" onClick={() => setSidebarOpen(false)}>
             <ChevronRight size={14} style={{ transform: 'rotate(180deg)' }} />
           </button>
         </div>
 
-        <button
+        {tab !== 'forex' && <button
           id="btn-enable-signal-sound"
           className={`btn ${soundReady ? 'btn-ghost' : 'btn-primary'} w-full`}
           style={{ margin: '0 0 0.75rem', justifyContent: 'center' }}
@@ -504,7 +510,7 @@ export default function App() {
         >
           <Volume2 size={14} />
           {soundReady ? 'Sound ready (test again)' : 'Enable signal sound'}
-        </button>
+        </button>}
 
         {/* Connection pills */}
         <div className="conn-pills">
@@ -512,10 +518,10 @@ export default function App() {
             <span className={`pill-dot ${online ? 'on' : 'off'}`} />
             {online ? 'Backend Online' : 'Backend Offline'}
           </div>
-          <div className={`conn-pill ${status?.deriv_connected ? 'online' : 'offline'}`}>
+          {tab !== 'forex' && <div className={`conn-pill ${status?.deriv_connected ? 'online' : 'offline'}`}>
             {status?.deriv_connected ? <Wifi size={11}/> : <WifiOff size={11}/>}
             {status?.deriv_connected ? 'Deriv Connected' : 'Deriv Reconnecting…'}
-          </div>
+          </div>}
         </div>
 
         {/* Nav */}
@@ -530,7 +536,7 @@ export default function App() {
         </nav>
 
         {/* Cap widget */}
-        {tab !== 'accuracy' && <div className="cap-widget">
+        {tab !== 'accuracy' && tab !== 'forex' && <div className="cap-widget">
           <div className="cap-header">Daily Signal Cap</div>
           <div className="cap-numbers">
             <span className="cap-count">{daily?.signals_today ?? '–'}</span>
@@ -551,6 +557,7 @@ export default function App() {
 
       {/* ── Main ── */}
       <main className={`main-content${tab === 'analysis' ? ' main-chart' : ''}`}>
+        {tab === 'forex' && <ForexPage />}
         {tab === 'analysis'  && (
           <AnalysisPage
             symbol={status?.symbol || 'R_100'}

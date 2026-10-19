@@ -10,15 +10,17 @@ from app.api import setup, signals, train, ws
 from app.api.analysis import router as analysis_router
 from app.api.market import router as market_router
 from app.api.accuracy import router as accuracy_router, service as accuracy_service
+from app.api.forex import router as forex_router
+from app.forex.service import forex_service
 from app.config import settings
 from app.database import init_db
 
 logger = structlog.get_logger(__name__)
 
 app = FastAPI(
-    title="Deriv Touch Signal Bot",
-    description="Touch and no-touch contract signal research.",
-    version="1.1.0",
+    title="Deriv Forex Rise/Fall Bot",
+    description="Multi-timeframe Forex analysis and demo-only Rise/Fall execution.",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -36,12 +38,16 @@ app.include_router(train.router)
 app.include_router(market_router)
 app.include_router(analysis_router)
 app.include_router(accuracy_router)
+app.include_router(forex_router)
 
 
 @app.on_event("startup")
 async def startup():
     logger.info("app_startup")
     await init_db()
+    if settings.bot_mode == "forex":
+        await forex_service.resume()
+        return
     # Resume Analyze/Force watcher if it was running before API restart
     try:
         from app.signal_engine.analyze_watch import analyze_watch
@@ -63,6 +69,7 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
+    await forex_service.shutdown()
     await accuracy_service.stop()
     try:
         from app.execution.session_ctl import stop_session

@@ -126,6 +126,11 @@ def _metadata_compatible(meta: dict, conf: ContractSettings) -> bool:
 async def worker_loop():
     logger.info("worker_starting", backend_url=BACKEND_URL)
 
+    if settings.bot_mode == "forex":
+        logger.info("legacy_touch_worker_disabled", reason="Forex scanner runs in the API service")
+        while True:
+            await asyncio.sleep(60)
+
     client = DerivWSClient()
     await client.connect()
 

@@ -10,6 +10,12 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    # Forex is isolated from the retained legacy Touch engine and models.
+    bot_mode: str = Field("forex", pattern="^(forex|touch)$")
+    forex_context_url: Optional[str] = None
+    forex_context_file: Optional[str] = None
+    forex_context_token: Optional[str] = None
+    trading_economics_api_key: Optional[str] = None
     # --- Deriv API ---
     deriv_app_id: Optional[str] = Field(
         None, description="Deriv API app_id (only needed for old v3 endpoint)"
