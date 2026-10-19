@@ -1,15 +1,11 @@
 """
-Main FastAPI application entrypoint.
+Main FastAPI application — Forex Rise/Fall only.
 """
 
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import setup, signals, train, ws
-from app.api.analysis import router as analysis_router
-from app.api.market import router as market_router
-from app.api.accuracy import router as accuracy_router, service as accuracy_service
 from app.api.forex import router as forex_router
 from app.forex.service import forex_service
 from app.config import settings
@@ -31,54 +27,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(setup.router)
-app.include_router(signals.router)
-app.include_router(ws.router)
-app.include_router(train.router)
-app.include_router(market_router)
-app.include_router(analysis_router)
-app.include_router(accuracy_router)
 app.include_router(forex_router)
 
 
 @app.on_event("startup")
 async def startup():
-    logger.info("app_startup")
+    logger.info("app_startup", bot_mode=settings.bot_mode)
     await init_db()
-    if settings.bot_mode == "forex":
-        await forex_service.resume()
-        return
-    # Resume Analyze/Force watcher if it was running before API restart
-    try:
-        from app.signal_engine.analyze_watch import analyze_watch
-
-        await analyze_watch.resume_if_needed()
-    except Exception as e:
-        logger.warning("analyze_watch_resume_skip", error=str(e))
-    # Buy-capable session stays down unless the server execution gate is open.
-    try:
-        from app.execution.session_ctl import start_if_allowed
-
-        if await start_if_allowed():
-            logger.info("trade_account_session_started")
-        else:
-            logger.info("trade_account_session_not_started", reason="execution_gate_closed")
-    except Exception as e:
-        logger.warning("trade_account_session_start_skip", error=str(e))
+    if settings.bot_mode != "forex":
+        logger.warning("bot_mode_not_forex", bot_mode=settings.bot_mode,
+                       hint="Set BOT_MODE=forex; legacy Touch routes are removed from this API")
+    await forex_service.resume()
 
 
 @app.on_event("shutdown")
 async def shutdown():
     await forex_service.shutdown()
-    await accuracy_service.stop()
-    try:
-        from app.execution.session_ctl import stop_session
-
-        await stop_session()
-    except Exception as e:
-        logger.warning("trade_account_session_stop_skip", error=str(e))
 
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok"}
+    return {"status": "ok", "product": "forex_rise_fall"}
