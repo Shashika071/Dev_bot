@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Activity, AlertTriangle, ArrowDownRight, ArrowUpRight, Brain, CheckCircle, ChevronDown, Clock, Download, Globe2, Loader2, Pause, Play, RefreshCw, ShieldCheck, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowDownRight, ArrowUpRight, Brain, CheckCircle, ChevronDown, Clock, Download, Globe2, Loader2, Newspaper, Pause, Play, RefreshCw, ShieldCheck, X } from 'lucide-react';
 import { forexApi, type ForexAnalysis, type ForexFactor, type ForexStatus, type ForexSymbol } from '../api/client';
 import { ForexChart } from '../components/ForexChart';
 import './ForexPage.css';
@@ -26,6 +26,22 @@ function dateTime(value?: string | number | null): string {
   if (!value) return 'Not yet';
   const date = new Date(typeof value === 'number' ? value * 1000 : value);
   return Number.isNaN(date.getTime()) ? 'Unavailable' : date.toLocaleString('en-GB', { timeZone: TZ, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function ageLabel(seconds?: number | null): string {
+  if (seconds == null || !Number.isFinite(seconds)) return 'Age unknown';
+  if (seconds < 0) return 'Future-dated';
+  if (seconds < 60) return `${seconds}s old`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m old`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)}h old`;
+  return `${Math.round(seconds / 86400)}d old`;
+}
+
+function effectTone(effect?: string): string {
+  if (effect === 'blocks' || effect === 'blocked') return 'negative';
+  if (effect === 'clear') return 'positive';
+  if (effect === 'context' || effect === 'watched') return 'neutral';
+  return 'muted';
 }
 
 function tone(value: string): string {
@@ -269,6 +285,67 @@ export function ForexPage() {
 
     <ForexChart symbol={chartSymbol} online={online} />
 
+    <section className="fx-panel fx-news-desk" aria-label="News and calendar desk">
+      <div className="fx-panel-heading">
+        <div>
+          <h2><Newspaper size={18} /> News &amp; calendar desk</h2>
+          <p className="fx-muted fx-heading-note">
+            {status?.news?.source || 'Run Scan now to load public calendar + central-bank feeds'}
+            {status?.news?.age_seconds != null ? ` · feed ${ageLabel(status.news.age_seconds)}` : ''}
+          </p>
+        </div>
+        <span className={`fx-tag fx-${newsReady ? 'positive' : 'neutral'}`}>{newsReady ? 'Allows entries' : 'Blocks entries'}</span>
+      </div>
+      <p className="fx-muted">{status?.news?.reason || 'Currency-specific releases and central-bank headlines are checked beside the chart. High-impact events in the 4h hold window block new entries.'}</p>
+      {(status?.news?.sources?.length || 0) > 0 && (
+        <div className="fx-news-sources">
+          {status!.news!.sources!.map(source => (
+            <div className="fx-news-source" key={source.id}>
+              <div>
+                <strong>{source.name}</strong>
+                <small>{source.kind || 'feed'}{source.currency ? ` · ${source.currency}` : ''} · {ageLabel(source.age_seconds)}</small>
+              </div>
+              <span className={`fx-tag fx-${effectTone(source.effect)}`}>{(source.effect || 'unknown').replace(/_/g, ' ')}</span>
+              <p>{source.detail || 'No detail'}</p>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="fx-news-columns">
+        <div>
+          <h3>Releases in window</h3>
+          {(status?.news?.events?.length || 0) === 0 ? <p className="fx-muted">No pair-relevant releases in the hold window yet. Scan to refresh.</p> : (
+            <ul className="fx-news-list">{status!.news!.events!.slice(0, 12).map((event, index) => (
+              <li key={`${event.currency}-${event.at}-${index}`}>
+                <strong>{event.currency} · {event.title}</strong>
+                <small>{dateTime(event.at)} · {event.impact} · {event.effect} · {ageLabel(event.age_seconds)}</small>
+              </li>
+            ))}</ul>
+          )}
+        </div>
+        <div>
+          <h3>Central-bank headlines</h3>
+          {(status?.news?.headlines?.length || 0) === 0 ? <p className="fx-muted">No fresh pair-relevant CB headlines (24h speeches factor / weekly desk).</p> : (
+            <ul className="fx-news-list">{status!.news!.headlines!.slice(0, 10).map((item, index) => (
+              <li key={`${item.currency}-${item.as_of}-${index}`}>
+                <strong>{item.currency} · {item.source}</strong>
+                <small>{ageLabel(item.age_seconds)} · {item.effect}</small>
+                <p>{item.title}</p>
+              </li>
+            ))}</ul>
+          )}
+        </div>
+      </div>
+      {status?.news?.attribution?.text && (
+        <p className="fx-footnote">
+          {status.news.attribution.url
+            ? <a href={status.news.attribution.url} target="_blank" rel="noreferrer">{status.news.attribution.text}</a>
+            : status.news.attribution.text}
+          {' '}· Headlines are context only, not a directional forecast.
+        </p>
+      )}
+    </section>
+
     <section className="fx-stats" aria-label="Scanner summary">
       <div className="fx-stat"><span>SCANNER</span><strong className={online && status?.running ? 'fx-positive' : ''}>{loading ? 'Connecting' : !online ? 'Unknown' : status?.running ? 'Running' : 'Stopped'}</strong><small>{status?.running ? 'Evaluates markets every 5 minutes' : 'Start to enable automatic demo entries'}</small></div>
       <div className="fx-stat"><span>TODAY’S SLOTS</span><strong>{used} <em>/ {cap}</em></strong><small>{remaining === 0 ? 'Daily cap reached · next Colombo day resets' : `${remaining} remaining today · never a forced target`}</small></div>
@@ -318,9 +395,9 @@ export function ForexPage() {
           <summary>Connect fundamental data <span className={`fx-tag ${newsReady ? 'fx-positive' : ''}`}>{newsReady ? 'Ready' : 'Required'}</span></summary>
           <p>Entries stay blocked until a fresh calendar covers both currencies of the watched pairs for the full 4-hour hold.</p>
           <ol className="fx-setup-steps">
-            <li>Configure a live calendar feed or a genuinely updated context file. Sample files and <code>clock: server</code> cannot authorize trades.</li>
-            <li>Set <code>FOREX_CONTEXT_FILE</code>, <code>FOREX_CONTEXT_URL</code>, or <code>TRADING_ECONOMICS_API_KEY</code> in <code>.env</code>.</li>
-            <li>Restart the backend, then click <strong>Scan now</strong>. High-impact events in the hold window still block entry.</li>
+            <li>Default: public ShowMyTrades calendar + official central-bank RSS (<code>FOREX_PUBLIC_NEWS=true</code>).</li>
+            <li>Optional paid/operator override: <code>FOREX_CONTEXT_FILE</code>, <code>FOREX_CONTEXT_URL</code>, or <code>TRADING_ECONOMICS_API_KEY</code>.</li>
+            <li>Click <strong>Scan now</strong>. High-impact events in the hold window still block entry. Sample <code>clock: server</code> files cannot authorize trades.</li>
           </ol>
           <p>Schema and CALL/PUT mapping: <code>docs/forex-rise-fall.md</code>.</p>
           {status?.news?.setup_hint && <p className="fx-muted">{status.news.setup_hint}</p>}
@@ -350,8 +427,9 @@ export function ForexPage() {
       <section className="fx-panel">
         <div className="fx-panel-heading"><h2><Brain size={18} /> Hybrid ML filter</h2><span className={`fx-tag ${ml?.ready ? 'fx-positive' : ''}`}>{ml?.ready ? 'Active' : 'Inactive'}</span></div>
         <p className="fx-muted">{ml?.reason || 'Train after history download. Checklist score ≥ 80 and news gates still required.'}</p>
-        {ml?.metrics && <p className="fx-muted">Test accuracy {describe(ml.metrics.test_accuracy)} · AUC {describe(ml.metrics.test_auc)} · threshold {describe(ml.threshold)}</p>}
-        {train?.result?.metrics && <p className="fx-muted">Last train: accuracy {describe(train.result.metrics.test_accuracy)} · samples {describe(train.result.metrics.samples)}</p>}
+        {ml?.metrics && <p className="fx-muted">Selected accuracy {describe(ml.metrics.selected_accuracy ?? ml.metrics.test_accuracy)} · coverage {describe(ml.metrics.coverage)} · AUC {describe(ml.metrics.test_auc)} · threshold {describe(ml.threshold)}</p>}
+        {train?.result?.metrics && <p className="fx-muted">Last train: selected accuracy {describe(train.result.metrics.selected_accuracy ?? train.result.metrics.test_accuracy)} · coverage {describe(train.result.metrics.coverage)} · samples {describe(train.result.metrics.samples)} · {train.result.promoted ? 'promoted' : 'not promoted'}</p>}
+        {train?.result && !train.result.promoted && train.result.acceptance_reason && <p className="fx-inline-error">{train.result.acceptance_reason}. Rules-only continues until a model clears the bar.</p>}
         <div className="fx-actions">
           <button type="button" className="fx-button" disabled={!online || trainRunning || !history?.ready_for_train} onClick={() => void runTrain()}>
             {trainRunning ? <Loader2 size={16} className="spin" /> : <Brain size={16} />}
@@ -359,7 +437,7 @@ export function ForexPage() {
           </button>
         </div>
         {train?.error && <p className="fx-inline-error">{train.error}</p>}
-        <p className="fx-footnote">When the model is ready, EURUSD signals need checklist + ML agreement. Without a model, rules-only continues.</p>
+        <p className="fx-footnote">The chart shows a live Rise/Fall confidence as an idea only. A model joins the trade gate only after it clears the promotion bar. Until then the checklist decides.</p>
       </section>
     </div>
 

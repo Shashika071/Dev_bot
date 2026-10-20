@@ -19,7 +19,7 @@ from app.forex.ml.dataset import (
     label_outcome,
     label_prices,
 )
-from app.forex.ml.predict import ml_blocks_entry, ml_status, predict_frames
+from app.forex.ml.predict import ml_blocks_entry, ml_status, predict_frames, score_idea
 from app.forex.ml.train import (
     apply_wait_policy,
     artifact_paths,
@@ -183,6 +183,35 @@ def test_hybrid_gate_requires_direction_agreement(tmp_path: Path):
     unsure = predict_frames(model_base, frames(1), now=NOW, checklist_direction="RISE")
     assert unsure["direction"] == "WAIT"
     assert unsure["hybrid_passed"] is False
+
+
+def test_unpromoted_candidate_is_an_idea_and_does_not_trade(tmp_path: Path):
+    model_base = tmp_path / "models"
+    paths = artifact_paths(model_base)
+    folder = paths["candidates"] / "20261020T120000Z"
+    folder.mkdir(parents=True)
+    joblib.dump({"pipeline": _FixedProba(0.71), "features": FEATURE_COLUMNS}, folder / "model.joblib")
+    (folder / "meta.json").write_text(json.dumps({
+        "symbol": "frxEURUSD", "threshold": 0.55, "features": FEATURE_COLUMNS,
+        "promoted": False, "metrics": {"selected_accuracy": 0.51, "test_auc": 0.54},
+    }), encoding="utf-8")
+    view = predict_frames(model_base, frames(1), now=NOW, checklist_direction="RISE")
+    assert view["installed"] is False
+    assert view["hybrid_passed"] is None
+    assert not ml_blocks_entry(view)
+    idea = score_idea(model_base, frames(1), now=NOW)
+    assert idea["trades"] is False
+    assert idea["direction"] == "RISE"
+    assert idea["p_rise"] == 0.71
+    assert idea["p_fall"] == 0.29
+    assert idea["level"] == "stronger"
+    joblib.dump({"pipeline": _FixedProba(0.51), "features": FEATURE_COLUMNS}, folder / "model.joblib")
+    from app.forex.ml import predict as predict_module
+    predict_module._IDEA_CACHE.clear()
+    unsure = score_idea(model_base, frames(1), now=NOW)
+    assert unsure["direction"] == "NO TRADE"
+    assert unsure["level"] == "low"
+    assert unsure["trades"] is False
 
 
 def test_installed_model_blocks_when_features_unavailable(tmp_path: Path):

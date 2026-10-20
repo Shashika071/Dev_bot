@@ -89,6 +89,19 @@ export interface ForexChartPayload {
   signals?: Array<{ created_epoch?: number; direction?: string; expiry_epoch?: number }>;
   analysis?: ForexAnalysis | null;
   ml?: Record<string, unknown>;
+  ml_idea?: {
+    role?: string;
+    trades?: boolean;
+    state?: string;
+    direction?: string;
+    p_rise?: number | null;
+    p_fall?: number | null;
+    confidence?: number | null;
+    level?: string | null;
+    reason?: string;
+    held_out_accuracy?: number | null;
+    held_out_auc?: number | null;
+  } | null;
   server_time?: number;
   last_candle_epoch?: number;
   last_candle_age_seconds?: number | null;
@@ -113,6 +126,9 @@ export interface ForexTrainStatus {
     metrics?: Record<string, number | null>;
     trained_at?: number;
     note?: string;
+    promoted?: boolean;
+    accepted?: boolean;
+    acceptance_reason?: string;
   } | null;
 }
 
@@ -132,8 +148,49 @@ export interface ForexStatus {
   signals_remaining_today?: number;
   duration_hours?: number;
   product?: { mode: string; duration_seconds: number; daily_cap: number; timezone: string; contract: string };
-  news?: { ready: boolean; reason: string; source?: string; setup_hint?: string };
+  news?: {
+    ready: boolean;
+    reason: string;
+    source?: string;
+    setup_hint?: string;
+    public?: boolean;
+    as_of?: number;
+    age_seconds?: number | null;
+    attribution?: { text?: string; url?: string } | null;
+    sources?: Array<{
+      id: string;
+      name: string;
+      kind?: string;
+      currency?: string;
+      age_seconds?: number | null;
+      effect?: string;
+      detail?: string;
+      items?: number;
+      url?: string;
+    }>;
+    events?: Array<{
+      currency?: string;
+      title?: string;
+      at?: number;
+      impact?: string;
+      effect?: string;
+      age_seconds?: number;
+      forecast?: string | null;
+      previous?: string | null;
+      actual?: string | null;
+    }>;
+    headlines?: Array<{
+      currency?: string;
+      title?: string;
+      source?: string;
+      as_of?: number;
+      age_seconds?: number;
+      effect?: string;
+      link?: string;
+    }>;
+  };
   ml?: { ready: boolean; reason?: string; threshold?: number | null; metrics?: Record<string, unknown> | null };
+  ml_idea?: ForexChartPayload['ml_idea'];
   history?: ForexHistoryStatus;
   train?: ForexTrainStatus;
   last_scan_at?: string | null;

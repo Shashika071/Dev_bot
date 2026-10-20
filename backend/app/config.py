@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     forex_context_file: Optional[str] = None
     forex_context_token: Optional[str] = None
     trading_economics_api_key: Optional[str] = None
+    forex_public_news: bool = Field(
+        True,
+        description="When no paid/file context is set, use ShowMyTrades calendar + central-bank RSS",
+    )
     # --- Deriv API ---
     deriv_app_id: Optional[str] = Field(
         None, description="Deriv API app_id (only needed for old v3 endpoint)"

@@ -26,6 +26,7 @@ LABEL_KIND = "candle_proxy_m15_rise_fall"
 FEATURE_COLUMNS = [
     "ret_1", "ret_4", "ret_16", "rsi_15m", "atr_15m", "ema20_dist_atr", "ema50_dist_atr",
     "macd_hist_15m", "adx_15m", "bb_width", "range_pos", "h1_ret", "h4_ret",
+    "tf_agree", "dist_high_atr", "dist_low_atr", "hour_sin", "hour_cos",
 ]
 
 
@@ -108,6 +109,11 @@ def _feature_row(m15: pd.DataFrame, h1: pd.DataFrame, h4: pd.DataFrame, index: i
         "range_pos": (close - prior_low) / max(prior_high - prior_low, 1e-12),
         "h1_ret": h1_ret,
         "h4_ret": h4_ret,
+        "tf_agree": 1.0 if (h1_ret >= 0) == (h4_ret >= 0) else 0.0,
+        "dist_high_atr": (prior_high - close) / atr14,
+        "dist_low_atr": (close - prior_low) / atr14,
+        "hour_sin": math.sin(2 * math.pi * ((decision % 86400) / 86400)),
+        "hour_cos": math.cos(2 * math.pi * ((decision % 86400) / 86400)),
     }
 
 

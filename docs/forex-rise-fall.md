@@ -23,16 +23,19 @@ The checklist score is **not** a win probability.
 
 ```env
 BOT_MODE=forex
-FOREX_CONTEXT_FILE=/app/data/forex/context.json
-# Or:
+# Default no-subscription path:
+FOREX_PUBLIC_NEWS=true
+# Optional overrides (first configured wins over public feeds):
+# FOREX_CONTEXT_FILE=/app/data/forex/context.json
 # FOREX_CONTEXT_URL=https://your-feed.example/forex-context.json
 # FOREX_CONTEXT_TOKEN=optional_bearer_token
-# Or:
 # TRADING_ECONOMICS_API_KEY=your_key
 ```
 
-Without a calendar feed, entries stay blocked. That is intentional: high-impact news
-during a 4-hour hold can dominate technical setups.
+Public mode uses the ShowMyTrades free calendar (economic releases) plus official
+central-bank RSS headlines. Operator/TE feeds still take priority when configured.
+High-impact events during the 4-hour hold still block entries. Sample
+`clock: server` files cannot authorize trades.
 
 ## Context JSON schema
 

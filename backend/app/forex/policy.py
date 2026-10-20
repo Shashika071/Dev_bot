@@ -49,10 +49,23 @@ def duration_value(value: object) -> int | None:
 
 
 def supports_rise_fall(contracts: list[dict], duration: int) -> bool:
-    """Require explicit zero barriers; CALL/PUT also identify Higher/Lower contracts."""
+    """Accept spot CALL and PUT whose duration window covers the expiry.
+
+    A classic catalog row has ``barriers`` 0. The current options catalog lists
+    the same Rise/Fall product as ``contract_category: callput`` and attaches a
+    sample barrier; Higher/Lower is a separate ``higherlower`` category. The
+    buy path never sends a barrier, and the authenticated proposal is still
+    the final check that the ticket is entry-spot Rise/Fall.
+    """
     supported = set()
     for c in contracts:
-        if str(c.get("barriers")) != "0" or c.get("contract_type") not in {"CALL", "PUT"}:
+        if c.get("contract_type") not in {"CALL", "PUT"}:
+            continue
+        category = str(c.get("contract_category") or "").strip().lower()
+        if category == "higherlower":
+            continue
+        zero_barrier = str(c.get("barriers")) == "0"
+        if not zero_barrier and category != "callput":
             continue
         if c.get("start_type", "spot") != "spot":
             continue

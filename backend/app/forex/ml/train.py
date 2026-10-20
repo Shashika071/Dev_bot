@@ -156,8 +156,11 @@ def train_eurusd(model_base: str | Path, *, progress: dict | None = None, auto_p
         ("clf", LogisticRegression(max_iter=1000, class_weight="balanced")),
     ])
     pipe.fit(x_train, y_train)
+    # A stricter cutoff fit on one window did not hold on the next window, so the
+    # live gate stays at 0.55 until a later test period clears the promotion bar.
+    threshold = DEFAULT_THRESHOLD
     proba = pipe.predict_proba(x_test)[:, 1]
-    policy = apply_wait_policy(proba, y_test, threshold=DEFAULT_THRESHOLD)
+    policy = apply_wait_policy(proba, y_test, threshold=threshold)
     majority = float(max(y_test.mean(), 1.0 - y_test.mean())) if len(y_test) else None
     metrics = {
         "samples": int(len(dataset)),
@@ -183,7 +186,7 @@ def train_eurusd(model_base: str | Path, *, progress: dict | None = None, auto_p
         "symbol": "frxEURUSD",
         "duration_seconds": DURATION,
         "features": FEATURE_COLUMNS,
-        "threshold": DEFAULT_THRESHOLD,
+        "threshold": threshold,
         "metrics": metrics,
         "trained_at": int(time.time()),
         "label_kind": LABEL_KIND,

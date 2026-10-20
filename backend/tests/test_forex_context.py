@@ -57,7 +57,10 @@ def test_sourced_high_risk_fundamental_blocks_but_old_data_not_used():
 
 def test_missing_provider_fails_closed_without_network():
     from types import SimpleNamespace
-    settings = SimpleNamespace(forex_context_url=None, forex_context_file=None, trading_economics_api_key=None)
+    settings = SimpleNamespace(
+        forex_context_url=None, forex_context_file=None, trading_economics_api_key=None,
+        forex_public_news=False,
+    )
     assert "error" in complete(load_context(settings, NOW, 14400))
 
 
@@ -67,8 +70,19 @@ def test_local_feed_loading(tmp_path):
     path = tmp_path / "context.json"
     path.write_text(json.dumps(feed()))
     result = complete(load_context(SimpleNamespace(
-        forex_context_file=str(path), forex_context_url=None, trading_economics_api_key=None), NOW, 14400))
+        forex_context_file=str(path), forex_context_url=None, trading_economics_api_key=None,
+        forex_public_news=True), NOW, 14400))
     assert evaluate_context(result, "frxEURUSD", NOW, 14400)["ready"]
+
+
+def test_evaluate_exposes_sources_age_and_effect():
+    data = feed(events=[{"currency": "USD", "title": "CPI", "at": NOW + 100, "impact": "high"}])
+    result = evaluate_context(data, "frxEURUSD", NOW, 14400)
+    assert result["sources"]
+    calendar = next(row for row in result["sources"] if row["id"] == "calendar")
+    assert calendar["effect"] == "blocks"
+    assert calendar["age_seconds"] == 0
+    assert result["events"][0]["effect"] == "blocks"
 
 
 def test_server_clock_sample_cannot_manufacture_news_coverage(tmp_path):
@@ -78,7 +92,8 @@ def test_server_clock_sample_cannot_manufacture_news_coverage(tmp_path):
     path = tmp_path / "context.sample.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     loaded = complete(load_context(SimpleNamespace(
-        forex_context_file=str(path), forex_context_url=None, trading_economics_api_key=None), NOW, 14400))
+        forex_context_file=str(path), forex_context_url=None, trading_economics_api_key=None,
+        forex_public_news=False), NOW, 14400))
     assert loaded["as_of"] == NOW - 86400
     assert loaded["events"] == []
     result = evaluate_context(loaded, "frxEURUSD", NOW, 14400)

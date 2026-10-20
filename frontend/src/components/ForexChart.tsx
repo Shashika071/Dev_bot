@@ -24,6 +24,40 @@ const OVERLAYS: { id: OverlayKey; label: string }[] = [
   { id: 'signals', label: 'Signals' },
 ];
 
+function pct(value?: number | null): string {
+  if (value == null || !Number.isFinite(value)) return '—';
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function MlIdea({ idea }: { idea?: ForexChartPayload['ml_idea'] }) {
+  const rise = idea?.p_rise;
+  const fall = idea?.p_fall;
+  const call = idea?.direction || 'NO TRADE';
+  const tone = call === 'RISE' ? 'positive' : call === 'FALL' ? 'negative' : 'neutral';
+  return (
+    <div className="fx-idea" aria-live="polite">
+      <div className="fx-idea-head">
+        <strong>ML idea · confidence</strong>
+        <span className={`fx-tag fx-${tone}`}>{call}</span>
+        <span className="fx-tag">{idea?.level ? `${idea.level} confidence` : 'waiting'}</span>
+      </div>
+      <div className="fx-idea-bar" role="img" aria-label={`Rise ${pct(rise)}, Fall ${pct(fall)}`}>
+        <span className="fx-idea-rise" style={{ width: `${Math.max(0, Math.min(100, (rise ?? 0) * 100))}%` }} />
+        <span className="fx-idea-fall" style={{ width: `${Math.max(0, Math.min(100, (fall ?? 0) * 100))}%` }} />
+      </div>
+      <div className="fx-idea-split">
+        <span>Rise {pct(rise)}</span>
+        <span>Fall {pct(fall)}</span>
+      </div>
+      <p>
+        {idea?.reason || 'Scores the latest EURUSD model on closed 15m, 1h, and 4h bars. Near 50/50 stays NO TRADE.'}
+        {idea?.held_out_accuracy != null ? ` Held-out hit rate ${(idea.held_out_accuracy * 100).toFixed(1)}%.` : ''}
+        {' '}This does not place or block a demo trade.
+      </p>
+    </div>
+  );
+}
+
 function asUnix(epoch: number): CandlestickData['time'] {
   return Math.floor(epoch) as CandlestickData['time'];
 }
@@ -411,6 +445,7 @@ export function ForexChart({
           </label>
         ))}
       </div>
+      {symbol === 'frxEURUSD' && <MlIdea idea={payload?.ml_idea} />}
       {error && <p className="fx-inline-error">{error}</p>}
       {loading && !payload && <p className="fx-muted"><Loader2 size={14} className="spin" /> Loading {timeframe} history…</p>}
       <div ref={host} className="fx-chart-host" />

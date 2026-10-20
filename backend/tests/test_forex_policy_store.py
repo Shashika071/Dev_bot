@@ -35,6 +35,13 @@ def test_requires_zero_barrier_both_directions_and_accepted_duration():
     assert supports_rise_fall(contracts, 14400)
     assert not supports_rise_fall(contracts[:1], 14400)
     assert not supports_rise_fall([{**row, "barriers": 1} for row in contracts], 14400)
+    listed = [{"contract_type": kind, "barriers": 1, "contract_category": "callput",
+               "barrier": "+0.00044", "min_contract_duration": "15m", "max_contract_duration": "1d"}
+              for kind in ("CALL", "PUT")]
+    assert supports_rise_fall(listed, 14400)
+    assert not supports_rise_fall(
+        [{"contract_type": kind, "barriers": 1, "contract_category": "higherlower"} for kind in ("HIGHER", "LOWER")],
+        14400)
     assert not supports_rise_fall(contracts, 172800)
     assert not supports_rise_fall([{**row, "start_type": "forward"} for row in contracts], 14400)
 

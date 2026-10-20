@@ -12,8 +12,9 @@ from app.deriv.client import DerivWSClient
 from app.execution.gates import server_execution_allowed
 from app.forex.analysis import analyze_forex, chart_overlays
 from app.forex.context import evaluate_context, load_context
+from app.forex.history import history_root, load_candles
 from app.forex.jobs import forex_jobs
-from app.forex.ml.predict import ml_blocks_entry, ml_status, predict_frames
+from app.forex.ml.predict import ml_blocks_entry, ml_status, predict_frames, score_idea
 from app.forex.policy import TIMEFRAMES, session_context, supports_rise_fall, validate_config
 from app.forex.store import ForexStore
 from app.trade_prefs import load_trade_prefs, token_status
@@ -157,6 +158,9 @@ class ForexService:
         self._store = store
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
+        self._live_frames: dict[str, list] = {}
+        self._history_cache: dict[str, list] | None = None
+        self._ml_idea: dict | None = None
 
     @property
     def store(self) -> ForexStore:
@@ -177,8 +181,9 @@ class ForexService:
         if not news.get("ready"):
             news.setdefault(
                 "setup_hint",
-                "Configure a timestamped FOREX_CONTEXT_FILE, live FOREX_CONTEXT_URL, or "
-                "TRADING_ECONOMICS_API_KEY. Sample data cannot authorize trades. See docs/forex-rise-fall.md.",
+                "Public calendar + central-bank feeds load automatically when enabled. "
+                "Or set FOREX_CONTEXT_FILE / FOREX_CONTEXT_URL / TRADING_ECONOMICS_API_KEY. "
+                "Sample clock:server files cannot authorize trades.",
             )
         jobs = forex_jobs.snapshot()
         return {**state, "news": news, "execution": execution_status(), "daily_count": daily_count,
@@ -187,9 +192,32 @@ class ForexService:
                             "timezone": "Asia/Colombo", "contract": "CALL_PUT_zero_barrier",
                             "hybrid": "checklist_plus_ml", "ml_symbol": "frxEURUSD"},
                 "ml": ml_status(settings.model_dir),
+                "ml_idea": self._ml_idea,
                 "history": jobs["history"],
                 "train": jobs["train"],
                 "signals": self.store.signals()}
+
+    def _history_tail(self) -> dict[str, list]:
+        if self._history_cache is None:
+            root = history_root(settings.model_dir)
+            self._history_cache = {tf: load_candles(root, tf)[-400:] for tf in ("15m", "1h", "4h")}
+        return self._history_cache
+
+    def _refresh_idea(self, symbol: str, timeframe: str, candles: list[dict]) -> dict | None:
+        """Rescore the display-only lean from closed bars. Does not place trades."""
+        if symbol != "frxEURUSD":
+            return None
+        frames = {tf: list(rows) for tf, rows in self._history_tail().items()}
+        if self._live_frames:
+            for tf, rows in self._live_frames.items():
+                if rows:
+                    frames[tf] = _merge_candles(frames.get(tf) or [], rows)[-400:]
+        if candles and timeframe in {"15m", "1h", "4h"}:
+            frames[timeframe] = _merge_candles(frames.get(timeframe) or [], candles)[-400:]
+        idea = score_idea(settings.model_dir, frames, now=int(time.time()))
+        if idea.get("state") == "idea" or not (self._ml_idea and self._ml_idea.get("state") == "idea"):
+            self._ml_idea = idea
+        return self._ml_idea
 
     async def chart(self, symbol: str, timeframe: str = "15m", count: int | None = None) -> dict:
         symbol = str(symbol or "frxEURUSD")
@@ -246,6 +274,7 @@ class ForexService:
             "analysis": analysis,
             "signals": signals,
             "ml": (analysis or {}).get("ml") or ml_status(settings.model_dir),
+            "ml_idea": self._refresh_idea(symbol, timeframe, candles),
             "server_time": int(time.time()),
             "last_candle_epoch": last_epoch,
             "last_candle_age_seconds": max(0, int(time.time()) - last_epoch - granularity) if last_epoch else None,
@@ -357,6 +386,11 @@ class ForexService:
                     except Exception as exc:
                         pair_blockers.append(f"Market history/contract lookup failed ({type(exc).__name__})")
                 histories[symbol] = frames
+                if symbol == "frxEURUSD" and frames.get("15m"):
+                    self._live_frames = {
+                        tf: list(frames.get(tf) or [])[-400:]
+                        for tf in ("15m", "1h", "4h")
+                    }
                 # Recompute time after network requests, not at the start of a slow scan.
                 checked_at = int(time.time())
                 analysis = analyze_forex(frames, symbol=symbol, now=checked_at, duration_seconds=duration)
@@ -382,6 +416,9 @@ class ForexService:
                         analysis["ml_note"] = ml_view.get("reason")
                 else:
                     analysis["ml"] = ml_view
+                if symbol == "frxEURUSD":
+                    analysis["ml_idea"] = score_idea(settings.model_dir, frames, now=checked_at)
+                    self._ml_idea = analysis["ml_idea"]
                 analysis["blockers"] += pair_blockers + news["blockers"] + sessions["blockers"]
                 analysis["factors"] += news["factors"] + sessions["factors"]
                 analysis["news"] = news
@@ -402,8 +439,32 @@ class ForexService:
             analysis["factors"].sort(key=lambda item: item["id"])
         news_ready = any(a["news"]["ready"] for a in analyses)
         news_reason = "Calendar coverage ready for at least one pair" if news_ready else "; ".join(dict.fromkeys(a["news"]["reason"] for a in analyses))
-        self.store.update_state(analyses=analyses, last_scan_at=datetime.now(timezone.utc).isoformat(),
-                                last_error=None, news={"ready": news_ready, "reason": news_reason, "source": context.get("source")})
+        # Prefer the richest per-pair news payload for the desk UI.
+        desk = {}
+        for analysis in analyses:
+            candidate_news = analysis.get("news") or {}
+            if candidate_news.get("sources"):
+                desk = candidate_news
+                break
+        if not desk and analyses:
+            desk = analyses[0].get("news") or {}
+        self.store.update_state(
+            analyses=analyses,
+            last_scan_at=datetime.now(timezone.utc).isoformat(),
+            last_error=None,
+            news={
+                "ready": news_ready,
+                "reason": news_reason,
+                "source": context.get("source") or desk.get("source"),
+                "sources": desk.get("sources") or [],
+                "events": desk.get("events") or [],
+                "headlines": desk.get("headlines") or [],
+                "attribution": desk.get("attribution") or context.get("attribution"),
+                "public": bool(context.get("public") or desk.get("public")),
+                "as_of": desk.get("as_of") or context.get("as_of"),
+                "age_seconds": desk.get("age_seconds"),
+            },
+        )
         candidates = sorted((a for a in analyses if a["ready"]), key=lambda a: a["score"], reverse=True)
         current = self.store.state()
         if not current.get("running") or current["config"] != config or not candidates:
