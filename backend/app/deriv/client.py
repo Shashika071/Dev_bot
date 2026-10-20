@@ -397,11 +397,14 @@ class DerivWSClient:
 
     # --- Convenience methods for public (non-trading) operations ---
 
-    async def get_active_symbols(self, product_type: str = "basic") -> dict:
-        """Fetch available instruments."""
-        return await self.send({
-            "active_symbols": product_type,
-        })
+    async def get_active_symbols(self, product_type: str = "brief") -> dict:
+        """Fetch available instruments.
+
+        Public Options WS requires ``active_symbols`` to be ``brief`` or
+        ``full`` (legacy ``basic`` is rejected).
+        """
+        mode = product_type if product_type in {"brief", "full"} else "brief"
+        return await self.send({"active_symbols": mode})
 
     async def get_contracts_for(self, symbol: str) -> dict:
         """Fetch available contract types for a symbol."""

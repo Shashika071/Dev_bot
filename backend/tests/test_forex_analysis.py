@@ -4,7 +4,7 @@ import math
 
 import pytest
 
-from app.forex.analysis import INTERVALS, analyze_forex
+from app.forex.analysis import INTERVALS, analyze_forex, chart_overlays
 
 
 NOW = 1_792_396_800
@@ -224,3 +224,16 @@ def test_short_expiry_is_not_silently_accepted():
     assert not result["ready"]
     assert result["direction"] == "WAIT"
     assert any("four-hour expiry" in item for item in result["blockers"])
+
+
+def test_chart_overlays_available_without_full_scan():
+    rows = history(900, count=120)
+    overlays = chart_overlays(rows)
+    assert "levels" in overlays and "events" in overlays
+    levels = overlays["levels"]
+    assert isinstance(levels["support_resistance"], list)
+    assert isinstance(levels["supply_demand"], list)
+    assert isinstance(levels["liquidity"], list)
+    assert "available" in levels["fibonacci"]
+    # Enough structure for at least liquidity swings from pivots.
+    assert len(levels["liquidity"]) >= 1 or levels["fibonacci"]["available"]

@@ -102,3 +102,32 @@ def test_scan_lease_and_stop_are_durable(tmp_path):
     assert two.acquire(1002)
     one.update_state(running=False)
     assert two.reserve(signal(1003), 1003)[1] == "Scanner stopped"
+
+
+def test_reservation_rejects_config_change_before_any_attempt(tmp_path):
+    store = ForexStore(str(tmp_path / "forex.sqlite"))
+    previous = store.update_state(running=True, config={"demo_auto_trade": False})["config"]
+    store.update_state(config={"demo_auto_trade": True})
+    row, reason = store.reserve(signal(1000), 1000, expected_config=previous)
+    assert row is None and "Configuration changed" in reason
+    assert store.signals() == []
+
+
+def test_committed_stakes_bound_maximum_daily_loss_without_settlement(tmp_path):
+    store = ForexStore(str(tmp_path / "forex.sqlite"))
+    store.update_state(running=True)
+    now = stamp("2026-10-19T00:00:00")
+    row, _ = store.reserve({**signal(now), "stake": 1}, now, stake_budget=1)
+    store.finish(row["id"], {"ok": True, "status": "bought"})
+    next_row, reason = store.reserve(signal(now + 14400, "later"), now + 14400, stake_budget=1)
+    assert next_row is None and "stake budget" in reason
+
+
+def test_purchase_delay_extends_overlap_guard_in_database(tmp_path):
+    store = ForexStore(str(tmp_path / "forex.sqlite"))
+    store.update_state(running=True)
+    now = stamp("2026-10-19T00:00:00")
+    row, _ = store.reserve(signal(now), now)
+    store.finish(row["id"], {"ok": True, "status": "bought", "estimated_expiry_epoch": now + 14520})
+    assert store.signals()[0]["expiry_epoch"] == now + 14520
+    assert store.reserve(signal(now + 14400, "later"), now + 14400)[0] is None

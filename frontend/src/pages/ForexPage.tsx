@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Activity, AlertTriangle, ArrowDownRight, ArrowUpRight, CheckCircle, ChevronDown, Clock, Globe2, Loader2, Pause, Play, RefreshCw, ShieldCheck, X } from 'lucide-react';
+import { Activity, AlertTriangle, ArrowDownRight, ArrowUpRight, Brain, CheckCircle, ChevronDown, Clock, Download, Globe2, Loader2, Pause, Play, RefreshCw, ShieldCheck, X } from 'lucide-react';
 import { forexApi, type ForexAnalysis, type ForexFactor, type ForexStatus, type ForexSymbol } from '../api/client';
+import { ForexChart } from '../components/ForexChart';
 import './ForexPage.css';
 
 const FACTORS = [
@@ -94,7 +95,7 @@ export function ForexPage() {
   const [online, setOnline] = useState(false);
   const [loading, setLoading] = useState(true);
   const [symbolLoading, setSymbolLoading] = useState(true);
-  const [busy, setBusy] = useState<'scan' | 'start' | 'stop' | 'account' | null>(null);
+  const [busy, setBusy] = useState<'scan' | 'start' | 'stop' | 'account' | 'history' | 'train' | null>(null);
   const [token, setToken] = useState('');
   const [appId, setAppId] = useState('');
   const [accountMessage, setAccountMessage] = useState('');
@@ -210,15 +211,63 @@ export function ForexPage() {
   const signals = status?.signals || [];
   const newsReady = Boolean(status?.news?.ready);
   const newsBlocked = online && status != null && !newsReady;
+  const chartSymbol = selectedAnalysis || selectedSymbols[0] || status?.config?.symbols?.[0] || 'frxEURUSD';
+  const history = status?.history;
+  const train = status?.train;
+  const ml = status?.ml;
+  const historyRunning = busy === 'history' || history?.job?.status === 'running';
+  const trainRunning = busy === 'train' || train?.status === 'running';
+
+  const runHistory = async () => {
+    if (mutation.current) return;
+    const requestRevision = ++revision.current;
+    mutation.current = true;
+    setBusy('history');
+    setError('');
+    try {
+      await forexApi.historyDownload();
+      const next = await forexApi.status();
+      if (alive.current && revision.current === requestRevision) applyStatus(next);
+    } catch (err) {
+      if (alive.current && revision.current === requestRevision) setError(err instanceof Error ? err.message : 'History download failed.');
+    } finally {
+      if (revision.current === requestRevision) {
+        mutation.current = false;
+        if (alive.current) setBusy(null);
+      }
+    }
+  };
+
+  const runTrain = async () => {
+    if (mutation.current) return;
+    const requestRevision = ++revision.current;
+    mutation.current = true;
+    setBusy('train');
+    setError('');
+    try {
+      await forexApi.train();
+      const next = await forexApi.status();
+      if (alive.current && revision.current === requestRevision) applyStatus(next);
+    } catch (err) {
+      if (alive.current && revision.current === requestRevision) setError(err instanceof Error ? err.message : 'Training failed.');
+    } finally {
+      if (revision.current === requestRevision) {
+        mutation.current = false;
+        if (alive.current) setBusy(null);
+      }
+    }
+  };
 
   return <div className="fx-page">
     <header className="fx-header">
-      <div><div className="fx-eyebrow"><Globe2 size={14} /> FOREX · RISE / FALL</div><h1>Patient setups. Clear decisions.</h1><p>Four-hour CALL/PUT on Deriv majors · maximum two signals per Colombo day · not Touch.</p></div>
+      <div><div className="fx-eyebrow"><Globe2 size={14} /> FOREX · RISE / FALL</div><h1>Patient setups. Clear decisions.</h1><p>Four-hour CALL/PUT · hybrid checklist + EURUSD ML filter · maximum two signals per Colombo day.</p></div>
       <span className="fx-demo-pill"><ShieldCheck size={15} /> Demo account only</span>
     </header>
 
     {!loading && !online && <div className="fx-notice fx-error" role="alert"><AlertTriangle size={18} /><div><strong>Forex service unavailable</strong><p>{status ? `Showing the last response from ${dateTime(lastReceived)}. The scanner state may have changed.` : 'Start the backend with the Forex routes enabled. This page reconnects automatically.'}</p></div></div>}
     {error && <div className="fx-notice fx-error" role="alert"><AlertTriangle size={18} /><div><strong>Request could not complete</strong><p>{error}</p></div><button type="button" className="fx-icon-button" aria-label="Dismiss request error" onClick={() => setError('')}><X size={16} /></button></div>}
+
+    <ForexChart symbol={chartSymbol} online={online} />
 
     <section className="fx-stats" aria-label="Scanner summary">
       <div className="fx-stat"><span>SCANNER</span><strong className={online && status?.running ? 'fx-positive' : ''}>{loading ? 'Connecting' : !online ? 'Unknown' : status?.running ? 'Running' : 'Stopped'}</strong><small>{status?.running ? 'Evaluates markets every 5 minutes' : 'Start to enable automatic demo entries'}</small></div>
@@ -252,6 +301,7 @@ export function ForexPage() {
         <div className="fx-readiness-item">{status?.execution?.allowed ? <CheckCircle size={18} className="fx-positive" /> : <AlertTriangle size={18} className="fx-neutral" />}<div><strong>{status?.execution?.allowed ? 'Demo execution available' : 'Demo execution blocked'}</strong><p>{status?.execution?.reason || 'Waiting for account and execution checks.'}</p></div></div>
         <div className="fx-readiness-item">{newsReady ? <CheckCircle size={18} className="fx-positive" /> : <AlertTriangle size={18} className="fx-neutral" />}<div><strong>{newsReady ? 'Fundamental context ready' : 'News / calendar needs attention'}</strong><p>{status?.news?.reason || 'A fresh economic calendar and fundamental context are required.'}</p>{status?.news?.source && <small>Source: {status.news.source}</small>}</div></div>
         <div className="fx-readiness-item"><Clock size={18} /><div><strong>{remaining} of {cap} slots left today</strong><p>Hard cap {cap}/day · {durationHours}h cooldown between signals · Colombo day. Missing evidence or conflicting setups can mean no trade.</p></div></div>
+        <div className="fx-readiness-item">{ml?.ready ? <CheckCircle size={18} className="fx-positive" /> : <Brain size={18} />}<div><strong>{ml?.ready ? 'EURUSD ML hybrid filter active' : 'ML filter inactive — train first'}</strong><p>{ml?.reason || 'Checklist still applies. With a trained model, EURUSD also needs ML direction agreement before emit.'}</p></div></div>
         <p className="fx-footnote">Rule-based research; no calibrated win probability. Confluence scores describe agreement between checks, not evidence of profitability. Missing fundamentals remain unavailable. Spread and exchange volume stay unavailable on public Deriv FX.</p>
         {status?.last_error && <div className="fx-inline-error" role="status"><strong>Latest scanner issue:</strong> {status.last_error}</div>}
         <details className="fx-connection">
@@ -268,7 +318,7 @@ export function ForexPage() {
           <summary>Connect fundamental data <span className={`fx-tag ${newsReady ? 'fx-positive' : ''}`}>{newsReady ? 'Ready' : 'Required'}</span></summary>
           <p>Entries stay blocked until a fresh calendar covers both currencies of the watched pairs for the full 4-hour hold.</p>
           <ol className="fx-setup-steps">
-            <li>Copy <code>data/forex/context.sample.json</code> (uses <code>clock: server</code> so timestamps stay fresh) or point to your live feed.</li>
+            <li>Configure a live calendar feed or a genuinely updated context file. Sample files and <code>clock: server</code> cannot authorize trades.</li>
             <li>Set <code>FOREX_CONTEXT_FILE</code>, <code>FOREX_CONTEXT_URL</code>, or <code>TRADING_ECONOMICS_API_KEY</code> in <code>.env</code>.</li>
             <li>Restart the backend, then click <strong>Scan now</strong>. High-impact events in the hold window still block entry.</li>
           </ol>
@@ -278,9 +328,44 @@ export function ForexPage() {
       </section>
     </div>
 
+    <div className="fx-control-grid fx-ml-grid">
+      <section className="fx-panel">
+        <div className="fx-panel-heading"><h2><Download size={18} /> EURUSD history</h2><span className="fx-tag">2–3 years · 15m/1h/4h</span></div>
+        <p className="fx-muted">Download Deriv candles for ML training. Other pairs stay rules-only until a later release.</p>
+        <div className="fx-stats-inline">
+          {(['15m', '1h', '4h'] as const).map(tf => {
+            const row = history?.timeframes?.[tf];
+            return <div key={tf}><span>{tf}</span><strong>{row?.bars?.toLocaleString() ?? '—'}</strong><small>{row?.days ? `${row.days} days` : 'Not downloaded'}</small></div>;
+          })}
+        </div>
+        <div className="fx-actions">
+          <button type="button" className="fx-button fx-primary" disabled={!online || historyRunning} onClick={() => void runHistory()}>
+            {historyRunning ? <Loader2 size={16} className="spin" /> : <Download size={16} />}
+            {historyRunning ? (history?.job?.progress || 'Downloading…') : 'Download EURUSD history'}
+          </button>
+        </div>
+        {history?.job?.error && <p className="fx-inline-error">{history.job.error}</p>}
+        <p className="fx-footnote">{history?.ready_for_train ? 'History looks sufficient to train.' : 'Need enough bars on all three timeframes. If Deriv rate-limits, wait a few minutes and download again — progress is kept, and 1h/4h can be built from 15m.'}</p>
+      </section>
+      <section className="fx-panel">
+        <div className="fx-panel-heading"><h2><Brain size={18} /> Hybrid ML filter</h2><span className={`fx-tag ${ml?.ready ? 'fx-positive' : ''}`}>{ml?.ready ? 'Active' : 'Inactive'}</span></div>
+        <p className="fx-muted">{ml?.reason || 'Train after history download. Checklist score ≥ 80 and news gates still required.'}</p>
+        {ml?.metrics && <p className="fx-muted">Test accuracy {describe(ml.metrics.test_accuracy)} · AUC {describe(ml.metrics.test_auc)} · threshold {describe(ml.threshold)}</p>}
+        {train?.result?.metrics && <p className="fx-muted">Last train: accuracy {describe(train.result.metrics.test_accuracy)} · samples {describe(train.result.metrics.samples)}</p>}
+        <div className="fx-actions">
+          <button type="button" className="fx-button" disabled={!online || trainRunning || !history?.ready_for_train} onClick={() => void runTrain()}>
+            {trainRunning ? <Loader2 size={16} className="spin" /> : <Brain size={16} />}
+            {trainRunning ? (train?.progress || 'Training…') : 'Train EURUSD model'}
+          </button>
+        </div>
+        {train?.error && <p className="fx-inline-error">{train.error}</p>}
+        <p className="fx-footnote">When the model is ready, EURUSD signals need checklist + ML agreement. Without a model, rules-only continues.</p>
+      </section>
+    </div>
+
     <section className="fx-panel fx-analysis">
       <div className="fx-panel-heading"><div><h2>Market workspace</h2><p>Inspect the evidence behind each decision.</p></div>{analyses.length > 0 && <label className="fx-analysis-select">Market<select value={active?.symbol || ''} onChange={event => setSelectedAnalysis(event.target.value)}>{analyses.map(item => <option key={item.symbol} value={item.symbol}>{symbols.find(symbol => symbol.symbol === item.symbol)?.display_name || item.symbol}</option>)}</select></label>}</div>
-      {active ? <div className="fx-analysis-summary"><div><span className="fx-eyebrow">{active.symbol}</span><div className="fx-analysis-decision"><Direction direction={active.direction} /><span className="fx-score">{Number.isFinite(active.score) ? active.score.toFixed(0) : '—'}<small> / 100 confluence</small></span></div></div><div className={`fx-analysis-state ${active.ready ? 'fx-positive' : 'fx-neutral'}`}>{active.ready ? 'Analysis gates passed' : 'Waiting for a qualified setup'}<small>Execution checks still apply</small></div></div> : <div className="fx-empty"><Activity size={25} /><strong>No analysis yet</strong><p>Scan the configured markets to see trends, setups and any missing data.</p></div>}
+      {active ? <div className="fx-analysis-summary"><div><span className="fx-eyebrow">{active.symbol}</span><div className="fx-analysis-decision"><Direction direction={active.direction} /><span className="fx-score">{Number.isFinite(active.score) ? active.score.toFixed(0) : '—'}<small> / 100 confluence</small></span></div></div><div className={`fx-analysis-state ${active.ready ? 'fx-positive' : 'fx-neutral'}`}>{active.ready ? 'Analysis gates passed' : 'Waiting for a qualified setup'}<small>{active.ml?.ready ? `Hybrid ML ${active.ml.hybrid_passed ? 'agrees' : 'blocked'} · ${describe(active.ml.direction)} @ ${describe(active.ml.probability)}` : 'Execution checks still apply'}</small></div></div> : <div className="fx-empty"><Activity size={25} /><strong>No analysis yet</strong><p>Scan the configured markets to see trends, setups and any missing data.</p></div>}
       {active?.blockers && active.blockers.length > 0 && <div className="fx-blockers"><strong><AlertTriangle size={15} /> Holding entries</strong><ul>{active.blockers.map((reason, index) => <li key={index}>{reason}</li>)}</ul></div>}
       {active?.reasons && active.reasons.length > 0 && <div className="fx-reasons"><strong>Setup evidence</strong><ul>{active.reasons.map((reason, index) => <li key={index}>{reason}</li>)}</ul></div>}
       <div className="fx-timeframes">{TIMEFRAMES.map(timeframe => <TimeframeCard key={timeframe} analysis={active} timeframe={timeframe} />)}</div>

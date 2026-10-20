@@ -5,6 +5,17 @@ from app.forex.context import evaluate_context, load_context
 NOW = 1792400400
 
 
+def complete(coroutine):
+    """Drive fake/file-only awaits; an unexpected actual I/O suspension fails."""
+    try:
+        coroutine.send(None)
+    except StopIteration as done:
+        return done.value
+    finally:
+        coroutine.close()
+    raise AssertionError("Unexpected asynchronous I/O in a unit test")
+
+
 def feed(**updates):
     return {"source": "Test calendar", "as_of": NOW, "coverage_start": NOW - 3600,
             "coverage_end": NOW + 86400, "currencies": ["EUR", "USD"], "events": [], **updates}
@@ -44,41 +55,56 @@ def test_sourced_high_risk_fundamental_blocks_but_old_data_not_used():
     assert next(f for f in result["factors"] if f["id"] == 27)["status"] == "unavailable"
 
 
-@pytest.mark.asyncio
-async def test_missing_provider_fails_closed_without_network():
+def test_missing_provider_fails_closed_without_network():
     from types import SimpleNamespace
     settings = SimpleNamespace(forex_context_url=None, forex_context_file=None, trading_economics_api_key=None)
-    assert "error" in await load_context(settings, NOW, 14400)
+    assert "error" in complete(load_context(settings, NOW, 14400))
 
 
-@pytest.mark.asyncio
-async def test_local_feed_loading(tmp_path):
+def test_local_feed_loading(tmp_path):
     import json
     from types import SimpleNamespace
     path = tmp_path / "context.json"
     path.write_text(json.dumps(feed()))
-    result = await load_context(SimpleNamespace(
-        forex_context_file=str(path), forex_context_url=None, trading_economics_api_key=None), NOW, 14400)
+    result = complete(load_context(SimpleNamespace(
+        forex_context_file=str(path), forex_context_url=None, trading_economics_api_key=None), NOW, 14400))
     assert evaluate_context(result, "frxEURUSD", NOW, 14400)["ready"]
 
 
-@pytest.mark.asyncio
-async def test_server_clock_sample_stays_fresh_without_inventing_events(tmp_path):
+def test_server_clock_sample_cannot_manufacture_news_coverage(tmp_path):
     import json
-    from pathlib import Path
     from types import SimpleNamespace
-    sample = Path(__file__).resolve().parents[2] / "data" / "forex" / "context.sample.json"
-    payload = json.loads(sample.read_text(encoding="utf-8"))
-    assert payload.get("clock") == "server"
+    payload = feed(clock="server", as_of=NOW - 86400)
     path = tmp_path / "context.sample.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
-    loaded = await load_context(SimpleNamespace(
-        forex_context_file=str(path), forex_context_url=None, trading_economics_api_key=None), NOW, 14400)
-    assert loaded["as_of"] == NOW
-    assert loaded["coverage_start"] <= NOW - 3600
-    assert loaded["coverage_end"] >= NOW + 14400 + 1800
+    loaded = complete(load_context(SimpleNamespace(
+        forex_context_file=str(path), forex_context_url=None, trading_economics_api_key=None), NOW, 14400))
+    assert loaded["as_of"] == NOW - 86400
     assert loaded["events"] == []
     result = evaluate_context(loaded, "frxEURUSD", NOW, 14400)
-    assert result["ready"]
-    assert next(f for f in result["factors"] if f["id"] == 26)["status"] == "clear"
+    assert not result["ready"]
+    assert next(f for f in result["factors"] if f["id"] == 26)["status"] == "blocked"
+
+
+def test_provider_range_covers_network_delay(monkeypatch):
+    from types import SimpleNamespace
+    from datetime import datetime, timezone
+    from app.forex import context
+
+    class HTTP:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, *args, **kwargs):
+            date = datetime.fromtimestamp(NOW + 40000, timezone.utc).isoformat()
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: [
+                {"Currency": c, "Date": date, "Event": "Release", "Importance": 1, "DateSpan": 0} for c in ("EUR", "USD")])
+
+    monkeypatch.setattr(context.httpx, "AsyncClient", lambda **kwargs: HTTP())
+    loaded = complete(load_context(SimpleNamespace(forex_context_file=None, forex_context_url=None,
+                                                  trading_economics_api_key="fake-test-key"), NOW, 14400))
+    assert evaluate_context(loaded, "frxEURUSD", NOW + 120, 14400)["ready"]
 

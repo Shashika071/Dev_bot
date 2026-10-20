@@ -139,6 +139,58 @@ def _supply_demand(rows: list[dict]) -> list[dict]:
     return zones[-8:]
 
 
+def chart_overlays(candles: list[dict]) -> dict:
+    """Factor layers for the live chart from the same closed candles shown.
+
+    Independent of the last scanner run so overlays work before Scan now.
+    """
+    rows = sorted(
+        (row for row in candles if row and int(row.get("epoch") or 0) > 0),
+        key=lambda row: int(row["epoch"]),
+    )
+    if len(rows) < 30:
+        return {
+            "levels": {
+                "support_resistance": [],
+                "fibonacci": {"available": False, "levels": []},
+                "supply_demand": [],
+                "liquidity": [],
+            },
+            "events": [],
+        }
+    points = swings(rows)
+    structure = structure_state(points)
+    bias = "RISE" if structure == "HH_HL" else "FALL" if structure == "LH_LL" else "WAIT"
+    zones = support_resistance(rows, points)
+    fib = _fib(points, bias)
+    if not fib["available"] and points:
+        # Show retracement of the latest swing even without a clear bias so the UI has levels.
+        fib = _fib(points, "RISE" if points[-1]["kind"] == "high" else "FALL")
+    supply_demand = _supply_demand(rows)
+    liquidity = [
+        {
+            "type": "prior_swing_high" if point["kind"] == "high" else "prior_swing_low",
+            "price": point["price"],
+            "epoch": point["epoch"],
+            "heuristic": True,
+        }
+        for point in points[-10:]
+    ]
+    candle_events = detect_at(rows, allow_gaps=True)
+    charts = chart_patterns(rows)
+    last_epoch = int(rows[-1]["epoch"])
+    breaks = [event for event in breakout_events(rows) if int(event.get("epoch") or 0) == last_epoch]
+    return {
+        "levels": {
+            "support_resistance": _public_events(zones),
+            "fibonacci": fib,
+            "supply_demand": supply_demand,
+            "liquidity": liquidity,
+        },
+        "events": _public_events(candle_events[-12:] + charts[-8:] + breaks),
+    }
+
+
 def analyze_forex(candles_by_interval: dict, *, symbol: str, now: int, duration_seconds: int = 14400) -> dict:
     """Return a technical candidate; ``ready`` does not authorize execution.
 

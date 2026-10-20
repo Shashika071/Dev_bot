@@ -22,6 +22,7 @@ from app.trade_prefs import get_trade_token, load_trade_prefs, resolve_deriv_app
 
 MAX_QUOTE_AGE_SECONDS = 30
 MAX_FUTURE_SKEW_SECONDS = 5
+FOUR_HOURS_SECONDS = 14400
 
 
 class _Blocked(ValueError):
@@ -159,7 +160,7 @@ def _validate_proposal(proposal: Any, *, stake: float, now: float) -> tuple[str,
 
 
 async def execute_demo(signal: dict[str, Any], *, stake: float = 1.0) -> dict[str, Any]:
-    """Buy one 1–24 hour Forex Rise/Fall contract on a verified demo account.
+    """Buy one four-hour Forex Rise/Fall contract on a verified demo account.
 
     Returns ``status`` = ``bought``, ``blocked``, ``failed``, or ``unknown``.
     No credentials, OTP URLs, or raw broker exception messages enter the result.
@@ -185,8 +186,8 @@ async def execute_demo(signal: dict[str, Any], *, stake: float = 1.0) -> dict[st
         # every barrier field instead of forwarding or interpreting one.
         if any(k in signal for k in ("barrier", "barrier2", "barrier_input")):
             raise _Blocked("rise_fall_has_no_barrier")
-        seconds = _number(signal.get("duration_seconds", 14400), "invalid_duration")
-        if seconds != 14400:
+        seconds = _number(signal.get("duration_seconds", FOUR_HOURS_SECONDS), "invalid_duration")
+        if seconds != FOUR_HOURS_SECONDS:
             raise _Blocked("four_hour_duration_required")
         duration = 4
         contract_type = "CALL" if direction == "RISE" else "PUT"
@@ -235,7 +236,24 @@ async def execute_demo(signal: dict[str, Any], *, stake: float = 1.0) -> dict[st
         # No await occurs between final socket/gate verification and buy. In
         # particular do not reconnect onto a new account or retry a purchase.
         attempted_buy = True
-        bought = await client.buy(proposal_id, ask, parameters=parameters if client._use_pat else None)
+        try:
+            bought = await client.buy(proposal_id, ask, parameters=parameters if client._use_pat else None)
+        finally:
+            # The quote/reservation predates the actual purchase. Count the
+            # entire duration from the acknowledgement (or failed wait) so a
+            # delayed broker reply cannot let the next trade overlap this one.
+            context["estimated_expiry_epoch"] = math.ceil(time.time() + seconds)
+        for server_record in (proposal, bought):
+            if not isinstance(server_record, dict):
+                continue
+            try:
+                expiry = _number(server_record.get("date_expiry"), "invalid_server_expiry")
+            except _Blocked:
+                continue
+            if 0 < expiry <= 9999999999:
+                context["estimated_expiry_epoch"] = max(
+                    context["estimated_expiry_epoch"], math.ceil(expiry)
+                )
         if not isinstance(bought, dict) or not bought.get("contract_id"):
             return {"ok": False, "status": "unknown", "reason": "purchase_unconfirmed",
                     "error": "Purchase was not confirmed; check the demo account before resuming.", **context}

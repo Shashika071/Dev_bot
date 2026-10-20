@@ -28,6 +28,7 @@ class FakeClient:
         self.connected_accounts = []
         self.closed = False
         self.after_proposal = None
+        self.after_buy = None
         self.pat_url = "wss://api.derivws.com/trading/v1/options/ws/demo"
 
     async def authorize(self):
@@ -53,6 +54,8 @@ class FakeClient:
 
     async def buy(self, proposal_id, price, *, parameters=None):
         self.buys.append({"proposal_id": proposal_id, "price": price, "parameters": parameters})
+        if self.after_buy:
+            self.after_buy()
         if self.buy_error:
             raise self.buy_error
         return self.bought
@@ -110,6 +113,56 @@ def test_legacy_rise_fall_uses_account_currency_without_barrier(fake, direction,
                                 "duration": 4, "duration_unit": "h", "symbol": "frxEURUSD"}]
     assert client.buys == [{"proposal_id": "quote-1", "price": 1.0, "parameters": None}]
     assert client.closed is True
+
+
+@pytest.mark.parametrize("seconds", [3600, 7200, 10800, 18000, 86400])
+def test_only_chosen_four_hour_duration_is_allowed(fake, seconds):
+    client, _ = fake
+    result = _execute(ticket(duration_seconds=seconds))
+    assert result["reason"] == "four_hour_duration_required"
+    assert client.ws is None
+    assert client.requests == client.buys == []
+
+
+def test_delayed_acknowledgement_extends_conservative_expiry(fake, monkeypatch):
+    client, _ = fake
+    now = [NOW]
+    monkeypatch.setattr(execution.time, "time", lambda: now[0])
+    client.after_buy = lambda: now.__setitem__(0, NOW + 90.25)
+    client.bought["date_expiry"] = NOW + 14400
+    result = _execute(ticket())
+    assert result["status"] == "bought"
+    assert result["estimated_expiry_epoch"] == NOW + 14400 + 91
+
+
+@pytest.mark.parametrize("record", ["proposal", "bought"])
+def test_later_valid_server_expiry_is_preserved(fake, record):
+    client, _ = fake
+    getattr(client, record)["date_expiry"] = str(NOW + 15000)
+    result = _execute(ticket())
+    assert result["status"] == "bought"
+    assert result["estimated_expiry_epoch"] == NOW + 15000
+
+
+@pytest.mark.parametrize("expiry", [None, True, "invalid", "NaN", float("inf"), -1, 10_000_000_000])
+def test_invalid_optional_server_expiry_uses_acknowledgement_floor(fake, expiry):
+    client, _ = fake
+    client.bought["date_expiry"] = expiry
+    result = _execute(ticket())
+    assert result["status"] == "bought"
+    assert result["estimated_expiry_epoch"] == NOW + 14400
+
+
+def test_ambiguous_delayed_purchase_also_extends_expiry(fake, monkeypatch):
+    client, _ = fake
+    now = [NOW]
+    monkeypatch.setattr(execution.time, "time", lambda: now[0])
+    client.after_buy = lambda: now.__setitem__(0, NOW + 30)
+    client.buy_error = asyncio.TimeoutError()
+    result = _execute(ticket())
+    assert result["status"] == "unknown"
+    assert result["estimated_expiry_epoch"] == NOW + 14400 + 30
+    assert len(client.buys) == 1
 
 
 @pytest.mark.parametrize("account", [

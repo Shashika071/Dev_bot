@@ -10,11 +10,108 @@ from pathlib import Path
 from app.config import settings
 from app.deriv.client import DerivWSClient
 from app.execution.gates import server_execution_allowed
-from app.forex.analysis import analyze_forex
+from app.forex.analysis import analyze_forex, chart_overlays
 from app.forex.context import evaluate_context, load_context
+from app.forex.jobs import forex_jobs
+from app.forex.ml.predict import ml_blocks_entry, ml_status, predict_frames
 from app.forex.policy import TIMEFRAMES, session_context, supports_rise_fall, validate_config
 from app.forex.store import ForexStore
-from app.trade_prefs import token_status
+from app.trade_prefs import load_trade_prefs, token_status
+
+CHART_GRANULARITIES = {"15m": 900, "1h": 3600, "4h": 14400}
+# First paint should already feel deep; Deriv caps each page, so we page backward.
+CHART_DEFAULT_BARS = {"15m": 1200, "1h": 900, "4h": 600}
+CHART_PAGE_SIZE = 500
+CHART_MAX_PAGES = 6
+
+
+def captured_closed_candles(rows: list[dict], step: int, captured_at: int) -> list[dict]:
+    """Never let a saved partial candle mature into a purported closed candle."""
+    result = []
+    for row in rows:
+        try:
+            if int(row["epoch"]) + step <= captured_at:
+                result.append(dict(row))
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+    return result
+
+
+async def capture_candles(client, symbol: str, name: str) -> list[dict]:
+    # Use request start, a conservative lower bound on the provider's capture
+    # time. Even a response arriving just after a boundary may contain a partial.
+    captured_at = int(time.time())
+    rows = await client.get_candles(symbol, granularity=TIMEFRAMES[name], count=240)
+    return captured_closed_candles(rows, TIMEFRAMES[name], captured_at)
+
+
+def _merge_candles(*batches: list[dict]) -> list[dict]:
+    merged: dict[int, dict] = {}
+    for batch in batches:
+        for row in batch or []:
+            try:
+                epoch = int(row["epoch"])
+                if epoch <= 0:
+                    continue
+                merged[epoch] = {
+                    "epoch": epoch,
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                }
+            except (KeyError, TypeError, ValueError):
+                continue
+    return [merged[epoch] for epoch in sorted(merged)]
+
+
+def _aggregate_4h_from_1h(rows_1h: list[dict]) -> list[dict]:
+    """Build 4h OHLC when Deriv's native 4h feed is thin or unavailable."""
+    buckets: dict[int, dict] = {}
+    for row in sorted(rows_1h, key=lambda item: int(item["epoch"])):
+        epoch = int(row["epoch"])
+        bucket = epoch - (epoch % 14400)
+        bar = buckets.get(bucket)
+        if bar is None:
+            buckets[bucket] = {
+                "epoch": bucket,
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+            }
+        else:
+            bar["high"] = max(bar["high"], float(row["high"]))
+            bar["low"] = min(bar["low"], float(row["low"]))
+            bar["close"] = float(row["close"])
+    return [buckets[epoch] for epoch in sorted(buckets)]
+
+
+async def _paged_candles(
+    client: DerivWSClient,
+    symbol: str,
+    *,
+    granularity: int,
+    target: int,
+) -> list[dict]:
+    stored: list[dict] = []
+    end: int | str = "latest"
+    oldest_seen: int | None = None
+    for _ in range(CHART_MAX_PAGES):
+        batch = await client.get_candles(
+            symbol, granularity=granularity, count=min(CHART_PAGE_SIZE, target), end=end)
+        if not batch:
+            break
+        stored = _merge_candles(stored, batch)
+        first = int(batch[0]["epoch"])
+        if oldest_seen is not None and first >= oldest_seen:
+            break
+        oldest_seen = first
+        if len(stored) >= target:
+            break
+        end = first - 1
+        await asyncio.sleep(0.2)
+    return stored[-target:] if len(stored) > target else stored
 
 
 def execution_status() -> dict:
@@ -80,14 +177,82 @@ class ForexService:
         if not news.get("ready"):
             news.setdefault(
                 "setup_hint",
-                "Set FOREX_CONTEXT_FILE to data/forex/context.sample.json (or a live feed / "
-                "TRADING_ECONOMICS_API_KEY), then Scan now. See docs/forex-rise-fall.md.",
+                "Configure a timestamped FOREX_CONTEXT_FILE, live FOREX_CONTEXT_URL, or "
+                "TRADING_ECONOMICS_API_KEY. Sample data cannot authorize trades. See docs/forex-rise-fall.md.",
             )
+        jobs = forex_jobs.snapshot()
         return {**state, "news": news, "execution": execution_status(), "daily_count": daily_count,
                 "signals_remaining_today": remaining, "duration_hours": 4,
                 "product": {"mode": "forex_rise_fall", "duration_seconds": 14400, "daily_cap": 2,
-                            "timezone": "Asia/Colombo", "contract": "CALL_PUT_zero_barrier"},
+                            "timezone": "Asia/Colombo", "contract": "CALL_PUT_zero_barrier",
+                            "hybrid": "checklist_plus_ml", "ml_symbol": "frxEURUSD"},
+                "ml": ml_status(settings.model_dir),
+                "history": jobs["history"],
+                "train": jobs["train"],
                 "signals": self.store.signals()}
+
+    async def chart(self, symbol: str, timeframe: str = "15m", count: int | None = None) -> dict:
+        symbol = str(symbol or "frxEURUSD")
+        if not symbol.startswith("frx") or len(symbol) != 9:
+            raise ValueError("Only Forex pairs are supported on the chart")
+        if timeframe not in CHART_GRANULARITIES:
+            raise ValueError("Chart timeframe must be 15m, 1h, or 4h")
+        target = int(count) if count else CHART_DEFAULT_BARS[timeframe]
+        target = max(80, min(target, 2500))
+        granularity = CHART_GRANULARITIES[timeframe]
+        source = "deriv"
+        client = DerivWSClient()
+        try:
+            async with asyncio.timeout(75):
+                await client.connect()
+                try:
+                    candles = await _paged_candles(
+                        client, symbol, granularity=granularity, target=target)
+                except Exception:
+                    candles = []
+                # Native 4h can be thin/quirky on public Deriv; synthesize from 1h.
+                if timeframe == "4h" and len(candles) < 40:
+                    hourly = await _paged_candles(
+                        client, symbol, granularity=3600, target=min(target * 4, 2000))
+                    synthesized = _aggregate_4h_from_1h(hourly)
+                    if len(synthesized) > len(candles):
+                        candles = synthesized[-target:]
+                        source = "aggregated_1h"
+                if not candles:
+                    raise RuntimeError(f"No {timeframe} candles returned for {symbol}")
+        finally:
+            await client.disconnect()
+        # Always derive overlays from the candles on screen so toggles work
+        # without waiting for a scanner run. Prefer scan levels when present.
+        overlays = chart_overlays(candles)
+        state = self.store.state()
+        analysis = next((row for row in state.get("analyses", []) if row.get("symbol") == symbol), None)
+        scan_levels = (analysis or {}).get("levels") or {}
+        levels = scan_levels if any(scan_levels.get(key) for key in (
+            "support_resistance", "supply_demand", "liquidity")) or (
+            isinstance(scan_levels.get("fibonacci"), dict) and scan_levels["fibonacci"].get("available")
+        ) else overlays["levels"]
+        events = (analysis or {}).get("events") or overlays["events"]
+        signals = [row for row in self.store.signals() if row.get("symbol") == symbol][:40]
+        last_epoch = int(candles[-1]["epoch"]) if candles else 0
+        span_days = round((last_epoch - int(candles[0]["epoch"])) / 86400, 2) if len(candles) > 1 else 0.0
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "granularity": granularity,
+            "candles": candles,
+            "levels": levels,
+            "events": events,
+            "analysis": analysis,
+            "signals": signals,
+            "ml": (analysis or {}).get("ml") or ml_status(settings.model_dir),
+            "server_time": int(time.time()),
+            "last_candle_epoch": last_epoch,
+            "last_candle_age_seconds": max(0, int(time.time()) - last_epoch - granularity) if last_epoch else None,
+            "source": source,
+            "span_days": span_days,
+            "bar_count": len(candles),
+        }
 
     async def symbols(self) -> dict:
         client = DerivWSClient()
@@ -97,7 +262,8 @@ class ForexService:
                 response = await client.get_active_symbols()
                 return {"symbols": forex_symbols(response.get("active_symbols", []))}
         except Exception as exc:
-            return {"symbols": [], "error": f"Deriv symbol discovery unavailable ({type(exc).__name__})"}
+            detail = str(exc).strip() or type(exc).__name__
+            return {"symbols": [], "error": f"Deriv symbol discovery unavailable ({detail})"}
         finally:
             await client.disconnect()
 
@@ -155,7 +321,8 @@ class ForexService:
             except asyncio.TimeoutError:
                 self.store.update_state(last_error="Scan timed out; no purchase is retried. Review unresolved attempts before restarting.")
             except Exception as exc:
-                self.store.update_state(last_error=f"Scan unavailable ({type(exc).__name__})")
+                detail = str(exc).strip() or type(exc).__name__
+                self.store.update_state(last_error=f"Scan unavailable ({detail})")
             finally:
                 self.store.release(owner)
         return self.status()
@@ -185,7 +352,7 @@ class ForexService:
                             pair_blockers.append("No zero-barrier CALL and PUT contracts support the requested duration")
                         # Two requests at a time keeps the broker load bounded.
                         for group in [("1m", "5m"), ("15m", "1h"), ("4h", "1d")]:
-                            values = await asyncio.gather(*(client.get_candles(symbol, granularity=TIMEFRAMES[name], count=240) for name in group))
+                            values = await asyncio.gather(*(capture_candles(client, symbol, name) for name in group))
                             frames.update(zip(group, values))
                     except Exception as exc:
                         pair_blockers.append(f"Market history/contract lookup failed ({type(exc).__name__})")
@@ -196,10 +363,30 @@ class ForexService:
                 news = evaluate_context(context, symbol, checked_at, duration)
                 sessions = session_context(checked_at, duration)
                 analysis["technical_direction"] = analysis["direction"]
+                # Hybrid ML filter: only for EURUSD when a model is trained.
+                ml_view = {"ready": False, "hybrid_passed": None, "reason": "Rules-only (ML trains on EURUSD)"}
+                if symbol == "frxEURUSD" and analysis.get("direction") in {"RISE", "FALL"}:
+                    ml_view = predict_frames(
+                        settings.model_dir, frames, now=checked_at,
+                        checklist_direction=analysis["direction"])
+                    analysis["ml"] = ml_view
+                    if ml_blocks_entry(ml_view):
+                        if ml_view.get("state") in {"unavailable", "invalid"}:
+                            pair_blockers.append(
+                                f"Installed ML filter unavailable ({ml_view.get('reason')})")
+                        else:
+                            pair_blockers.append(
+                                f"ML hybrid filter disagrees or is unsure "
+                                f"(model={ml_view.get('direction')}, p={ml_view.get('probability')})")
+                    elif not ml_view.get("installed"):
+                        analysis["ml_note"] = ml_view.get("reason")
+                else:
+                    analysis["ml"] = ml_view
                 analysis["blockers"] += pair_blockers + news["blockers"] + sessions["blockers"]
                 analysis["factors"] += news["factors"] + sessions["factors"]
                 analysis["news"] = news
                 analysis["ready"] = analysis["ready"] and not analysis["blockers"]
+                analysis["hybrid_passed"] = bool(analysis["ready"])
                 if not analysis["ready"]:
                     analysis["direction"] = "WAIT"
                 analyses.append(analysis)
@@ -231,12 +418,22 @@ class ForexService:
         final_news = evaluate_context(context, candidate["symbol"], emitted, duration)
         if not final["ready"] or not final_news["ready"] or session_context(emitted, duration)["blockers"]:
             return
-        bars = [r for r in histories[candidate["symbol"]]["15m"] if int(r["epoch"]) + 900 <= emitted]
+        if candidate["symbol"] == "frxEURUSD":
+            ml_final = predict_frames(
+                settings.model_dir, histories[candidate["symbol"]], now=emitted,
+                checklist_direction=final["direction"])
+            if ml_blocks_entry(ml_final):
+                self.store.update_state(last_error=f"ML hybrid filter blocked emission ({ml_final.get('reason') or ml_final.get('state')})")
+                return
+            final["ml"] = ml_final
         signal = {"symbol": candidate["symbol"], "direction": final["direction"], "score": final["score"],
                   "duration_seconds": duration, "created_epoch": emitted, "created_at": datetime.fromtimestamp(emitted, timezone.utc).isoformat(),
                   "expiry_epoch": emitted + duration, "stake": config["stake"], "reasons": candidate["reasons"],
-                  "analysis": candidate, "setup_key": f"{candidate['symbol']}:{final['direction']}:{bars[-1]['epoch']}:{duration}"}
-        reserved, reason = self.store.reserve(signal, emitted)
+                  "ml": final.get("ml"), "analysis": candidate,
+                  "setup_key": f"{candidate['symbol']}:{final['direction']}:{final['as_of_epoch']}:{duration}"}
+        loss_limit = float(load_trade_prefs().get("daily_loss_limit") or 0)
+        reserved, reason = self.store.reserve(signal, emitted, expected_config=config,
+                                             stake_budget=loss_limit if loss_limit > 0 else None)
         if not reserved:
             self.store.update_state(last_error=reason)
             return
@@ -245,7 +442,23 @@ class ForexService:
 
             def can_execute():
                 state = self.store.state()
-                return state.get("running") is True and state["config"] == config and settings.bot_mode == "forex"
+                if not (state.get("running") is True and state["config"] == config and settings.bot_mode == "forex"):
+                    return False
+                buy_time = int(time.time())
+                current_analysis = analyze_forex(histories[candidate["symbol"]], symbol=candidate["symbol"],
+                                                now=buy_time, duration_seconds=duration)
+                if not current_analysis["ready"] or current_analysis["direction"] != reserved["direction"]:
+                    return False
+                if not evaluate_context(context, candidate["symbol"], buy_time, duration)["ready"]:
+                    return False
+                if session_context(buy_time, duration)["blockers"]:
+                    return False
+                if candidate["symbol"] == "frxEURUSD":
+                    ml_current = predict_frames(settings.model_dir, histories[candidate["symbol"]],
+                                                now=buy_time, checklist_direction=reserved["direction"])
+                    if ml_blocks_entry(ml_current):
+                        return False
+                return True
 
             try:
                 result = await execute_demo({**reserved, "_can_execute": can_execute}, stake=config["stake"])

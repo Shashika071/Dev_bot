@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -80,26 +80,17 @@ async def load_context(settings, now: int, duration: int) -> dict:
             if len(rows) >= 1000:
                 raise ValueError("Calendar response may be truncated; configure a complete context feed")
             result = {"source": "Trading Economics calendar", "as_of": now,
-                      "coverage_start": now - 3600, "coverage_end": now + duration + 3600,
+                      "coverage_start": int(datetime.fromisoformat(start).replace(tzinfo=timezone.utc).timestamp()),
+                      "coverage_end": int((datetime.fromisoformat(end).replace(tzinfo=timezone.utc) + timedelta(days=1)).timestamp()),
                       "currencies": sorted({e["currency"] for e in events}), "events": events}
         else:
             return {"error": "Configure FOREX_CONTEXT_URL, FOREX_CONTEXT_FILE, or TRADING_ECONOMICS_API_KEY for current news coverage"}
         if not isinstance(result, dict):
             raise ValueError("Context must be a JSON object")
-        # Sample/operator files may set clock=server so as_of/coverage track the
-        # scan clock without inventing events. Absolute event times still apply.
+        # A local sample cannot manufacture freshness or calendar coverage.
+        # Keep it inspectable, but never let a refreshed clock authorize orders.
         if result.get("clock") == "server":
-            result = {
-                **result,
-                "as_of": now,
-                "coverage_start": result.get("coverage_start", now - 3600),
-                "coverage_end": result.get("coverage_end", now + duration + 3600),
-            }
-            if isinstance(result["coverage_start"], str) or isinstance(result["coverage_end"], str):
-                result["coverage_start"] = epoch(result["coverage_start"])
-                result["coverage_end"] = epoch(result["coverage_end"])
-            result["coverage_start"] = min(int(result["coverage_start"]), now - 3600)
-            result["coverage_end"] = max(int(result["coverage_end"]), now + duration + 1800)
+            result = {**result, "error": "Sample/server-clock context cannot authorize trades; provide genuinely timestamped calendar coverage"}
         return result
     except Exception as exc:
         # Exception URLs can contain provider keys, so do not expose their messages.
@@ -111,6 +102,8 @@ def evaluate_context(context: dict, symbol: str, now: int, duration: int) -> dic
     blockers = []
     source = str(context.get("source", "No provider"))[:200]
     reason = context.get("error")
+    if context.get("clock") == "server":
+        reason = "Sample/server-clock context cannot authorize trades; provide genuinely timestamped calendar coverage"
     events = []
     if not reason:
         try:

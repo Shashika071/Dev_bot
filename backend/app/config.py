@@ -124,6 +124,10 @@ class Settings(BaseSettings):
         "change_me_internal_secret",
         description="Shared secret for worker → API status/event posts",
     )
+    forex_control_token: Optional[str] = Field(
+        None,
+        description="If set, mutating /forex/* control routes require header X-Forex-Control-Token",
+    )
     cors_origins: str = Field(
         "http://localhost:5173,http://127.0.0.1:5173",
         description="Comma-separated allowed CORS origins",

@@ -6,6 +6,7 @@ reservation across API processes; a network request never holds a DB transaction
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -75,16 +76,27 @@ class ForexStore:
         with self.connection() as db:
             db.execute("UPDATE forex_lease SET expires=0 WHERE id=1 AND owner=?", (owner,))
 
-    def reserve(self, signal: dict, now: int) -> tuple[dict | None, str | None]:
+    def reserve(self, signal: dict, now: int, *, expected_config: dict | None = None,
+                stake_budget: float | None = None) -> tuple[dict | None, str | None]:
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             state = json.loads(db.execute("SELECT payload FROM forex_state WHERE id=1").fetchone()[0])
             config = state["config"]
+            if expected_config is not None and expected_config != config:
+                return None, "Configuration changed during analysis; a new scan is required"
             if not state.get("running"):
                 return None, "Scanner stopped"
             count = db.execute("SELECT count(*) FROM forex_signals WHERE day=?", (local_day(now),)).fetchone()[0]
             if count >= DAILY_CAP:
                 return None, "Two-signal daily cap reached (Asia/Colombo)"
+            if config["demo_auto_trade"] and stake_budget is not None:
+                if not math.isfinite(stake_budget) or stake_budget <= 0:
+                    return None, "Invalid daily demo stake budget"
+                rows = db.execute("SELECT payload FROM forex_signals WHERE day=? AND execution_status NOT IN ('signal_only','blocked','failed')",
+                                  (local_day(now),)).fetchall()
+                committed = sum(float(json.loads(row[0]).get("stake", config["stake"])) for row in rows)
+                if committed + config["stake"] > stake_budget + 1e-9:
+                    return None, "Daily demo stake budget reached (conservative maximum loss)"
             if db.execute("SELECT 1 FROM forex_signals WHERE execution_status IN ('submitting','unknown') LIMIT 1").fetchone():
                 return None, "An earlier purchase is unresolved; reconcile it with Deriv before further execution"
             latest = db.execute("SELECT created_epoch,expiry_epoch FROM forex_signals ORDER BY created_epoch DESC LIMIT 1").fetchone()
@@ -106,5 +118,9 @@ class ForexStore:
                 raise ValueError("Signal does not exist")
             signal = json.loads(row[0])
             signal.update(execution_status=result.get("status", "bought" if result.get("ok") else "blocked"), execution_result=result)
-            db.execute("UPDATE forex_signals SET execution_status=?,payload=? WHERE id=?",
-                       (signal["execution_status"], json.dumps(signal, allow_nan=False), signal_id))
+            for key in ("estimated_expiry_epoch", "date_expiry", "expiry_epoch"):
+                value = result.get(key)
+                if isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value):
+                    signal["expiry_epoch"] = max(signal["expiry_epoch"], int(value))
+            db.execute("UPDATE forex_signals SET execution_status=?,expiry_epoch=?,payload=? WHERE id=?",
+                       (signal["execution_status"], signal["expiry_epoch"], json.dumps(signal, allow_nan=False), signal_id))
