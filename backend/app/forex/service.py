@@ -229,6 +229,7 @@ class ForexService:
         target = max(80, min(target, 2500))
         granularity = CHART_GRANULARITIES[timeframe]
         source = "deriv"
+        candles: list[dict] = []
         client = DerivWSClient()
         try:
             async with asyncio.timeout(75):
@@ -246,10 +247,20 @@ class ForexService:
                     if len(synthesized) > len(candles):
                         candles = synthesized[-target:]
                         source = "aggregated_1h"
-                if not candles:
-                    raise RuntimeError(f"No {timeframe} candles returned for {symbol}")
+        except Exception:
+            candles = []
         finally:
-            await client.disconnect()
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        if len(candles) < 40 and symbol == "frxEURUSD":
+            saved = load_candles(history_root(settings.model_dir), timeframe)[-target:]
+            if len(saved) > len(candles):
+                candles = saved
+                source = "saved_history"
+        if not candles:
+            raise RuntimeError(f"No {timeframe} candles returned for {symbol}")
         # Always derive overlays from the candles on screen so toggles work
         # without waiting for a scanner run. Prefer scan levels when present.
         overlays = chart_overlays(candles)

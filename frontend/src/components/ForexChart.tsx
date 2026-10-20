@@ -238,6 +238,7 @@ export function ForexChart({
     let timer: ReturnType<typeof setTimeout>;
     const requestKey = `${symbol}:${timeframe}`;
     const pollMs = timeframe === '15m' ? 4000 : timeframe === '4h' ? 12000 : 8000;
+    let wait = pollMs;
     const load = async () => {
       if (!online) {
         setLoading(false);
@@ -250,13 +251,15 @@ export function ForexChart({
           setError('');
           setLoading(false);
         }
+        wait = pollMs;
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : 'Chart unavailable');
           setLoading(false);
         }
+        wait = Math.min(wait * 2, 30000);
       }
-      if (!cancelled) timer = setTimeout(load, pollMs);
+      if (!cancelled) timer = setTimeout(load, wait);
     };
     void load();
     return () => {
