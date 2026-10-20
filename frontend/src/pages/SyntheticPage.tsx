@@ -58,6 +58,41 @@ function JobProgress({ job, label }: { job?: JobState; label: string }) {
     {job.error && <p className="sy-error">{job.error}</p>}
   </div>;
 }
+let alarmContext: AudioContext | null = null;
+
+function alarmAudio() {
+  const Ctx = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!Ctx) return null;
+  alarmContext = alarmContext || new Ctx();
+  return alarmContext;
+}
+
+function signalAlarm() {
+  const ctx = alarmAudio();
+  if (!ctx) return;
+  const burst = () => {
+    const master = ctx.createGain();
+    master.gain.value = 1;
+    master.connect(ctx.destination);
+    [523, 784, 1047, 784, 1175, 1568, 1175, 1568].forEach((freq, index) => {
+      const tone = ctx.createOscillator();
+      const level = ctx.createGain();
+      tone.type = 'square';
+      tone.frequency.value = freq;
+      const start = ctx.currentTime + index * 0.22;
+      level.gain.setValueAtTime(0.001, start);
+      level.gain.exponentialRampToValueAtTime(1, start + 0.02);
+      level.gain.exponentialRampToValueAtTime(0.001, start + 0.2);
+      tone.connect(level);
+      level.connect(master);
+      tone.start(start);
+      tone.stop(start + 0.22);
+    });
+  };
+  if (ctx.state === 'suspended') void ctx.resume().then(burst).catch(() => undefined);
+  else burst();
+}
+
 function MetricTable({ report }: { report?: TrainingReport }) {
   const test = report?.final_test;
   const models: Array<{ name: string; metrics?: ModelMetrics }> = [
@@ -87,6 +122,7 @@ export function SyntheticPage() {
   const [lastReceived, setLastReceived] = useState<string>();
   const mounted = useRef(false);
   const initialized = useRef(false);
+  const heardSignals = useRef<Set<string> | null>(null);
   const mutation = useRef(false);
   const revision = useRef(0);
 
@@ -125,8 +161,22 @@ export function SyntheticPage() {
     }
     void poll();
     const timer = setInterval(() => void poll(), 5000);
-    return () => { mounted.current = false; clearInterval(timer); controller?.abort(); };
+    const unlock = () => { const ctx = alarmAudio(); if (ctx?.state === 'suspended') void ctx.resume(); };
+    window.addEventListener('pointerdown', unlock);
+    return () => { mounted.current = false; clearInterval(timer); controller?.abort(); window.removeEventListener('pointerdown', unlock); };
   }, [applyStatus]);
+
+  useEffect(() => {
+    if (!status) return;
+    const ids = (status.signals || []).map(signal => signal.id || `${signal.decision_epoch ?? ''}:${signal.direction ?? ''}`);
+    if (heardSignals.current == null) {
+      heardSignals.current = new Set(ids);
+      return;
+    }
+    const fresh = ids.some(id => !heardSignals.current?.has(id));
+    ids.forEach(id => heardSignals.current?.add(id));
+    if (fresh) signalAlarm();
+  }, [status]);
 
   async function act(action: Action, enabled = true) {
     if (mutation.current && action !== 'stop') return;
