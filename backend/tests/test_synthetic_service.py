@@ -99,7 +99,7 @@ def test_demo_reservation_and_duplicate_prevention(harness):
     complete(scanner._scan())
     assert len(buys) == 1
     assert store.signals()[0]["execution_status"] == "bought"
-    assert store.signals()[0]["duration_seconds"] == 300
+    assert store.signals()[0]["duration_seconds"] == 60
 
 
 @pytest.mark.parametrize("ml", [
@@ -178,3 +178,28 @@ def test_quote_reports_the_latest_tick_without_opening_a_socket(monkeypatch):
     body = scanner.quote()
     assert body["quote"] == 123.45
     assert body["age_seconds"] >= 1
+
+
+def test_chart_confidence_uses_the_latest_scan_without_opening_a_socket(monkeypatch, tmp_path):
+    store = SyntheticStore(str(tmp_path / "synthetic.sqlite"))
+    store.update_state(analyses=[{
+        "decision_epoch": NOW,
+        "ml": {
+            "direction": "FALL", "p_rise": 0.22, "p_fall": 0.71, "p_tie": 0.07,
+            "confidence": 0.71, "threshold": 0.6, "reason": "model read",
+        },
+    }])
+    scanner = service.SyntheticService(store)
+    monkeypatch.setattr(scanner, "_ensure_confidence", lambda: None)
+    body = scanner.confidence()
+    assert body["direction"] == "FALL"
+    assert body["p_rise"] == 0.22
+    assert body["p_fall"] == 0.71
+    assert body["decision_epoch"] == NOW
+
+
+def test_confidence_view_drops_non_finite_probabilities():
+    body = service.confidence_view({"ml": {"direction": "MAYBE", "p_rise": float("nan"), "p_fall": True}})
+    assert body["direction"] == "NO TRADE"
+    assert body["p_rise"] is None
+    assert body["p_fall"] is None

@@ -1,6 +1,6 @@
 """Causal R_100 training, out-of-time evaluation and fail-closed inference.
 
-The next closed candle's open/close is a research proxy for a five-minute
+The next closed candle's open/close is a research proxy for a one-minute
 contract. It does not reproduce tick-level purchase/settlement or live payouts.
 """
 from __future__ import annotations
@@ -20,8 +20,8 @@ import pandas as pd
 from app.synthetic.analysis import FEATURE_COLUMNS, feature_table, features_from_frames
 from app.synthetic.history import SYMBOL, TIMEFRAMES, clean_candles, history_status, load_frames
 
-DURATION = 300
-FEATURE_SCHEMA = "r100-frama-range-5m-v1"
+DURATION = 60
+FEATURE_SCHEMA = "r100-frama-range-1m-v3"
 LABEL_KIND = "next_m5_open_close_proxy_ties_lose"
 POLICY_VERSION = "fixed60-purged3-holdout20-v1"
 DEFAULT_THRESHOLD = 0.60
@@ -84,12 +84,12 @@ def build_dataset(frames: dict, *, now: int | None = None) -> pd.DataFrame:
     features = feature_table(cleaned, now=cutoff)
     if features.empty:
         return pd.DataFrame()
-    m5 = pd.DataFrame(cleaned["5m"])
-    labels = m5[["epoch", "open", "close"]].rename(columns={
+    entry = pd.DataFrame(cleaned["1m"])
+    labels = entry[["epoch", "open", "close"]].rename(columns={
         "epoch": "decision_epoch", "open": "entry_price", "close": "exit_price",
     })
     dataset = features.merge(labels, on="decision_epoch", how="inner", validate="one_to_one")
-    prior_epochs = set(int(row["epoch"]) for row in cleaned["5m"])
+    prior_epochs = set(int(row["epoch"]) for row in cleaned["1m"])
     dataset = dataset[dataset["decision_epoch"].map(lambda epoch: int(epoch) - DURATION in prior_epochs)].copy()
     dataset["entry_epoch"] = dataset["decision_epoch"].astype("int64")
     dataset["expiry_epoch"] = dataset["entry_epoch"] + DURATION
@@ -325,8 +325,8 @@ def train_model(model_base: str | Path, *, progress: dict | None = None,
     try:
         history = history_status(model_base)
         if not history["ready_for_train"]:
-            raise ValueError("Download at least 60 days of R_100 5m, 15m and 1h history first")
-        job["progress"] = "Building shared closed-candle features and next-five-minute labels"
+            raise ValueError("Download at least 60 days of R_100 1m, 5m and 15m history first")
+        job["progress"] = "Building shared closed-candle features and next-one-minute labels"
         frames = load_frames(model_base)
         feature_origins = {tf: int(rows[0]["epoch"]) for tf, rows in frames.items() if rows}
         dataset = build_dataset(frames)
@@ -355,8 +355,8 @@ def train_model(model_base: str | Path, *, progress: dict | None = None,
         predictions.to_csv(candidate_dir / "final_predictions.csv", index=False)
         pd.concat(fold_predictions, ignore_index=True).to_csv(candidate_dir / "walk_forward_predictions.csv", index=False)
         report = {
-            "symbol": SYMBOL, "duration_seconds": DURATION, "entry_timeframe": "5m",
-            "context_timeframes": ["15m", "1h"], "feature_schema": FEATURE_SCHEMA,
+            "symbol": SYMBOL, "duration_seconds": DURATION, "entry_timeframe": "1m",
+            "context_timeframes": ["5m", "15m"], "feature_schema": FEATURE_SCHEMA,
             "features": list(FEATURE_COLUMNS), "label_kind": LABEL_KIND,
             "feature_origins": feature_origins,
             "model_kind": "CatBoostClassifier", "policy_version": POLICY_VERSION,
@@ -404,8 +404,8 @@ def train_model(model_base: str | Path, *, progress: dict | None = None,
 
 def _compatible(meta: dict) -> tuple[bool, str]:
     bindings = {
-        "symbol": SYMBOL, "duration_seconds": DURATION, "entry_timeframe": "5m",
-        "context_timeframes": ["15m", "1h"], "feature_schema": FEATURE_SCHEMA,
+        "symbol": SYMBOL, "duration_seconds": DURATION, "entry_timeframe": "1m",
+        "context_timeframes": ["5m", "15m"], "feature_schema": FEATURE_SCHEMA,
         "features": list(FEATURE_COLUMNS), "label_kind": LABEL_KIND,
         "model_kind": "CatBoostClassifier", "policy_version": POLICY_VERSION,
         "threshold": DEFAULT_THRESHOLD,
@@ -524,7 +524,7 @@ def predict_frames(model_base: str | Path, frames: dict, *, now: int,
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="R_100 five-minute CatBoost research pipeline")
+    parser = argparse.ArgumentParser(description="R_100 one-minute CatBoost research pipeline")
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--download", action="store_true")
     parser.add_argument("--days", type=int, default=90)

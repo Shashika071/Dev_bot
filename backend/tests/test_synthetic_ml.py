@@ -69,10 +69,10 @@ def test_dataset_has_explicit_ties_next_candle_labels_and_live_feature_parity():
     assert set(dataset["label"]) == {0, 1, 2}
     row = dataset.iloc[-10]
     decision = int(row["decision_epoch"])
-    outcome = next(bar for bar in data["5m"] if bar["epoch"] == decision)
+    outcome = next(bar for bar in data["1m"] if bar["epoch"] == decision)
     assert row["entry_price"] == outcome["open"]
     assert row["exit_price"] == outcome["close"]
-    assert int(row["expiry_epoch"]) == decision + 300
+    assert int(row["expiry_epoch"]) == decision + DURATION
     live = features_from_frames(data, now=decision)
     assert live is not None
     np.testing.assert_allclose(row[list(FEATURE_COLUMNS)].to_numpy(dtype=float),
@@ -102,7 +102,7 @@ def test_dataset_removes_missing_outcome_and_rewarms_after_gaps():
     data = frames()
     baseline = build_dataset(data, now=NOW)
     missing = int(baseline.iloc[-30]["decision_epoch"])
-    data["5m"] = [bar for bar in data["5m"] if bar["epoch"] != missing]
+    data["1m"] = [bar for bar in data["1m"] if bar["epoch"] != missing]
     changed = build_dataset(data, now=NOW)
     assert missing not in set(changed["decision_epoch"])
     assert (changed["decision_epoch"] < missing).all()
@@ -204,7 +204,7 @@ def install_valid_test_artifacts(base: Path, data: dict) -> tuple[Path, dict]:
     model_path.write_bytes(b"unit-test-artifact-only")
     report = {
         **accepted_report(), "symbol": "R_100", "duration_seconds": DURATION,
-        "entry_timeframe": "5m", "context_timeframes": ["15m", "1h"],
+        "entry_timeframe": "1m", "context_timeframes": ["5m", "15m"],
         "feature_schema": FEATURE_SCHEMA, "features": list(FEATURE_COLUMNS),
         "label_kind": LABEL_KIND, "policy_version": POLICY_VERSION,
         "model_kind": "CatBoostClassifier", "promoted": True, "accepted": True,

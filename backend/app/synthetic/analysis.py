@@ -1,6 +1,6 @@
 """One causal feature/decision implementation shared by live scans and training.
 
-The strategy studies R_100 five-minute Rise/Fall contracts. All timestamps denote
+The strategy studies R_100 one-minute Rise/Fall contracts. All timestamps denote
 candle opens except decision_epoch/closed_at, which denote completed candle closes.
 Only confirmed (two right-hand closed bars) pivots are usable. No tick or exchange
 volume, institutional intent, forex session, or economic-news inference is invented
@@ -16,7 +16,10 @@ from typing import Any
 from app.synthetic.indicators import frama_channel, range_filter, technical_series
 
 
-INTERVALS = {"5m": 300, "15m": 900, "1h": 3600}
+INTERVALS = {"1m": 60, "5m": 300, "15m": 900}
+ENTRY = "1m"
+ENTRY_SECONDS = INTERVALS[ENTRY]
+STALE_AFTER = ENTRY_SECONDS + 30
 MIN_BARS = 220
 MAX_SIGNAL_AGE = 2
 REFERENCE_URLS = {
@@ -32,9 +35,9 @@ FEATURE_COLUMNS = [
     "structure_direction", "higher_high", "higher_low", "lower_high", "lower_low",
     "bos", "choch", "liquidity_sweep", "retest", "breakout", "equal_highs", "equal_lows",
     "support_distance_atr", "resistance_distance_atr", "engulfing", "pin_bar", "doji",
-    "momentum", "candle_strength", "m15_trend", "h1_trend",
-    "m15_ema_gap_atr", "h1_ema_gap_atr", "m15_rsi14", "h1_rsi14",
-    "m15_structure", "h1_structure", "checklist_direction", "rule_eligible",
+    "momentum", "candle_strength", "m5_trend", "m15_trend",
+    "m5_ema_gap_atr", "m15_ema_gap_atr", "m5_rsi14", "m15_rsi14",
+    "m5_structure", "m15_structure", "checklist_direction", "rule_eligible",
 ]
 
 
@@ -147,8 +150,8 @@ def _structure_series(rows: list[dict], atr: list[float]) -> list[dict]:
 def _frame_series(rows: list[dict], step: int) -> dict:
     technical = technical_series(rows)
     structures = _structure_series(rows, technical["atr"])
-    framas = frama_channel(rows) if step == 300 else []
-    filters = range_filter(rows) if step == 300 else []
+    framas = frama_channel(rows) if step == ENTRY_SECONDS else []
+    filters = range_filter(rows) if step == ENTRY_SECONDS else []
     result = []
     contiguous = 0
     for index, row in enumerate(rows):
@@ -189,7 +192,7 @@ def _frame_series(rows: list[dict], step: int) -> dict:
             "engulfing": engulfing, "pin_bar": pin, "doji": int(abs(body_fraction) <= 0.1),
             "momentum": momentum, "candle_strength": body / scale,
         }
-        if step == 300:
+        if step == ENTRY_SECONDS:
             frama, rf = framas[index], filters[index]
             midpoint = frama["mid"] if frama["mid"] is not None else row["close"]
             previous_midpoint = framas[max(0, index - 1)]["mid"]
@@ -208,11 +211,11 @@ def _frame_series(rows: list[dict], step: int) -> dict:
     return {"rows": rows, "snapshots": result, "closes": [item["closed_at"] for item in result]}
 
 
-def _assemble(entry: dict, m15: dict, h1: dict) -> tuple[dict, list[str]]:
+def _assemble(entry: dict, m5: dict, m15: dict) -> tuple[dict, list[str]]:
     structure = entry["structure"]
     features = {column: float(entry.get(column, structure.get(column, 0))) for column in FEATURE_COLUMNS}
     features["structure_direction"] = float(structure["direction"])
-    for label, snapshot in (("m15", m15), ("h1", h1)):
+    for label, snapshot in (("m5", m5), ("m15", m15)):
         features[f"{label}_trend"] = float(snapshot["trend"])
         features[f"{label}_ema_gap_atr"] = float(snapshot["ema_gap_atr"])
         features[f"{label}_rsi14"] = float(snapshot["rsi"])
@@ -222,7 +225,7 @@ def _assemble(entry: dict, m15: dict, h1: dict) -> tuple[dict, list[str]]:
     if not candidate:
         blockers.append("FRAMA and Range Filter do not both confirm the same direction.")
     else:
-        for name, snapshot in (("15m", m15), ("1h", h1)):
+        for name, snapshot in (("5m", m5), ("15m", m15)):
             if snapshot["trend"] != candidate:
                 blockers.append(f"{name} trend does not confirm {_label(candidate)}.")
         if min(entry["frama_signal_age"], entry["range_signal_age"]) > MAX_SIGNAL_AGE:
@@ -243,7 +246,7 @@ def _prepared(frames: dict, now: int) -> tuple[dict, list[str]]:
         if invalid:
             errors.append(f"{name}: {invalid} malformed or conflicting closed candle(s).")
     # A higher-timeframe bar cannot be used after the last entry candle's close.
-    asof = clean_frames["5m"][-1]["epoch"] + 300 if clean_frames["5m"] else now
+    asof = clean_frames[ENTRY][-1]["epoch"] + ENTRY_SECONDS if clean_frames[ENTRY] else now
     prepared = {}
     for name, step in INTERVALS.items():
         prepared[name] = _frame_series([row for row in clean_frames[name] if row["epoch"] + step <= asof], step)
@@ -271,13 +274,13 @@ def _select(prepared: dict, decision: int) -> tuple[dict | None, list[str]]:
 def features_from_frames(frames: dict[str, list[dict]], now: int) -> dict | None:
     """Return finite causal model inputs, or None for bad/stale/short history."""
     prepared, invalid = _prepared(frames, int(now))
-    if invalid or not prepared["5m"]["closes"]:
+    if invalid or not prepared[ENTRY]["closes"]:
         return None
-    decision = prepared["5m"]["closes"][-1]
+    decision = prepared[ENTRY]["closes"][-1]
     selected, errors = _select(prepared, decision)
-    if selected is None or errors or int(now) - decision >= 330:
+    if selected is None or errors or int(now) - decision >= STALE_AFTER:
         return None
-    features, _ = _assemble(selected["5m"], selected["15m"], selected["1h"])
+    features, _ = _assemble(selected[ENTRY], selected["5m"], selected["15m"])
     return features if all(math.isfinite(value) for value in features.values()) else None
 
 
@@ -300,11 +303,11 @@ def feature_table(frames: dict[str, list[dict]], now: int | None = None):
     if invalid:
         return pd.DataFrame(columns=["decision_epoch", *FEATURE_COLUMNS])
     records = []
-    for decision in prepared["5m"]["closes"]:
+    for decision in prepared[ENTRY]["closes"]:
         selected, errors = _select(prepared, decision)
         if selected is None or errors:
             continue
-        features, _ = _assemble(selected["5m"], selected["15m"], selected["1h"])
+        features, _ = _assemble(selected[ENTRY], selected["5m"], selected["15m"])
         if all(math.isfinite(value) for value in features.values()):
             records.append({"decision_epoch": decision, **features})
     return pd.DataFrame(records, columns=["decision_epoch", *FEATURE_COLUMNS])
@@ -335,14 +338,14 @@ def chart_overlays(candles: list[dict]) -> dict:
 def analyze_synthetic(frames: dict[str, list[dict]], now: int) -> dict:
     """Evaluate the current closed candle; model approval remains the caller's gate."""
     prepared, errors = _prepared(frames, int(now))
-    decision = prepared["5m"]["closes"][-1] if prepared["5m"]["closes"] else None
+    decision = prepared[ENTRY]["closes"][-1] if prepared[ENTRY]["closes"] else None
     selected, history_errors = _select(prepared, decision if decision is not None else int(now))
     errors.extend(history_errors)
-    if decision is not None and int(now) - decision >= 330:
-        errors.append("5m: latest decision candle is stale.")
+    if decision is not None and int(now) - decision >= STALE_AFTER:
+        errors.append("1m: latest decision candle is stale.")
     result: dict[str, Any] = {
         "symbol": "R_100", "direction": "NO TRADE", "eligible": False, "blockers": list(errors),
-        "decision_epoch": decision, "expiry_seconds": 300, "timeframe": "5m",
+        "decision_epoch": decision, "expiry_seconds": ENTRY_SECONDS, "timeframe": ENTRY,
         "indicators": {}, "timeframes": {}, "factors": [], "features": {},
         "levels": [], "events": [],
         "indicator_implementation": "Independent Python adaptation; exact TradingView Pine parity is unverified.",
@@ -351,8 +354,8 @@ def analyze_synthetic(frames: dict[str, list[dict]], now: int) -> dict:
     if selected is None:
         result["factors"] = [{"id": "history", "name": "Closed-candle history", "status": "BLOCK", "detail": " ".join(errors)}]
         return result
-    entry, m15, h1 = selected["5m"], selected["15m"], selected["1h"]
-    features, rule_errors = _assemble(entry, m15, h1)
+    entry, m5, m15 = selected[ENTRY], selected["5m"], selected["15m"]
+    features, rule_errors = _assemble(entry, m5, m15)
     result["indicators"] = {"frama": entry["frama"], "range_filter": entry["range_filter"]}
     result["timeframes"] = {
         name: {**{key: snapshot[key] for key in ("close", "ema20", "ema50", "rsi", "macd_hist", "atr", "closed_at", "bars")},
@@ -383,7 +386,7 @@ def analyze_synthetic(frames: dict[str, list[dict]], now: int) -> dict:
         ("range_filter", "Range Filter", bool(entry["range_direction"]), f"Price direction: {entry['range_filter']['direction']}; period 100, multiplier 3."),
         ("agreement", "Both indicators agree", frama_ok, f"Combined direction: {_label(candidate)}."),
         ("fresh_signal", "Recent entry signal", bool(candidate and recent), "Require a same-direction channel breakout or filter cross within the last three closed candles."),
-        ("timeframes", "15m and 1h trend", bool(candidate and m15["trend"] == h1["trend"] == candidate), f"15m: {_label(m15['trend'])}; 1h: {_label(h1['trend'])}."),
+        ("timeframes", "5m and 15m trend", bool(candidate and m5["trend"] == m15["trend"] == candidate), f"5m: {_label(m5['trend'])}; 15m: {_label(m15['trend'])}."),
         ("momentum", "Candle and momentum confirmation", bool(candidate and entry["momentum"] == candidate), f"Body {entry['body_fraction']:.0%} of range; three-bar move {entry['return_3_atr']:.2f} ATR; MACD histogram {entry['macd_hist']:.5f}."),
     ]
     result["factors"] = [{"id": key, "name": name, "status": "PASS" if ok else "BLOCK", "detail": detail} for key, name, ok, detail in factors]

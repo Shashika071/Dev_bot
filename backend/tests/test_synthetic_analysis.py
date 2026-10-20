@@ -32,7 +32,7 @@ def history(step, count=260, direction=1, breakout=False):
 
 
 def frames(direction=1):
-    return {name: history(step, direction=direction, breakout=name == "5m") for name, step in INTERVALS.items()}
+    return {name: history(step, direction=direction, breakout=name == "1m") for name, step in INTERVALS.items()}
 
 
 @pytest.mark.parametrize("direction,expected", [(1, "RISE"), (-1, "FALL")])
@@ -41,7 +41,7 @@ def test_both_indicators_and_higher_timeframes_confirm_mirrored_entries(directio
     assert result["eligible"], result["blockers"]
     assert result["direction"] == expected
     assert result["symbol"] == "R_100"
-    assert result["expiry_seconds"] == 300
+    assert result["expiry_seconds"] == 60
     assert result["decision_epoch"] == NOW
     assert result["indicators"]["frama"]["direction"] == expected
     assert result["indicators"]["range_filter"]["direction"] == expected
@@ -52,17 +52,17 @@ def test_both_indicators_and_higher_timeframes_confirm_mirrored_entries(directio
 
 def test_rule_disagreement_or_opposite_higher_timeframe_blocks_entry():
     data = frames()
-    data["1h"] = history(3600, direction=-1)
+    data["15m"] = history(900, direction=-1)
     result = analyze_synthetic(data, NOW)
     assert result["direction"] == "NO TRADE"
     assert not result["eligible"]
     assert result["features"]["rule_eligible"] == 0
-    assert any("1h trend does not confirm RISE" in item for item in result["blockers"])
+    assert any("15m trend does not confirm RISE" in item for item in result["blockers"])
 
 
 def test_in_channel_price_and_flat_filter_cannot_produce_entry():
     data = frames()
-    for row in data["5m"]:
+    for row in data["1m"]:
         row.update(open=1000, high=1000.1, low=999.9, close=1000)
     result = analyze_synthetic(data, NOW)
     assert result["direction"] == "NO TRADE"
@@ -74,7 +74,7 @@ def test_in_channel_price_and_flat_filter_cannot_produce_entry():
 
 def test_stale_direction_does_not_repeatedly_create_entry_signal():
     data = frames()
-    data["5m"] = history(300)
+    data["1m"] = history(60)
     result = analyze_synthetic(data, NOW)
     assert not result["eligible"]
     assert any("No fresh" in blocker for blocker in result["blockers"])
@@ -92,7 +92,7 @@ def test_future_and_forming_candles_cannot_change_features_or_analysis():
 
 
 def test_indicator_outputs_are_prefix_invariant_including_signal_timestamps():
-    data = history(300, count=320, breakout=True)
+    data = history(60, count=320, breakout=True)
     for function in (frama_channel, range_filter):
         full = function(data)
         for length in (200, 220, 250, 300):
@@ -113,7 +113,7 @@ def test_batched_features_equal_live_for_every_available_prefix():
             assert live[name] == pytest.approx(point[name], abs=1e-12), name
     baseline = table.iloc[:-1].copy()
     modified = copy.deepcopy(data)
-    modified["5m"][-1].update(open=1000, high=1200, low=800, close=900)
+    modified["1m"][-1].update(open=1000, high=1200, low=800, close=900)
     changed = feature_table(modified, NOW)
     assert changed.iloc[:-1].equals(baseline)
 
@@ -130,11 +130,11 @@ def test_every_required_frame_requires_full_warmup(name):
 
 @pytest.mark.parametrize("mutation", [
     {"high": 0}, {"low": float("nan")}, {"close": float("inf")},
-    {"open": -1}, {"epoch": NOW - 299}, {"epoch": NOW - 300.5},
+    {"open": -1}, {"epoch": NOW - 59}, {"epoch": NOW - 60.5},
 ])
 def test_malformed_closed_candles_fail_closed(mutation):
     data = frames()
-    data["5m"][-1].update(mutation)
+    data["1m"][-1].update(mutation)
     result = analyze_synthetic(data, NOW + 5)
     assert not result["eligible"]
     assert features_from_frames(data, NOW + 5) is None
@@ -146,26 +146,26 @@ def test_malformed_closed_candles_fail_closed(mutation):
 def test_conflicting_duplicates_fail_closed_but_identical_duplicates_are_harmless():
     data = frames()
     baseline = analyze_synthetic(data, NOW)
-    data["5m"].append(dict(data["5m"][-1]))
+    data["1m"].append(dict(data["1m"][-1]))
     assert analyze_synthetic(data, NOW) == baseline
-    data["5m"][-1]["high"] += 1
+    data["1m"][-1]["high"] += 1
     assert features_from_frames(data, NOW) is None
     assert not analyze_synthetic(data, NOW)["eligible"]
 
 
 def test_missing_recent_candle_and_stale_higher_timeframe_fail_closed():
     data = frames()
-    del data["5m"][-3]
+    del data["1m"][-3]
     assert features_from_frames(data, NOW) is None
     assert not analyze_synthetic(data, NOW)["eligible"]
     data = frames()
-    data["1h"].pop()
+    data["15m"].pop()
     assert features_from_frames(data, NOW) is None
-    assert any("1h: closed-candle history is stale" in item for item in analyze_synthetic(data, NOW)["blockers"])
+    assert any("15m: closed-candle history is stale" in item for item in analyze_synthetic(data, NOW)["blockers"])
 
 
 def test_chart_overlays_use_causal_lines_and_exclude_unwarmed_bands():
-    candles = frames()["5m"]
+    candles = frames()["1m"]
     overlays = chart_overlays(candles)
     assert set(overlays) == {"frama", "frama_upper", "frama_lower", "range_filter", "signals"}
     assert len(overlays["frama_upper"]) == len(candles) - 199
@@ -177,9 +177,9 @@ def test_chart_overlays_use_causal_lines_and_exclude_unwarmed_bands():
 
 def test_pivot_is_only_known_after_two_right_hand_bars_close():
     data = frames()
-    data["5m"][-3]["high"] += 20
-    at_pivot = features_from_frames(data, NOW - 600)
-    before_confirmation = features_from_frames(data, NOW - 300)
+    data["1m"][-3]["high"] += 20
+    at_pivot = features_from_frames(data, NOW - 120)
+    before_confirmation = features_from_frames(data, NOW - 60)
     at_confirmation = features_from_frames(data, NOW)
     assert at_pivot is not None and before_confirmation is not None and at_confirmation is not None
     # The deliberately tall pivot cannot become resistance until its confirming
@@ -187,8 +187,8 @@ def test_pivot_is_only_known_after_two_right_hand_bars_close():
     assert before_confirmation["resistance_distance_atr"] < 2
     assert at_confirmation["resistance_distance_atr"] > 5
     changed_future = copy.deepcopy(data)
-    changed_future["5m"][-1]["high"] += 50
-    assert features_from_frames(changed_future, NOW - 300) == before_confirmation
+    changed_future["1m"][-1]["high"] += 50
+    assert features_from_frames(changed_future, NOW - 60) == before_confirmation
 
 
 def test_empty_history_is_no_trade_and_json_safe():

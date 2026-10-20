@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { Activity, Maximize2, Minimize2, RefreshCw } from 'lucide-react';
 import { CandlestickData, ColorType, IChartApi, ISeriesApi, LineData, LineStyle, SeriesMarker, createChart } from 'lightweight-charts';
-import { syntheticApi, SyntheticChartPayload } from '../api/synthetic';
+import { syntheticApi, SyntheticChartPayload, SyntheticConfidence } from '../api/synthetic';
 
-const TIMEFRAMES = ['1m', '5m', '15m', '1h'] as const;
+const TIMEFRAMES = ['1m', '5m', '15m'] as const;
 
 const OVERLAYS = [
   { key: 'frama', label: 'FRAMA', color: '#5de0b7' },
@@ -11,6 +11,36 @@ const OVERLAYS = [
   { key: 'frama_lower', label: 'Lower band', color: '#738ab1' },
   { key: 'range_filter', label: 'Range Filter', color: '#edbd71' },
 ] as const;
+
+function percent(value?: number | null): string {
+  if (value == null || !Number.isFinite(value)) return '—';
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function LiveConfidence({ reading }: { reading: SyntheticConfidence | null }) {
+  const rise = reading?.p_rise;
+  const fall = reading?.p_fall;
+  const call = reading?.direction || 'NO TRADE';
+  const tone = call === 'RISE' ? 'positive' : call === 'FALL' ? 'negative' : 'neutral';
+  return (
+    <div className="sy-confidence" aria-live="polite">
+      <div className="sy-confidence-head">
+        <strong>Rise / Fall confidence</strong>
+        <span className={`sy-tag sy-${tone}`}>{call}</span>
+        <span className="sy-tag">{percent(reading?.confidence)}</span>
+      </div>
+      <div className="sy-confidence-bar" role="img" aria-label={`Rise ${percent(rise)}, Fall ${percent(fall)}`}>
+        <span className="sy-confidence-rise" style={{ width: `${Math.max(0, Math.min(100, (rise ?? 0) * 100))}%` }} />
+        <span className="sy-confidence-fall" style={{ width: `${Math.max(0, Math.min(100, (fall ?? 0) * 100))}%` }} />
+      </div>
+      <div className="sy-confidence-split">
+        <span>Rise {percent(rise)}</span>
+        <span>Fall {percent(fall)}</span>
+      </div>
+      {rise == null && fall == null && <p className="sy-muted">{reading?.reason || 'Waiting for a model confidence read'}</p>}
+    </div>
+  );
+}
 
 function candles(rows: SyntheticChartPayload['candles']): CandlestickData[] {
   const unique = new Map<number, CandlestickData>();
@@ -33,6 +63,7 @@ export function SyntheticChart({ online }: { online: boolean }) {
   const drawnTf = useRef('');
   const [timeframe, setTimeframe] = useState<(typeof TIMEFRAMES)[number]>('1m');
   const [livePrice, setLivePrice] = useState<number | null>(null);
+  const [confidence, setConfidence] = useState<SyntheticConfidence | null>(null);
   const [payload, setPayload] = useState<SyntheticChartPayload | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -212,7 +243,7 @@ export function SyntheticChart({ online }: { online: boolean }) {
     if (!online) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const step = timeframe === '1m' ? 60 : timeframe === '5m' ? 300 : timeframe === '15m' ? 900 : 3600;
+    const step = timeframe === '1m' ? 60 : timeframe === '5m' ? 300 : 900;
     async function follow() {
       try {
         const tick = await syntheticApi.quote();
@@ -243,6 +274,24 @@ export function SyntheticChart({ online }: { online: boolean }) {
     return () => { cancelled = true; clearTimeout(timer); };
   }, [online, timeframe]);
 
+  useEffect(() => {
+    if (!online) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    async function read() {
+      try {
+        const next = await syntheticApi.confidence();
+        if (!cancelled) setConfidence(next);
+      } catch {
+        /* Keep the last confidence if one refresh misses. */
+      } finally {
+        if (!cancelled) timer = setTimeout(() => void read(), 2000);
+      }
+    }
+    void read();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [online]);
+
   return <section ref={panel} className={`sy-panel sy-chart${expanded ? ' sy-chart-expanded' : ''}`} aria-label="Volatility 100 chart">
     <div className="sy-panel-title">
       <div><h2><Activity size={17} /> Volatility 100</h2><p>R_100 · {timeframe} · {livePrice == null ? 'Waiting for ticks' : `Live ${livePrice.toFixed(2)}`} · Chart times UTC</p></div>
@@ -263,6 +312,7 @@ export function SyntheticChart({ online }: { online: boolean }) {
       <span>ROC <b>{payload?.trend_system?.dashboard?.roc || 'Waiting'}</b></span>
       <span>TSI <b>{payload?.trend_system?.dashboard?.tsi || 'Waiting'}</b></span>
     </div>
+    <LiveConfidence reading={confidence} />
     {error && <p className="sy-error" role="alert">{error}</p>}
     {!online && <p className="sy-muted">Waiting for the analysis service.</p>}
     {online && !loading && payload && !payload.candles?.length && <p className="sy-muted">No completed candles available yet.</p>}

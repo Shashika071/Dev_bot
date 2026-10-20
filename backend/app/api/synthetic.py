@@ -12,7 +12,7 @@ router = APIRouter(prefix="/synthetic", tags=["synthetic"])
 
 class StartBody(BaseModel):
     stake: float | None = Field(None, ge=0.35, le=10)
-    duration_seconds: int | None = Field(None, ge=300, le=300)
+    duration_seconds: int | None = Field(None, ge=60, le=60)
     symbols: list[str] | None = None
     demo_auto_trade: bool = False
     max_signals_per_day: int | None = Field(None, ge=1, le=100)
@@ -35,6 +35,11 @@ async def symbols():
 @router.get("/quote")
 async def quote():
     return synthetic_service.quote()
+
+
+@router.get("/confidence")
+async def confidence():
+    return synthetic_service.confidence()
 
 
 @router.get("/chart")

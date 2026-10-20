@@ -22,7 +22,7 @@ from app.trade_prefs import get_trade_token, load_trade_prefs, resolve_deriv_app
 
 MAX_QUOTE_AGE_SECONDS = 30
 MAX_FUTURE_SKEW_SECONDS = 5
-DURATION_SECONDS = 300
+DURATION_SECONDS = 60
 
 
 class _Blocked(ValueError):
@@ -160,7 +160,7 @@ def _validate_proposal(proposal: Any, *, stake: float, now: float) -> tuple[str,
 
 
 async def execute_demo(signal: dict[str, Any], *, stake: float = 1.0) -> dict[str, Any]:
-    """Buy one five-minute Volatility 100 Rise/Fall contract on a verified demo account.
+    """Buy one one-minute Volatility 100 Rise/Fall contract on a verified demo account.
 
     Returns ``status`` = ``bought``, ``blocked``, ``failed``, or ``unknown``.
     No credentials, OTP URLs, or raw broker exception messages enter the result.
@@ -188,8 +188,8 @@ async def execute_demo(signal: dict[str, Any], *, stake: float = 1.0) -> dict[st
             raise _Blocked("rise_fall_has_no_barrier")
         seconds = _number(signal.get("duration_seconds", DURATION_SECONDS), "invalid_duration")
         if seconds != DURATION_SECONDS:
-            raise _Blocked("five_minute_duration_required")
-        duration = 5
+            raise _Blocked("one_minute_duration_required")
+        duration = 1
         contract_type = "CALL" if direction == "RISE" else "PUT"
         context.update(symbol=symbol, direction=direction, contract_type=contract_type,
                        duration_seconds=int(seconds), stake=stake)

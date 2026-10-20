@@ -6,15 +6,15 @@ import math
 from app.forex.policy import local_day, supports_rise_fall
 
 SYMBOL = "R_100"
-DURATION_SECONDS = 300
-TIMEFRAMES = {"5m": 300, "15m": 900, "1h": 3600}
-MAX_ENTRY_AGE = 60
+DURATION_SECONDS = 60
+TIMEFRAMES = {"1m": 60, "5m": 300, "15m": 900}
+MAX_ENTRY_AGE = 20
 
 
 def default_config() -> dict:
     return {
         "symbols": [SYMBOL], "duration_seconds": DURATION_SECONDS,
-        "entry_timeframe": "5m", "max_signals_per_day": 20,
+        "entry_timeframe": "1m", "max_signals_per_day": 20,
         "cooldown_seconds": DURATION_SECONDS, "stake": 1.0,
         "timezone": "Asia/Colombo", "demo_auto_trade": False,
     }
@@ -25,7 +25,7 @@ def validate_config(updates: dict, previous: dict | None = None) -> dict:
     if config["symbols"] != [SYMBOL]:
         raise ValueError("This strategy uses Volatility 100 (R_100) only")
     if config["duration_seconds"] != DURATION_SECONDS:
-        raise ValueError("Rise/Fall expiry is fixed at five minutes")
+        raise ValueError("Rise/Fall expiry is fixed at one minute")
     if isinstance(config["stake"], bool):
         raise ValueError("Invalid stake")
     stake = float(config["stake"])

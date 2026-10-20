@@ -76,6 +76,18 @@ export interface SyntheticChartPayload {
   last_candle_age_seconds?: number;
   error?: string;
 }
+export interface SyntheticConfidence {
+  symbol?: string;
+  direction?: string;
+  p_rise?: number | null;
+  p_fall?: number | null;
+  p_tie?: number | null;
+  confidence?: number | null;
+  threshold?: number | null;
+  decision_epoch?: number | null;
+  reason?: string;
+  updated_at?: number | null;
+}
 
 const controlToken = (import.meta.env.VITE_FOREX_CONTROL_TOKEN || '').trim();
 
@@ -106,6 +118,7 @@ export const syntheticApi = {
   chart: (timeframe: string, signal?: AbortSignal) =>
     request<SyntheticChartPayload>(`/chart?symbol=R_100&timeframe=${encodeURIComponent(timeframe)}&count=1000`, { signal }),
   quote: (signal?: AbortSignal) => request<{ epoch?: number | null; quote?: number | null; age_seconds?: number | null }>('/quote', { signal }),
+  confidence: (signal?: AbortSignal) => request<SyntheticConfidence>('/confidence', { signal }),
   scan: () => post<SyntheticStatus>('/scan'),
   start: (body: { stake: number; max_signals_per_day: number; demo_auto_trade: boolean }) =>
     post<SyntheticStatus>('/start', body),

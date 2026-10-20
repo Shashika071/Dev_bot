@@ -33,12 +33,12 @@ def test_clean_history_drops_bad_ohlc_nonfinite_unaligned_and_forming_candles():
 def test_store_isolated_merges_and_preserves_gaps(tmp_path):
     root = history_root(tmp_path)
     assert root == tmp_path / "synthetic_r100" / "history"
-    save_candles(root, "5m", [candle(300), candle(900)], now=1500)
-    merged = save_candles(root, "5m", [candle(900, 101), candle(1200)], now=1500)
+    save_candles(root, "15m", [candle(900), candle(2700)], now=4500)
+    merged = save_candles(root, "15m", [candle(2700, 101), candle(3600)], now=4500)
     assert len(merged) == 3
     assert merged[1]["open"] == 101
-    assert load_candles(root, "5m", now=1500) == merged
-    assert span_summary(merged, 300)["gaps"] == 1
+    assert load_candles(root, "15m", now=4500) == merged
+    assert span_summary(merged, 900)["gaps"] == 1
     assert not history_status(tmp_path)["ready_for_train"]
 
 

@@ -125,16 +125,16 @@ def test_legacy_rise_fall_uses_account_currency_without_barrier(fake, direction,
     assert result["break_even_probability"] == pytest.approx(1 / 1.85)
     assert client.requests == [{"proposal": 1, "amount": 1, "basis": "stake",
                                 "contract_type": contract_type, "currency": "EUR",
-                                "duration": 5, "duration_unit": "m", "symbol": "R_100"}]
+                                "duration": 1, "duration_unit": "m", "symbol": "R_100"}]
     assert client.buys == [{"proposal_id": "quote-1", "price": 1.0, "parameters": None}]
     assert client.closed is True
 
 
 @pytest.mark.parametrize("seconds", [3600, 7200, 10800, 18000, 86400])
-def test_only_chosen_five_minute_duration_is_allowed(fake, seconds):
+def test_only_chosen_one_minute_duration_is_allowed(fake, seconds):
     client, _ = fake
     result = _execute(ticket(duration_seconds=seconds))
-    assert result["reason"] == "five_minute_duration_required"
+    assert result["reason"] == "one_minute_duration_required"
     assert client.ws is None
     assert client.requests == client.buys == []
 
@@ -144,10 +144,10 @@ def test_delayed_acknowledgement_extends_conservative_expiry(fake, monkeypatch):
     now = [NOW]
     monkeypatch.setattr(execution.time, "time", lambda: now[0])
     client.after_buy = lambda: now.__setitem__(0, NOW + 90.25)
-    client.bought["date_expiry"] = NOW + 300
+    client.bought["date_expiry"] = NOW + 60
     result = _execute(ticket())
     assert result["status"] == "bought"
-    assert result["estimated_expiry_epoch"] == NOW + 300 + 91
+    assert result["estimated_expiry_epoch"] == NOW + 60 + 91
 
 
 @pytest.mark.parametrize("record", ["proposal", "bought"])
@@ -165,7 +165,7 @@ def test_invalid_optional_server_expiry_uses_acknowledgement_floor(fake, expiry)
     client.bought["date_expiry"] = expiry
     result = _execute(ticket())
     assert result["status"] == "bought"
-    assert result["estimated_expiry_epoch"] == NOW + 300
+    assert result["estimated_expiry_epoch"] == NOW + 60
 
 
 def test_ambiguous_delayed_purchase_also_extends_expiry(fake, monkeypatch):
@@ -176,7 +176,7 @@ def test_ambiguous_delayed_purchase_also_extends_expiry(fake, monkeypatch):
     client.buy_error = asyncio.TimeoutError()
     result = _execute(ticket())
     assert result["status"] == "unknown"
-    assert result["estimated_expiry_epoch"] == NOW + 300 + 30
+    assert result["estimated_expiry_epoch"] == NOW + 60 + 30
     assert len(client.buys) == 1
 
 
@@ -213,7 +213,7 @@ def test_pat_ignores_real_preference_and_selects_verified_demo(fake):
     parameters = client.buys[0]["parameters"]
     assert parameters["underlying_symbol"] == "R_100"
     assert parameters["contract_type"] == "PUT"
-    assert parameters["duration"] == 5
+    assert parameters["duration"] == 1
     assert "symbol" not in parameters
     assert "barrier" not in parameters
     assert client.requests[0] == {"proposal": 1, **parameters}
@@ -382,7 +382,7 @@ def test_respects_positive_shared_loss_limit(fake, monkeypatch):
 
 
 @pytest.mark.parametrize("extra", [
-    {"symbol": "frxGBPUSD"}, {"direction": "UP"}, {"duration_seconds": 60},
+    {"symbol": "frxGBPUSD"}, {"direction": "UP"}, {"duration_seconds": 300},
     {"duration_seconds": 14401}, {"duration_seconds": float("inf")},
     {"duration_seconds": 90000}, {"barrier": "+0.01"}, {"barrier_input": None},
 ])

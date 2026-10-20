@@ -1,4 +1,4 @@
-"""Causal indicators for the Volatility 100 five-minute strategy.
+"""Causal indicators for the Volatility 100 one-minute strategy.
 
 This is an independent Python adaptation, not a verified Pine-script port.
 FRAMA uses HL2, Ehlers' fractal alpha clipped to [0.01, 1], a five-bar SMA
@@ -16,6 +16,13 @@ from __future__ import annotations
 
 import math
 from collections import deque
+
+
+def _series_step(candles: list[dict]) -> int:
+    if len(candles) < 2:
+        return 60
+    gap = int(candles[1]["epoch"]) - int(candles[0]["epoch"])
+    return gap if gap > 0 else 60
 
 
 def ema(values: list[float], period: int) -> list[float]:
@@ -109,6 +116,7 @@ def frama_channel(
         dimensions.append(dimension)
     midpoints = sma(raw, smoothing)
     ranges = sma([float(row["high"]) - float(row["low"]) for row in candles], range_period)
+    step = _series_step(candles)
     result = []
     last_signal: dict[str, int | None] = {"RISE": None, "FALL": None}
     for index, (row, midpoint, spread) in enumerate(zip(candles, midpoints, ranges)):
@@ -130,7 +138,7 @@ def frama_channel(
             "epoch": int(row["epoch"]), "mid": midpoint, "upper": upper, "lower": lower,
             "alpha": alphas[index], "dimension": dimensions[index], "direction": direction,
             "cross": cross, "signal_age": None if signal_index is None else index - signal_index,
-            "signal_epoch": None if signal_index is None else int(candles[signal_index]["epoch"]) + 300,
+            "signal_epoch": None if signal_index is None else int(candles[signal_index]["epoch"]) + step,
         })
     return result
 
@@ -142,6 +150,7 @@ def range_filter(candles: list[dict], period: int = 100, multiplier: float = 3.0
     changes = [0.0] + [abs(right - left) for left, right in zip(closes, closes[1:])] if closes else []
     spreads = [value * multiplier for value in ema(ema(changes, period), 2 * period - 1)]
     result = []
+    step = _series_step(candles)
     slope = 0
     previous_confirmed = "NEUTRAL"
     last_signal: dict[str, int | None] = {"RISE": None, "FALL": None}
@@ -163,6 +172,6 @@ def range_filter(candles: list[dict], period: int = 100, multiplier: float = 3.0
             "epoch": int(row["epoch"]), "line": line, "range": spread,
             "direction": direction, "cross": cross, "slope": slope,
             "signal_age": None if signal_index is None else index - signal_index,
-            "signal_epoch": None if signal_index is None else int(candles[signal_index]["epoch"]) + 300,
+            "signal_epoch": None if signal_index is None else int(candles[signal_index]["epoch"]) + step,
         })
     return result

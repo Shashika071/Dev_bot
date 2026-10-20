@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from pathlib import Path
 
@@ -19,8 +20,8 @@ from app.synthetic.policy import (
     DURATION_SECONDS, MAX_ENTRY_AGE, SYMBOL, TIMEFRAMES, supports_rise_fall, validate_config,
 )
 
-# Chart-only. 1m is not an entry timeframe and is not used for training.
-CHART_TIMEFRAMES = {"1m": 60, **TIMEFRAMES}
+# Entries use the closed 1m candle. 5m and 15m confirm the direction.
+CHART_TIMEFRAMES = {"1m": 60, "5m": 300, "15m": 900}
 from app.synthetic.store import SyntheticStore
 from app.trade_prefs import load_trade_prefs, token_status
 
@@ -78,6 +79,8 @@ class SyntheticService:
         self._history: dict[str, list[dict]] = {}
         self._quote: dict | None = None
         self._quote_task: asyncio.Task | None = None
+        self._confidence: dict | None = None
+        self._confidence_task: asyncio.Task | None = None
 
     @property
     def store(self) -> SyntheticStore:
@@ -96,8 +99,8 @@ class SyntheticService:
             "signals": self.store.signals(), "ml": ml_status(settings.model_dir),
             **jobs,
             "product": {
-                "mode": "synthetic_rise_fall", "symbol": SYMBOL, "duration_seconds": 300,
-                "entry_timeframe": "5m", "context_timeframes": ["15m", "1h"],
+                "mode": "synthetic_rise_fall", "symbol": SYMBOL, "duration_seconds": DURATION_SECONDS,
+                "entry_timeframe": "1m", "context_timeframes": ["5m", "15m"],
                 "contract": "CALL_PUT_zero_barrier", "timezone": "Asia/Colombo",
             },
         }
@@ -116,7 +119,7 @@ class SyntheticService:
 
     async def chart(self, timeframe: str = "5m", count: int = 500) -> dict:
         if timeframe not in CHART_TIMEFRAMES:
-            raise ValueError("Choose 1m, 5m, 15m or 1h")
+            raise ValueError("Choose 1m, 5m or 15m")
         step = CHART_TIMEFRAMES[timeframe]
         client = DerivWSClient()
         captured = int(time.time())
@@ -160,6 +163,57 @@ class SyntheticService:
         if not quote:
             return {"symbol": SYMBOL, "epoch": None, "quote": None, "age_seconds": None}
         return {**quote, "age_seconds": max(0, int(time.time()) - int(quote["epoch"]))}
+
+    def confidence(self) -> dict:
+        """Latest model rise/fall probabilities for the chart. Does not place a trade."""
+        self._ensure_confidence()
+        if self._confidence:
+            return self._confidence
+        analyses = self.store.state().get("analyses") or []
+        if analyses and isinstance(analyses[0], dict):
+            return confidence_view(analyses[0])
+        return confidence_view({})
+
+    def _ensure_confidence(self) -> None:
+        if self._confidence_task is None or self._confidence_task.done():
+            self._confidence_task = asyncio.create_task(self._confidence_loop())
+
+    async def _confidence_loop(self) -> None:
+        while True:
+            try:
+                await self._refresh_confidence()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if self._confidence is None:
+                    self._confidence = confidence_view({})
+            await asyncio.sleep(4)
+
+    async def _refresh_confidence(self) -> None:
+        state = self.store.state()
+        analyses = state.get("analyses") or []
+        last_scan = int(state.get("last_scan") or 0)
+        if analyses and isinstance(analyses[0], dict) and 0 <= int(time.time()) - last_scan <= 8:
+            self._confidence = confidence_view(analyses[0])
+            return
+        frames: dict[str, list[dict]] = {}
+        client = DerivWSClient()
+        try:
+            await client.connect()
+            for name, step in TIMEFRAMES.items():
+                captured = int(time.time())
+                rows = await client.get_candles(SYMBOL, granularity=step, count=500)
+                frames[name] = captured_closed_candles(rows, step, captured)
+        finally:
+            await client.disconnect()
+        now = int(time.time())
+        frames = self._with_training_history(frames, now)
+        analysis = analyze_synthetic(frames, now=now)
+        analysis["ml"] = predict_frames(
+            settings.model_dir, frames, now=now,
+            checklist_direction=analysis.get("direction", "NO TRADE"),
+        )
+        self._confidence = confidence_view(analysis)
 
     def _ensure_quote(self) -> None:
         if self._quote_task is None or self._quote_task.done():
@@ -206,6 +260,13 @@ class SyntheticService:
             self._task = asyncio.create_task(self._loop())
 
     async def shutdown(self):
+        if self._confidence_task:
+            self._confidence_task.cancel()
+            try:
+                await self._confidence_task
+            except asyncio.CancelledError:
+                pass
+            self._confidence_task = None
         if self._quote_task:
             self._quote_task.cancel()
             try:
@@ -225,7 +286,7 @@ class SyntheticService:
         while self.store.state().get("running") and settings.bot_mode == "synthetic":
             await self.scan(execute=True)
             # Check within a minute of candle close, without issuing a setup twice.
-            await asyncio.sleep(20)
+            await asyncio.sleep(5)
 
     async def scan(self, *, execute: bool = False) -> dict:
         if self._lock.locked():
@@ -278,12 +339,13 @@ class SyntheticService:
             blockers.append(prediction.get("reason") or "A validated CatBoost model must agree")
         decision = int(analysis.get("decision_epoch") or 0)
         if not 0 <= now - decision <= MAX_ENTRY_AGE:
-            blockers.append("Wait for the next 5-minute close: entry window is 60 seconds")
+            blockers.append("Wait for the next 1-minute close: entry window is 20 seconds")
         analysis.update(
             ml=prediction, technical_direction=technical_direction, blockers=list(dict.fromkeys(blockers)),
             eligible=not blockers and technical_direction in {"RISE", "FALL"},
             direction=technical_direction if not blockers else "NO TRADE",
         )
+        self._confidence = confidence_view(analysis)
         self.store.update_state(analyses=[analysis], last_scan=now, last_error=None)
         if not execute or not analysis["eligible"] or not self.store.state().get("running"):
             return
@@ -326,6 +388,32 @@ class SyntheticService:
             name: clean_candles(self._history.get(name, []) + frames.get(name, []), step, now=now)
             for name, step in TIMEFRAMES.items()
         }
+
+
+def confidence_view(analysis: dict) -> dict:
+    """Chart-safe rise/fall probabilities from one analysis."""
+    ml = analysis.get("ml") if isinstance(analysis.get("ml"), dict) else {}
+
+    def number(key: str) -> float | None:
+        value = ml.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            return None
+        return float(value)
+
+    direction = ml.get("direction")
+    threshold = number("threshold")
+    return {
+        "symbol": SYMBOL,
+        "direction": direction if direction in {"RISE", "FALL", "NO TRADE"} else "NO TRADE",
+        "p_rise": number("p_rise"),
+        "p_fall": number("p_fall"),
+        "p_tie": number("p_tie"),
+        "confidence": number("confidence"),
+        "threshold": 0.60 if threshold is None else threshold,
+        "decision_epoch": analysis.get("decision_epoch"),
+        "reason": ml.get("reason") or "Waiting for a model confidence read",
+        "updated_at": int(time.time()),
+    }
 
 
 synthetic_service = SyntheticService()

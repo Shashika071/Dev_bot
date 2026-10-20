@@ -1,4 +1,4 @@
-"""Bounded, public Deriv history for the R_100 five-minute strategy."""
+"""Bounded, public Deriv history for the R_100 one-minute strategy."""
 from __future__ import annotations
 
 import asyncio
@@ -11,7 +11,7 @@ import pandas as pd
 from app.deriv.client import DerivWSClient
 
 SYMBOL = "R_100"
-TIMEFRAMES = {"5m": 300, "15m": 900, "1h": 3600}
+TIMEFRAMES = {"1m": 60, "5m": 300, "15m": 900}
 DEFAULT_DAYS = 90
 MIN_DAYS = 60
 MAX_DAYS = 90
@@ -143,7 +143,7 @@ async def download_history(model_base: str | Path, *, days: int = DEFAULT_DAYS,
     now = int(time.time())
     try:
         await client.connect()
-        for tf in ("1h", "15m", "5m"):
+        for tf in ("15m", "5m", "1m"):
             step = TIMEFRAMES[tf]
             earliest = now // step * step - days * 86400
             end = now

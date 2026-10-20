@@ -222,7 +222,7 @@ export function SyntheticPage() {
 
   return <div className="sy-page">
     <header className="sy-header">
-      <div><div className="sy-eyebrow"><Activity size={14} /> DERIV / SYNTHETIC MARKETS</div><h1>Volatility 100 <span>Rise / Fall</span></h1><p>FRAMA Channel + Range Filter · CatBoost confirmation · 5-minute expiry</p></div>
+      <div><div className="sy-eyebrow"><Activity size={14} /> DERIV / SYNTHETIC MARKETS</div><h1>Volatility 100 <span>Rise / Fall</span></h1><p>FRAMA Channel + Range Filter · CatBoost confirmation · 1-minute expiry</p></div>
       <div className="sy-header-status"><span className={`sy-service ${online ? 'connected' : ''}`}><i />{loading ? 'Connecting' : online ? 'Service connected' : 'Service unavailable'}</span><span className="sy-demo-label"><ShieldCheck size={13} /> Demo execution only</span></div>
     </header>
 
@@ -232,8 +232,8 @@ export function SyntheticPage() {
 
     <div className="sy-stats">
       <div><span>MARKET</span><strong>Volatility 100</strong><small>R_100 · Synthetic index</small></div>
-      <div><span>ENTRY / EXPIRY</span><strong>5m <em>/</em> 5m</strong><small>Only completed entry candles</small></div>
-      <div><span>TREND CONFIRMATION</span><strong>15m <em>+</em> 1h</strong><small>Higher-timeframe alignment</small></div>
+      <div><span>ENTRY / EXPIRY</span><strong>1m <em>/</em> 1m</strong><small>Only completed entry candles</small></div>
+      <div><span>TREND CONFIRMATION</span><strong>5m <em>+</em> 15m</strong><small>Higher-timeframe alignment</small></div>
       <div><span>BOT STATE</span><strong className={status?.running ? 'sy-positive' : ''}>{status?.running ? 'Running' : 'Stopped'}</strong><small>{status?.config?.demo_auto_trade ? 'Demo auto-trading enabled' : 'Signal monitoring only'}</small></div>
     </div>
 
@@ -241,11 +241,11 @@ export function SyntheticPage() {
       <div>
         <SyntheticChart online={online} />
         <section className="sy-panel">
-          <div className="sy-panel-title"><div><h2><Check size={17} /> Entry confirmation</h2><p>Both indicators must agree, then pass trend and model checks.</p></div><span className="sy-tag">M5 closed</span></div>
+          <div className="sy-panel-title"><div><h2><Check size={17} /> Entry confirmation</h2><p>Both indicators must agree, then pass trend and model checks.</p></div><span className="sy-tag">M1 closed</span></div>
           <div className="sy-indicators"><IndicatorCard name="FRAMA Channel" state={analysis?.indicators?.frama} type="frama" /><div className="sy-plus">+</div><IndicatorCard name="Range Filter" state={analysis?.indicators?.range_filter} type="range" /></div>
-          <div className="sy-timeframes">{(['5m', '15m', '1h'] as const).map(tf => {
+          <div className="sy-timeframes">{(['1m', '5m', '15m'] as const).map(tf => {
             const frame = analysis?.timeframes?.[tf];
-            return <div key={tf}><span>{tf} {tf === '5m' ? 'entry' : 'confirmation'}</span><strong className={`sy-${tone(frame?.trend)}`}>{frame?.trend || 'Waiting'}</strong><small>{frame?.structure?.replace(/_/g, ' / ') || 'No structure yet'} · {frame?.bars ?? 0} candles</small></div>;
+            return <div key={tf}><span>{tf} {tf === '1m' ? 'entry' : 'confirmation'}</span><strong className={`sy-${tone(frame?.trend)}`}>{frame?.trend || 'Waiting'}</strong><small>{frame?.structure?.replace(/_/g, ' / ') || 'No structure yet'} · {frame?.bars ?? 0} candles</small></div>;
           })}</div>
           <details className="sy-evidence" open><summary>Market evidence <span>{factors.length} checks <ChevronDown size={15} /></span></summary>
             <div>{factors.map((factor, index) => <div className="sy-factor" key={`${factor.id}-${index}`}><span className="sy-factor-index">{String(index + 1).padStart(2, '0')}</span><div><strong>{factor.name}</strong><p>{detail(factor.detail)}</p></div><span className={`sy-tag sy-${tone(factor.status)}`}>{factor.status}</span></div>)}</div>
@@ -269,13 +269,13 @@ export function SyntheticPage() {
         <section className="sy-panel">
           <div className="sy-panel-title"><h2><Play size={16} /> Bot controls</h2></div>
           <div className="sy-fields"><label>Stake per demo trade<input type="number" min="0.35" step="0.01" value={stake} disabled={status?.running || !!busy} onChange={event => setStake(event.target.value)} /></label><label>Daily signal limit<input type="number" min="1" max="100" step="1" value={cap} disabled={status?.running || !!busy} onChange={event => setCap(event.target.value)} /></label></div>
-          <label className="sy-checkbox"><input type="checkbox" checked={demoAutoTrade} disabled={status?.running || !!busy} onChange={event => setDemoAutoTrade(event.target.checked)} /><span><strong>Enable demo auto-trading</strong><small>Buy a 5-minute Rise/Fall contract when all gates pass.</small></span></label>
+          <label className="sy-checkbox"><input type="checkbox" checked={demoAutoTrade} disabled={status?.running || !!busy} onChange={event => setDemoAutoTrade(event.target.checked)} /><span><strong>Enable demo auto-trading</strong><small>Buy a 1-minute Rise/Fall contract when all gates pass.</small></span></label>
           <div className="sy-actions">
             <button type="button" className="sy-button sy-primary" disabled={!online || !!busy || !!status?.running || !validInputs} onClick={() => void act('start')}>{busy === 'start' ? <Loader2 className="sy-spin" size={14} /> : <Play size={14} />}{demoAutoTrade ? 'Start demo bot' : 'Start monitoring'}</button>
             <button type="button" className="sy-button" disabled={busy === 'stop' || (!status?.running && busy !== 'scan' && busy !== 'start')} onClick={() => void act('stop')}><Pause size={14} /> Stop</button>
             <button type="button" className="sy-button" disabled={!online || !!busy} onClick={() => void act('scan')}><RefreshCw size={14} className={busy === 'scan' ? 'sy-spin' : ''} /> Scan preview</button>
           </div>
-          <p className="sy-footnote">Scan preview analyses the market without placing a trade. Expiry is fixed at 5 minutes.</p>
+          <p className="sy-footnote">Scan preview analyses the market without placing a trade. Expiry is fixed at 1 minute.</p>
           <div className="sy-execution"><ShieldCheck size={16} /><p>{status?.execution?.reason || 'Waiting for demo execution readiness.'}</p></div>
           <details className="sy-account"><summary>Demo account connection <ChevronDown size={15} /></summary>
             <p>Use a Deriv demo account token with trading permission.</p>
@@ -297,7 +297,7 @@ export function SyntheticPage() {
       <div className="sy-training-grid">
         <div>
           <h3>Historical candles</h3><p className="sy-muted">Download up to 90 days of Volatility 100 history, then train on completed candles.</p>
-          <div className="sy-history-stats">{['5m', '15m', '1h'].map(tf => {
+          <div className="sy-history-stats">{['1m', '5m', '15m'].map(tf => {
             const history = status?.history?.timeframes?.[tf];
             return <div key={tf}><span>{tf}</span><strong>{number(history?.bars, 0)}</strong><small>{number(history?.days, 1)} days · {number(history?.gaps, 0)} gaps</small></div>;
           })}</div>
@@ -317,7 +317,7 @@ export function SyntheticPage() {
     </section>
 
     <section className="sy-panel">
-      <div className="sy-panel-title"><div><h2><Clock size={17} /> Recent signals</h2><p>Qualified decisions and their execution status</p></div><span className="sy-tag">5-minute expiry</span></div>
+      <div className="sy-panel-title"><div><h2><Clock size={17} /> Recent signals</h2><p>Qualified decisions and their execution status</p></div><span className="sy-tag">1-minute expiry</span></div>
       {latestSignals.length ? <div className="sy-table-wrap"><table><thead><tr><th>Decision time · Colombo</th><th>Market</th><th>Signal</th><th>Expiry</th><th>Execution</th></tr></thead><tbody>{latestSignals.map((signal, index) => <tr key={signal.id || index}><td>{dateTime(signal.decision_epoch || signal.created_epoch || signal.created_at)}</td><td>Volatility 100</td><td><Direction value={signal.direction} /></td><td>{dateTime(signal.expiry_epoch)}</td><td>{signal.execution_status?.replace(/_/g, ' ') || 'Recorded'}</td></tr>)}</tbody></table></div> : <div className="sy-empty"><Activity size={22} /><strong>No qualified signals yet</strong><p>A signal appears when FRAMA, Range Filter, higher timeframes and the trained model pass together.</p></div>}
     </section>
 
