@@ -10,8 +10,8 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # Product is Forex Rise/Fall only. Legacy Touch mode is retired from the API UI.
-    bot_mode: str = Field("forex", pattern="^(forex)$")
+    # Synthetic Volatility 100 is the default; Forex remains an isolated legacy mode.
+    bot_mode: str = Field("synthetic", pattern="^(forex|synthetic)$")
     forex_context_url: Optional[str] = None
     forex_context_file: Optional[str] = None
     forex_context_token: Optional[str] = None
