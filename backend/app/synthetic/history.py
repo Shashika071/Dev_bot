@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import math
 import time
+from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
@@ -87,8 +89,10 @@ def span_summary(rows: list[dict], step: int) -> dict:
     }
 
 
-def history_status(model_base: str | Path, job: dict | None = None) -> dict:
-    root = history_root(model_base)
+@lru_cache(maxsize=16)
+def _history_summary(root_path: str, stamp: tuple, minute: int) -> dict:
+    """Summary reads are shared across polls until the candle files change."""
+    root = Path(root_path)
     frames = {}
     for tf, step in TIMEFRAMES.items():
         try:
@@ -102,8 +106,20 @@ def history_status(model_base: str | Path, job: dict | None = None) -> dict:
         "symbol": SYMBOL, "timeframes": frames, "ready_for_train": ready,
         "minimum_days": MIN_DAYS, "maximum_days": MAX_DAYS,
         "path": str(root), "source": "Deriv public candles",
-        "job": dict(job or {"status": "idle", "progress": "", "error": None}),
     }
+
+
+def history_status(model_base: str | Path, job: dict | None = None) -> dict:
+    root = history_root(model_base)
+    stamp = []
+    for tf in TIMEFRAMES:
+        try:
+            stat = (root / f"{tf}.parquet").stat()
+            stamp.append((tf, stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            stamp.append((tf, None, None))
+    summary = copy.deepcopy(_history_summary(str(root), tuple(stamp), int(time.time()) // 60))
+    return {**summary, "job": dict(job or {"status": "idle", "progress": "", "error": None})}
 
 
 def validate_days(days: int) -> int:
@@ -158,14 +174,14 @@ async def download_history(model_base: str | Path, *, days: int = DEFAULT_DAYS,
                 first = int(valid[0]["epoch"])
                 if first >= oldest:
                     break
-                saved = save_candles(root, tf, valid, now=now, earliest=earliest)
+                saved = await asyncio.to_thread(save_candles, root, tf, valid, now=now, earliest=earliest)
                 report["progress"] = f"{tf}: saved {len(saved):,} closed candles"
                 oldest = first
                 if first <= earliest:
                     break
                 end = first - 1
                 await asyncio.sleep(PAGE_PAUSE_SECONDS)
-        status = history_status(model_base)
+        status = await asyncio.to_thread(history_status, model_base)
         if not status["ready_for_train"]:
             raise ValueError("Deriv returned insufficient history; need at least 60 days on all three timeframes")
         report.update(status="done", progress="Public history download complete",
@@ -176,4 +192,4 @@ async def download_history(model_base: str | Path, *, days: int = DEFAULT_DAYS,
         raise
     finally:
         await client.disconnect()
-    return history_status(model_base, report)
+    return await asyncio.to_thread(history_status, model_base, report)

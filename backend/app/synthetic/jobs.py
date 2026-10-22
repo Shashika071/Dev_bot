@@ -8,7 +8,7 @@ from pathlib import Path
 
 from app.config import settings
 from app.synthetic.history import DEFAULT_DAYS, download_history, history_status, validate_days
-from app.synthetic.ml import publish_train_job, train_model
+from app.synthetic.ml import publish_train_job
 
 
 def load_saved_train_job(model_base: str | Path) -> dict:
@@ -73,26 +73,10 @@ class SyntheticJobs:
                     self.history_job.update(status="error", error=str(exc))
 
             self._history_task = asyncio.create_task(run())
-            return self.snapshot()
+            return await asyncio.to_thread(self.snapshot)
 
     async def start_train(self) -> dict:
-        async with self._lock:
-            self._check_busy()
-            if not history_status(settings.model_dir)["ready_for_train"]:
-                raise ValueError("Download at least 60 days of history before training")
-            self.train_job = {"status": "running", "progress": "Starting CatBoost/control validation", "error": None, "result": None}
-            publish_train_job(settings.model_dir, self.train_job)
-
-            async def run() -> None:
-                try:
-                    result = await asyncio.to_thread(train_model, settings.model_dir, progress=self.train_job)
-                    self.train_job["result"] = result
-                except Exception as exc:
-                    self.train_job.update(status="error", error=str(exc), progress="Training failed")
-                    publish_train_job(settings.model_dir, self.train_job)
-
-            self._train_task = asyncio.create_task(run())
-            return self.snapshot()
+        raise ValueError("The previous CatBoost model was removed. Use the research signal engine.")
 
 
 synthetic_jobs = SyntheticJobs()

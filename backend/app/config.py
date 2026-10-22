@@ -159,6 +159,9 @@ class Settings(BaseSettings):
         "env_file": ".env",
         "env_file_encoding": "utf-8",
         "protected_namespaces": ("settings_",),
+        # The repository .env is shared with Docker Compose and Vite.
+        # Their own keys must not prevent the backend or training CLI starting.
+        "extra": "ignore",
     }
 
 

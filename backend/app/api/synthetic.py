@@ -1,10 +1,14 @@
 """Volatility 100 controls; manual scans while stopped cannot buy."""
+import asyncio
+
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.api.forex import AccountBody, require_forex_control
+from app.config import settings
 from app.synthetic.jobs import synthetic_jobs
 from app.synthetic.service import synthetic_service
+from app.trading_ml.service import record_paper, start_research, start_score, start_ticks
 from app.trade_prefs import load_trade_prefs, save_trade_prefs, save_trade_token
 
 router = APIRouter(prefix="/synthetic", tags=["synthetic"])
@@ -22,9 +26,24 @@ class HistoryBody(BaseModel):
     days: int = Field(90, ge=60, le=90)
 
 
+class ResearchBody(BaseModel):
+    duration_seconds: int = Field(300, ge=60, le=3600)
+    payout: float | None = None
+    models: list[str] | None = None
+
+
+class ScoreBody(BaseModel):
+    payout: float | None = None
+
+
+class TickBody(BaseModel):
+    hours: int = Field(6, ge=1, le=24)
+
+
 @router.get("/status")
 async def status():
-    return synthetic_service.status()
+    synthetic_service._ensure_confidence()
+    return await asyncio.to_thread(synthetic_service.status)
 
 
 @router.get("/symbols")
@@ -85,12 +104,12 @@ async def account(body: AccountBody, x_forex_control_token: str | None = Header(
     save_trade_prefs({**prefs, **updates})
     if not body.enabled:
         await synthetic_service.stop()
-    return synthetic_service.status()
+    return await asyncio.to_thread(synthetic_service.status)
 
 
 @router.get("/history/status")
 async def history_status():
-    return synthetic_jobs.snapshot()["history"]
+    return (await asyncio.to_thread(synthetic_jobs.snapshot))["history"]
 
 
 @router.post("/history/download")
@@ -104,13 +123,60 @@ async def history_download(body: HistoryBody | None = None, x_forex_control_toke
 
 @router.get("/train/status")
 async def train_status():
-    return synthetic_jobs.snapshot()["train"]
+    return (await asyncio.to_thread(synthetic_jobs.snapshot))["train"]
 
 
 @router.post("/train")
 async def train(x_forex_control_token: str | None = Header(default=None)):
     require_forex_control(x_forex_control_token)
+    raise HTTPException(400, "The previous CatBoost model was removed. Use the research signal engine.")
+
+
+@router.post("/research/evaluate")
+async def research_evaluate(body: ResearchBody, x_forex_control_token: str | None = Header(default=None)):
+    require_forex_control(x_forex_control_token)
     try:
-        return (await synthetic_jobs.start_train())["train"]
+        return await start_research(
+            settings.model_dir,
+            duration_seconds=body.duration_seconds, payout=body.payout, models=body.models,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/research/score")
+async def research_score(body: ScoreBody | None = None, x_forex_control_token: str | None = Header(default=None)):
+    require_forex_control(x_forex_control_token)
+    try:
+        return await start_score(
+            settings.model_dir,
+            payout=None if body is None else body.payout,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/research/paper")
+async def research_paper(x_forex_control_token: str | None = Header(default=None)):
+    require_forex_control(x_forex_control_token)
+    try:
+        quote = synthetic_service.quote()
+        return await asyncio.to_thread(
+            record_paper,
+            settings.model_dir,
+            quote_epoch=quote.get("epoch") if isinstance(quote, dict) else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/research/ticks")
+async def research_ticks(body: TickBody | None = None, x_forex_control_token: str | None = Header(default=None)):
+    require_forex_control(x_forex_control_token)
+    try:
+        return await start_ticks(
+            settings.model_dir,
+            hours=(body or TickBody()).hours,
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc

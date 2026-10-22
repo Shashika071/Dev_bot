@@ -30,6 +30,7 @@ from app.synthetic.ml import (
     ml_status,
     predict_frames,
     purged_walk_forward,
+    selection_diagnostics,
 )
 
 NOW = 1_792_396_800 // 3600 * 3600
@@ -221,11 +222,185 @@ def test_missing_or_unpromoted_model_never_passes_hybrid_gate(tmp_path):
     empty = predict_frames(tmp_path, {}, now=NOW, checklist_direction="RISE")
     assert empty["hybrid_passed"] is False
     assert empty["available"] is False
+    assert empty["p_rise"] is None
     path = artifact_paths(tmp_path)["latest"]
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps({"accepted": False, "promoted": False}), encoding="utf-8")
-    assert ml_status(tmp_path)["state"] == "candidate"
-    assert not predict_frames(tmp_path, {}, now=NOW, checklist_direction="RISE")["hybrid_passed"]
+    assert ml_status(tmp_path)["state"] == "invalid"
+    blocked = predict_frames(tmp_path, {}, now=NOW, checklist_direction="RISE")
+    assert blocked["hybrid_passed"] is False
+    assert blocked["p_rise"] is None
+
+
+def test_unpromoted_candidate_still_shows_rise_and_fall_confidence(tmp_path, monkeypatch):
+    data = frames()
+    _active, report = install_valid_test_artifacts(tmp_path, data)
+    report.update(promoted=False, accepted=False)
+    latest = artifact_paths(tmp_path)["latest"]
+    latest.write_text(json.dumps(report), encoding="utf-8")
+    artifact_paths(tmp_path)["active"].unlink()
+    row = {name: 0.0 for name in FEATURE_COLUMNS}
+    row.update(checklist_direction=1, rule_eligible=1)
+    monkeypatch.setattr("app.synthetic.ml.features_from_frames", lambda *_args, **_kwargs: row)
+    result = predict_frames(tmp_path, data, now=NOW, checklist_direction="RISE")
+    assert result["promoted"] is False
+    assert result["hybrid_passed"] is False
+    assert result["p_rise"] == pytest.approx(0.85)
+    assert result["p_fall"] == pytest.approx(0.1)
+    assert result["direction"] == "RISE"
+    assert result["inference_available"] is True
+    assert result["display_only"] is True
+    assert result["prediction_candidate_id"] == report["candidate_id"]
+    assert result["decision_epoch"] == NOW
+
+
+@pytest.mark.parametrize("metric", ["auc", "brier", "selected_accuracy", "selected_wilson_lower"])
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), -0.1, 1.1, True, "0.9"])
+def test_promotion_rejects_malformed_evidence(metric, bad_value):
+    report = accepted_report()
+    report["final_test"]["catboost"][metric] = bad_value
+    assert acceptance(report)[0] is False
+
+
+def test_promotion_rejects_malformed_fold_and_paired_control_evidence():
+    report = accepted_report()
+    report["walk_forward"][0]["catboost"]["selected"] = float("inf")
+    assert acceptance(report)[0] is False
+    report = accepted_report()
+    report["final_test"]["control_on_candidate_selection_accuracy"] = float("nan")
+    assert acceptance(report)[0] is False
+    report = accepted_report()
+    report["walk_forward"] = ["corrupt"] * 3
+    assert acceptance(report)[0] is False
+
+
+def test_selection_diagnostics_explain_each_abstention_stage():
+    dataset = pd.DataFrame({"checklist_direction": [1, 1, -1, 1], "rule_eligible": [1, 0, 1, 1]})
+    probabilities = np.asarray([[0.49, 0.51, 0], [0.2, 0.8, 0], [0.2, 0.8, 0], [0.2, 0.8, 0]])
+    diagnostics = selection_diagnostics(probabilities, dataset)
+    assert diagnostics["below_threshold"] == 1
+    assert diagnostics["confidence_passed"] == 3
+    assert diagnostics["rule_eligible"] == 3
+    assert diagnostics["technical_blocked"] == 1
+    assert diagnostics["direction_conflicts"] == 1
+    assert diagnostics["selected"] == 1
+    assert diagnostics["confidence_max"] == pytest.approx(0.8)
+    low = selection_diagnostics(np.tile([0.49, 0.51, 0], (4, 1)), dataset)
+    assert "No model estimate reached the 60%" in low["reason"]
+    assert low["confidence_max"] == pytest.approx(0.51)
+
+
+def test_incompatible_candidate_explains_why_confidence_needs_retraining(tmp_path):
+    data = frames()
+    _active, report = install_valid_test_artifacts(tmp_path, data)
+    report.update(promoted=False, accepted=False, duration_seconds=300, entry_timeframe="5m")
+    artifact_paths(tmp_path)["active"].unlink()
+    artifact_paths(tmp_path)["latest"].write_text(json.dumps(report), encoding="utf-8")
+    result = predict_frames(tmp_path, data, now=NOW, checklist_direction="RISE")
+    assert result["state"] == "invalid"
+    assert "retrain" in result["reason"]
+    assert result["inference_available"] is False
+    assert result["p_rise"] is None
+
+
+def test_inference_artifact_read_failure_is_contained(tmp_path, monkeypatch):
+    def unavailable(*_args):
+        raise OSError("candidate temporarily unreadable")
+
+    monkeypatch.setattr("app.synthetic.ml._display_meta", unavailable)
+    result = predict_frames(tmp_path, {}, now=NOW, checklist_direction="RISE")
+    assert result["state"] == "unavailable"
+    assert result["hybrid_passed"] is False
+    assert result["p_rise"] is None
+
+
+def test_missing_candidate_file_explains_unavailable_confidence(tmp_path):
+    data = frames()
+    _active, report = install_valid_test_artifacts(tmp_path, data)
+    report.update(promoted=False, accepted=False)
+    artifact_paths(tmp_path)["active"].unlink()
+    artifact_paths(tmp_path)["latest"].write_text(json.dumps(report), encoding="utf-8")
+    model = artifact_paths(tmp_path)["candidates"] / report["candidate_id"] / "catboost.cbm"
+    model.unlink()
+    result = predict_frames(tmp_path, data, now=NOW, checklist_direction="RISE")
+    assert result["state"] == "invalid"
+    assert "model file is missing" in result["reason"]
+    assert result["inference_available"] is False
+    assert result["hybrid_passed"] is False
+
+
+def test_inference_reuses_analysis_only_with_matching_history_seed_and_candle(tmp_path, monkeypatch):
+    data = frames()
+    install_valid_test_artifacts(tmp_path, data)
+    row = {name: 0.0 for name in FEATURE_COLUMNS}
+    row.update(checklist_direction=1, rule_eligible=1)
+    snapshot = {"decision_epoch": NOW, "features": row}
+    calls = []
+
+    def calculate(*_args, **_kwargs):
+        calls.append(True)
+        return row
+
+    monkeypatch.setattr("app.synthetic.ml.features_from_frames", calculate)
+    result = predict_frames(tmp_path, data, now=NOW, checklist_direction="RISE", analysis=snapshot)
+    assert result["hybrid_passed"] is True
+    assert not calls
+    snapshot["decision_epoch"] = NOW - 60
+    predict_frames(tmp_path, data, now=NOW, checklist_direction="RISE", analysis=snapshot)
+    assert len(calls) == 1
+    snapshot["decision_epoch"] = NOW
+    older_data = copy.deepcopy(data)
+    older_data["1m"].insert(0, {**data["1m"][0], "epoch": data["1m"][0]["epoch"] - 60})
+    predict_frames(tmp_path, older_data, now=NOW, checklist_direction="RISE", analysis=snapshot)
+    assert len(calls) == 2
+
+
+def test_saved_predictions_add_diagnostics_without_changing_validation_evidence(tmp_path):
+    data = frames()
+    _active, report = install_valid_test_artifacts(tmp_path, data)
+    probability = np.asarray([[0.49, 0.51, 0], [0.48, 0.52, 0]])
+    dataset = pd.DataFrame({"label": [1, 0], "checklist_direction": [1, -1], "rule_eligible": [1, 1]})
+    metrics = evaluate(probability, dataset)
+    metrics.pop("selection_diagnostics")
+    report["final_test"] = {"catboost": dict(metrics), "logistic": dict(metrics)}
+    artifact_paths(tmp_path)["latest"].write_text(json.dumps(report), encoding="utf-8")
+    predictions = dataset.copy()
+    for model in ("catboost", "logistic"):
+        for index, side in enumerate(("fall", "rise", "tie")):
+            predictions[f"{model}_p_{side}"] = probability[:, index]
+    path = artifact_paths(tmp_path)["candidates"] / report["candidate_id"] / "final_predictions.csv"
+    predictions.to_csv(path, index=False)
+    result = ml_status(tmp_path)
+    enriched = result["report"]["final_test"]["catboost"]
+    assert enriched["selection_diagnostics"]["confidence_max"] == pytest.approx(0.52)
+    assert enriched["selected"] == 0
+    assert "selection_diagnostics" not in json.loads(artifact_paths(tmp_path)["latest"].read_text())["final_test"]["catboost"]
+
+
+def test_classifier_probability_rows_and_classes_are_not_silently_broadcast():
+    class InvalidRows:
+        classes_ = np.asarray([0, 1, 2])
+
+        def predict_proba(self, _values):
+            return np.asarray([[0.1, 0.8, 0.1]])
+
+    with pytest.raises(ValueError, match="shape"):
+        _probabilities(InvalidRows(), np.ones((3, 2)))
+    invalid = InvalidRows()
+    invalid.classes_ = np.asarray([0.1, 1, 2])
+    with pytest.raises(ValueError, match="classes"):
+        _probabilities(invalid, np.ones((1, 2)))
+
+
+def test_legacy_label_name_is_compatible_only_with_current_one_minute_schema(tmp_path):
+    data = frames()
+    path, report = install_valid_test_artifacts(tmp_path, data)
+    report["label_kind"] = "next_m5_open_close_proxy_ties_lose"
+    path.write_text(json.dumps(report), encoding="utf-8")
+    assert ml_status(tmp_path)["ready"] is True
+    report["duration_seconds"] = 300
+    path.write_text(json.dumps(report), encoding="utf-8")
+    assert ml_status(tmp_path)["ready"] is False
 
 
 @pytest.mark.parametrize("key,value", [

@@ -22,7 +22,7 @@ from app.synthetic.history import SYMBOL, TIMEFRAMES, clean_candles, history_sta
 
 DURATION = 60
 FEATURE_SCHEMA = "r100-frama-range-1m-v3"
-LABEL_KIND = "next_m5_open_close_proxy_ties_lose"
+LABEL_KIND = "next_m1_open_close_proxy_ties_lose"
 POLICY_VERSION = "fixed60-purged3-holdout20-v1"
 DEFAULT_THRESHOLD = 0.60
 ASSUMED_NET_PAYOUT = 0.80
@@ -36,6 +36,7 @@ PROBABILITY_NOTE = (
     "Labels use next-candle open/close; actual entry ticks, settlement ticks and payout can differ."
 )
 _MODEL_CACHE: dict[str, tuple[int, object]] = {}
+_DIAGNOSTIC_CACHE: dict[tuple[str, int, int, float], dict] = {}
 
 
 def artifact_paths(base: str | Path) -> dict[str, Path]:
@@ -163,9 +164,11 @@ def wilson_lower(hits: int, total: int, *, z: float = 1.96) -> float | None:
 def _probabilities(model, values: np.ndarray) -> np.ndarray:
     """Map a classifier's fitted classes into explicit FALL/RISE/TIE columns."""
     raw = np.asarray(model.predict_proba(values), dtype=float)
-    classes = np.asarray(model.classes_, dtype=int)
+    classes = np.asarray(model.classes_)
     out = np.zeros((len(values), 3), dtype=float)
-    if raw.ndim != 2 or raw.shape[1] != len(classes):
+    if classes.ndim != 1 or len(set(classes.tolist())) != len(classes) or not np.isin(classes, [0, 1, 2]).all():
+        raise ValueError("Invalid classifier outcome classes")
+    if raw.ndim != 2 or raw.shape != (len(values), len(classes)):
         raise ValueError("Invalid classifier probability shape")
     for index, label in enumerate(classes):
         if int(label) not in (0, 1, 2):
@@ -188,6 +191,39 @@ def policy_selection(probabilities: np.ndarray, dataset: pd.DataFrame, *,
     eligible = dataset["rule_eligible"].to_numpy(dtype=float) == 1
     selected = eligible & (direction != 0) & (direction == technical)
     return direction, selected
+
+
+def selection_diagnostics(probabilities: np.ndarray, dataset: pd.DataFrame, *,
+                          threshold: float = DEFAULT_THRESHOLD) -> dict:
+    """Explain abstentions without changing the predeclared selection policy."""
+    direction, selected = policy_selection(probabilities, dataset, threshold=threshold)
+    confidence = np.maximum(probabilities[:, 0], probabilities[:, 1])
+    confident = direction != 0
+    eligible = dataset["rule_eligible"].to_numpy(dtype=float) == 1
+    joint = confident & eligible
+    conflicts = joint & ~selected
+    count = int(selected.sum())
+    if count:
+        reason = f"{count:,} samples met the confidence threshold and all technical rules in the same direction."
+    elif not confident.any():
+        reason = f"No model estimate reached the {threshold:.0%} confidence threshold; no trades were selected."
+    elif not eligible.any():
+        reason = "No samples passed all technical rules; no trades were selected."
+    elif not joint.any():
+        reason = "Confidence and technical rules never passed on the same sample; no trades were selected."
+    else:
+        reason = "Confident estimates disagreed with the technical direction; no trades were selected."
+    return {
+        "confidence_passed": int(confident.sum()), "rule_eligible": int(eligible.sum()),
+        "confidence_and_rules": int(joint.sum()), "direction_conflicts": int(conflicts.sum()),
+        "selected": count, "below_threshold": int((~confident).sum()),
+        "technical_blocked": int((confident & ~eligible).sum()),
+        "confidence_min": float(confidence.min()) if len(confidence) else None,
+        "confidence_median": float(np.median(confidence)) if len(confidence) else None,
+        "confidence_p95": float(np.quantile(confidence, 0.95)) if len(confidence) else None,
+        "confidence_max": float(confidence.max()) if len(confidence) else None,
+        "reason": reason,
+    }
 
 
 def evaluate(probabilities: np.ndarray, dataset: pd.DataFrame, *,
@@ -228,6 +264,7 @@ def evaluate(probabilities: np.ndarray, dataset: pd.DataFrame, *,
         "selected_ties": int(((truth == 2) & selected).sum()),
         "selected_rise": int(((direction == 1) & selected).sum()),
         "selected_fall": int(((direction == -1) & selected).sum()),
+        "selection_diagnostics": selection_diagnostics(probabilities, dataset, threshold=threshold),
         "payout_sensitivity": payouts,
     }
 
@@ -237,6 +274,33 @@ def acceptance(report: dict) -> tuple[bool, list[str]]:
     reasons = []
     folds = report.get("walk_forward") or []
     final = report.get("final_test") or {}
+    # Comparisons with NaN are false in both directions. Reject malformed
+    # evidence explicitly before evaluating promotion thresholds.
+    if not isinstance(folds, list) or not isinstance(final, dict) or any(not isinstance(fold, dict) for fold in folds):
+        return False, ["Validation evidence has an invalid structure"]
+
+    def valid_rate(value) -> bool:
+        return (not isinstance(value, bool) and isinstance(value, (int, float))
+                and math.isfinite(value) and 0 <= value <= 1)
+
+    def valid_count(value) -> bool:
+        return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+
+    for name, evidence in [("Final test", final), *[(f"Fold {i}", fold) for i, fold in enumerate(folds, 1)]]:
+        for model_name in ("catboost", "logistic"):
+            metrics = evidence.get(model_name) or {}
+            if not isinstance(metrics, dict):
+                return False, [f"{name} {model_name} evidence has an invalid structure"]
+            rate_fields = ("auc", "brier", "selected_accuracy", "selected_wilson_lower")
+            if any(value is not None and not valid_rate(value) for value in (metrics.get(key) for key in rate_fields)):
+                reasons.append(f"{name} {model_name} contains non-finite or out-of-range metrics")
+            if metrics.get("selected") is not None and not valid_count(metrics["selected"]):
+                reasons.append(f"{name} {model_name} selected count is invalid")
+        paired_rate = evidence.get("control_on_candidate_selection_accuracy")
+        if paired_rate is not None and not valid_rate(paired_rate):
+            reasons.append(f"{name} paired control accuracy is invalid")
+    if reasons:
+        return False, reasons
     candidate = final.get("catboost") or {}
     control = final.get("logistic") or {}
     breakeven = (1 + ASSUMED_COST_PER_STAKE) / (1 + ASSUMED_NET_PAYOUT)
@@ -440,23 +504,35 @@ def _train_locked(model_base, job, note, *, iterations: int, threads: int) -> di
         raise
 
 
-def _compatible(meta: dict) -> tuple[bool, str]:
+def _schema_compatible(meta: dict) -> tuple[bool, str]:
     bindings = {
         "symbol": SYMBOL, "duration_seconds": DURATION, "entry_timeframe": "1m",
         "context_timeframes": ["5m", "15m"], "feature_schema": FEATURE_SCHEMA,
-        "features": list(FEATURE_COLUMNS), "label_kind": LABEL_KIND,
+        "features": list(FEATURE_COLUMNS),
         "model_kind": "CatBoostClassifier", "policy_version": POLICY_VERSION,
         "threshold": DEFAULT_THRESHOLD,
     }
     for name, expected in bindings.items():
         if meta.get(name) != expected:
             return False, f"Incompatible model {name}"
+    # Earlier 1m artifacts retained the old m5 label name despite using the
+    # same one-minute labels. The timeframe/schema checks above disallow 5m
+    # models; accepting the legacy name here does not change model semantics.
+    if meta.get("label_kind") not in {LABEL_KIND, "next_m5_open_close_proxy_ties_lose"}:
+        return False, "Incompatible model label_kind"
     origins = meta.get("feature_origins")
     if not isinstance(origins, dict) or set(origins) != set(TIMEFRAMES):
         return False, "Model does not bind the recursive feature history origins"
     if any(isinstance(origins[tf], bool) or not isinstance(origins[tf], int)
            or origins[tf] < 0 or origins[tf] % step for tf, step in TIMEFRAMES.items()):
         return False, "Model feature history origins are invalid"
+    return True, "Candidate schema matches the current one-minute strategy"
+
+
+def _compatible(meta: dict) -> tuple[bool, str]:
+    compatible, reason = _schema_compatible(meta)
+    if not compatible:
+        return False, reason
     if meta.get("promoted") is not True or meta.get("accepted") is not True:
         return False, "CatBoost candidate has not passed promotion gates"
     accepted, reasons = acceptance(meta)
@@ -472,6 +548,53 @@ def _model_path(base: str | Path, meta: dict) -> Path:
     return artifact_paths(base)["candidates"] / candidate_id / "catboost.cbm"
 
 
+def _saved_report_diagnostics(model_base: str | Path, report: dict | None) -> None:
+    """Enrich older reports from their saved predictions, never alter evidence.
+
+    Cache by file identity so status polling does not repeatedly parse a large
+    CSV. A missing or invalid optional file cannot disable model status.
+    """
+    if not report or not isinstance(report.get("final_test"), dict):
+        return
+    final = report["final_test"]
+    metrics = [final.get(name) for name in ("catboost", "logistic")]
+    if all(isinstance(item, dict) and item.get("selection_diagnostics") for item in metrics):
+        return
+    try:
+        path = _model_path(model_base, report).parent / "final_predictions.csv"
+        stat = path.stat()
+        if stat.st_size > 100_000_000:
+            return
+        threshold = float(report["threshold"])
+        if not math.isfinite(threshold) or not 0.5 < threshold <= 1:
+            return
+        key = (str(path), stat.st_mtime_ns, stat.st_size, threshold)
+        cached = _DIAGNOSTIC_CACHE.get(key)
+        if cached is None:
+            columns = ["checklist_direction", "rule_eligible", *[
+                f"{name}_p_{side}" for name in ("catboost", "logistic") for side in ("fall", "rise", "tie")
+            ]]
+            predictions = pd.read_csv(path, usecols=columns)
+            if predictions.empty or not np.isfinite(predictions.to_numpy(dtype=float)).all():
+                return
+            cached = {}
+            for name in ("catboost", "logistic"):
+                probability = predictions[[f"{name}_p_{side}" for side in ("fall", "rise", "tie")]].to_numpy(dtype=float)
+                if (probability < 0).any() or (probability > 1).any() or not np.allclose(probability.sum(axis=1), 1.0, atol=1e-6):
+                    return
+                cached[name] = selection_diagnostics(probability, predictions, threshold=threshold)
+            cached["samples"] = len(predictions)
+            _DIAGNOSTIC_CACHE.clear()
+            _DIAGNOSTIC_CACHE[key] = cached
+        for name in ("catboost", "logistic"):
+            evidence = final.get(name)
+            if (isinstance(evidence, dict) and evidence.get("samples") == cached["samples"]
+                    and evidence.get("selected") == cached[name]["selected"]):
+                evidence["selection_diagnostics"] = cached[name]
+    except (OSError, ValueError, TypeError, KeyError):
+        return
+
+
 def ml_status(model_base: str | Path) -> dict:
     paths = artifact_paths(model_base)
     result = {
@@ -482,9 +605,19 @@ def ml_status(model_base: str | Path) -> dict:
     }
     try:
         result["report"] = _json_read(paths["latest"])
+        _saved_report_diagnostics(model_base, result["report"])
         meta = _json_read(paths["active"])
         if meta is None:
             if result["report"]:
+                result["trained_at"] = result["report"].get("trained_at")
+                compatible, reason = _schema_compatible(result["report"])
+                if not compatible:
+                    return {**result, "state": "invalid", "reason": f"{reason}; retrain for the current one-minute strategy"}
+                candidate_path = _model_path(model_base, result["report"])
+                if not candidate_path.is_file():
+                    return {**result, "state": "invalid", "reason": "Candidate model file is missing; retrain to restore confidence estimates"}
+                if hashlib.sha256(candidate_path.read_bytes()).hexdigest() != result["report"].get("model_sha256"):
+                    return {**result, "state": "invalid", "reason": "Candidate model checksum does not match its report; retrain to restore confidence estimates"}
                 result.update(state="candidate", reason="Latest candidate did not pass validation; no model is promoted")
             return result
         result.update(metadata=meta, trained_at=meta.get("trained_at"))
@@ -502,33 +635,59 @@ def ml_status(model_base: str | Path) -> dict:
         return {**result, "state": "invalid", "reason": f"Cannot validate model artifacts ({type(exc).__name__})"}
 
 
+def _display_meta(model_base: str | Path, status: dict) -> dict | None:
+    """Promoted model, or the latest saved candidate for a chart reading only."""
+    if status.get("ready") and isinstance(status.get("metadata"), dict):
+        return status["metadata"]
+    report = status.get("report")
+    if not isinstance(report, dict) or not _schema_compatible(report)[0]:
+        return None
+    try:
+        path = _model_path(model_base, report)
+    except ValueError:
+        return None
+    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != report.get("model_sha256"):
+        return None
+    return report
+
+
 def predict_frames(model_base: str | Path, frames: dict, *, now: int,
-                   checklist_direction: str) -> dict:
+                   checklist_direction: str, analysis: dict | None = None) -> dict:
     status = ml_status(model_base)
     result = {
         **status, "direction": "NO TRADE", "p_rise": None, "p_fall": None, "p_tie": None,
         "confidence": None, "probability": None, "agrees": False, "hybrid_passed": False,
+        "inference_available": False, "display_only": not status["ready"],
+        "prediction_candidate_id": None, "decision_epoch": None,
     }
-    if not status["ready"]:
-        return result
     try:
+        meta = _display_meta(model_base, status)
+        if meta is None:
+            return result
         # Recursive indicators must retain their training seed. Extra older
         # history is cropped; missing original history requires retraining.
-        origins = status["metadata"]["feature_origins"]
+        origins = meta["feature_origins"]
         seeded_frames = {}
+        same_origins = True
         for tf, step in TIMEFRAMES.items():
             clean = clean_candles(frames.get(tf, []), step, now=now)
+            same_origins = same_origins and bool(clean) and clean[0]["epoch"] == origins[tf]
             seeded = [bar for bar in clean if bar["epoch"] >= origins[tf]]
             if not seeded or seeded[0]["epoch"] != origins[tf]:
                 return {**result, "reason": f"{tf} history origin differs from training; restore history or retrain"}
             seeded_frames[tf] = seeded
-        row = features_from_frames(seeded_frames, now=now)
+        decision = seeded_frames["1m"][-1]["epoch"] + DURATION
+        row = None
+        if (same_origins and isinstance(analysis, dict) and analysis.get("decision_epoch") == decision
+                and 0 <= now - decision < DURATION + 30 and analysis.get("features")):
+            row = analysis["features"]
+        if row is None:
+            row = features_from_frames(seeded_frames, now=now)
         if row is None:
             return {**result, "reason": "Need sufficient contiguous closed candles on all three timeframes"}
         values = np.asarray([[float(row[name]) for name in FEATURE_COLUMNS]], dtype=float)
         if not np.isfinite(values).all():
             raise ValueError("Non-finite live features")
-        meta = status["metadata"]
         path = _model_path(model_base, meta)
         stamp = path.stat().st_mtime_ns
         cached = _MODEL_CACHE.get(str(path))
@@ -546,14 +705,21 @@ def predict_frames(model_base: str | Path, frames: dict, *, now: int,
         direction = "RISE" if p_rise >= DEFAULT_THRESHOLD else "FALL" if p_fall >= DEFAULT_THRESHOLD else "NO TRADE"
         internal_direction = 1 if direction == "RISE" else -1 if direction == "FALL" else 0
         eligible = float(row.get("rule_eligible", 0)) == 1
-        agrees = (direction in {"RISE", "FALL"} and direction == checklist_direction
+        agrees = (status.get("ready") is True and direction in {"RISE", "FALL"} and direction == checklist_direction
                   and internal_direction == int(row.get("checklist_direction", 0)) and eligible)
+        if agrees:
+            reason = "Validated CatBoost agrees with the closed-candle strategy"
+        elif status.get("ready") is True:
+            reason = "CatBoost confidence and full technical confirmation do not agree"
+        else:
+            reason = "Display only. This candidate did not pass validation, so it cannot place a trade."
         return {
             **result, "direction": direction, "p_rise": p_rise, "p_fall": p_fall, "p_tie": p_tie,
             "confidence": max(p_fall, p_rise), "probability": max(p_fall, p_rise),
             "agrees": agrees, "hybrid_passed": bool(agrees),
-            "reason": "Validated CatBoost agrees with the closed-candle strategy" if agrees else
-                      "CatBoost confidence and full technical confirmation do not agree",
+            "inference_available": True, "display_only": not status["ready"],
+            "prediction_candidate_id": meta["candidate_id"], "decision_epoch": decision,
+            "reason": reason,
             "features_used": list(FEATURE_COLUMNS),
         }
     except Exception as exc:

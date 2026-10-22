@@ -69,6 +69,14 @@ def _label(value: int) -> str:
     return "RISE" if value > 0 else "FALL" if value < 0 else "NO TRADE"
 
 
+def _one_side(*values: int) -> int:
+    """Use a direction only when the present readings do not oppose each other."""
+    sides = [int(value) for value in values if value]
+    if not sides or any(side * sides[0] < 0 for side in sides):
+        return 0
+    return sides[0]
+
+
 def _clean(rows: Any, step: int, now: int) -> tuple[list[dict], int]:
     """Validate OHLC, grid alignment and duplicate conflicts; ignore forming bars."""
     if not isinstance(rows, (list, tuple)):
@@ -476,27 +484,42 @@ def _analyze_synthetic(frames: dict[str, list[dict]], now: int) -> dict:
     frama_ok = bool(candidate)
     recent = min(entry["frama_signal_age"], entry["range_signal_age"]) <= MAX_SIGNAL_AGE
     pattern_names = [name for name in ("engulfing", "pin_bar", "doji") if entry[name]]
-    factors = [
-        ("history", "Closed-candle history", not errors, " ".join(errors) if errors else f"At least {MIN_BARS} consecutive closed bars on every timeframe."),
-        ("frama", "FRAMA channel", bool(entry["frama_direction"]), f"Price direction: {entry['frama']['direction']}; HL2 FRAMA 26, range bands 200 × 1.5."),
-        ("range_filter", "Range Filter", bool(entry["range_direction"]), f"Price direction: {entry['range_filter']['direction']}; period 100, multiplier 3."),
-        ("agreement", "Both indicators agree", frama_ok, f"Combined direction: {_label(candidate)}."),
-        ("fresh_signal", "Recent entry signal", bool(candidate and recent), "Require a same-direction channel breakout or filter cross within the last three closed candles."),
-        ("timeframes", "5m and 15m trend", bool(candidate and m5["trend"] == m15["trend"] == candidate), f"5m: {_label(m5['trend'])}; 15m: {_label(m15['trend'])}."),
-        ("momentum", "Candle and momentum confirmation", bool(candidate and entry["momentum"] == candidate), f"Body {entry['body_fraction']:.0%} of range; three-bar move {entry['return_3_atr']:.2f} ATR; MACD histogram {entry['macd_hist']:.5f}."),
+    span = float(structure["resistance"]) - float(structure["support"])
+    level_side = 0
+    if span > 0:
+        close = float(entry["close"])
+        if close <= float(structure["support"]) + 0.25 * span:
+            level_side = 1
+        elif close >= float(structure["resistance"]) - 0.25 * span:
+            level_side = -1
+    timeframe_side = int(m5["trend"]) if m5["trend"] and m5["trend"] == m15["trend"] else 0
+    event_side = _one_side(structure["bos"], structure["choch"])
+    breakout_side = _one_side(structure["breakout"], structure["retest"])
+    macd_side = 1 if entry["macd_hist"] > 0 else -1 if entry["macd_hist"] < 0 else 0
+
+    def factor(key: str, name: str, ok: bool, detail: str, side: int = 0, *, waiting: bool = False) -> dict:
+        return {
+            "id": key, "name": name, "status": "PASS" if ok else "WAIT" if waiting else "BLOCK",
+            "detail": detail, "side": _label(side) if side else "WAIT",
+        }
+
+    result["factors"] = [
+        factor("history", "Closed-candle history", not errors, " ".join(errors) if errors else f"At least {MIN_BARS} consecutive closed bars on every timeframe."),
+        factor("frama", "FRAMA channel", bool(entry["frama_direction"]), f"Price direction: {entry['frama']['direction']}; HL2 FRAMA 26, range bands 200 × 1.5.", int(entry["frama_direction"])),
+        factor("range_filter", "Range Filter", bool(entry["range_direction"]), f"Price direction: {entry['range_filter']['direction']}; period 100, multiplier 3.", int(entry["range_direction"])),
+        factor("agreement", "Both indicators agree", frama_ok, f"Combined direction: {_label(candidate)}.", candidate),
+        factor("fresh_signal", "Recent entry signal", bool(candidate and recent), "Require a same-direction channel breakout or filter cross within the last three closed candles."),
+        factor("timeframes", "5m and 15m trend", bool(candidate and m5["trend"] == m15["trend"] == candidate), f"5m: {_label(m5['trend'])}; 15m: {_label(m15['trend'])}.", timeframe_side),
+        factor("momentum", "Candle and momentum confirmation", bool(candidate and entry["momentum"] == candidate), f"Body {entry['body_fraction']:.0%} of range; three-bar move {entry['return_3_atr']:.2f} ATR; MACD histogram {entry['macd_hist']:.5f}.", int(entry["momentum"])),
+        factor("trend_structure", "Market structure", bool(structure["direction"]), f"{structure['name']}; confirmed HH {structure['higher_high']}, HL {structure['higher_low']}, LH {structure['lower_high']}, LL {structure['lower_low']}.", int(structure["direction"]), waiting=not structure["direction"]),
+        factor("bos_choch", "BOS / CHoCH", bool(structure["bos"] or structure["choch"]), f"BOS {_label(structure['bos'])}; CHoCH {_label(structure['choch'])}.", event_side, waiting=not (structure["bos"] or structure["choch"])),
+        factor("levels", "Support / resistance", bool(level_side), f"Support {structure['support']:.4f}; resistance {structure['resistance']:.4f}.", level_side, waiting=level_side == 0),
+        factor("liquidity", "Equal levels and liquidity sweep", bool(structure["liquidity_sweep"]), f"Sweep {_label(structure['liquidity_sweep'])}; equal highs {structure['equal_highs']}, equal lows {structure['equal_lows']}. Price geometry only.", int(structure["liquidity_sweep"] or 0), waiting=not structure["liquidity_sweep"]),
+        factor("breakout_retest", "Breakout / retest", bool(structure["breakout"] or structure["retest"]), f"Breakout {_label(structure['breakout'])}; retest {_label(structure['retest'])}.", breakout_side, waiting=not (structure["breakout"] or structure["retest"])),
+        factor("candles", "Candlestick patterns", bool(pattern_names), ", ".join(pattern_names) if pattern_names else "No engulfing, pin bar or doji on the latest candle.", waiting=not pattern_names),
+        factor("ema", "EMA 20 / EMA 50", bool(entry["trend"]), f"EMA 20 {entry['ema20']:.4f}; EMA 50 {entry['ema50']:.4f}.", int(entry["trend"]), waiting=not entry["trend"]),
+        factor("rsi", "RSI momentum", True, f"RSI 14: {entry['rsi']:.1f}.", waiting=True),
+        factor("macd", "MACD", bool(macd_side), f"MACD histogram: {entry['macd_hist']:.5f}.", macd_side, waiting=not macd_side),
+        factor("atr", "ATR volatility", entry["atr"] > 0, f"ATR 14: {entry['atr']:.5f}; {entry['atr_pct']:.3%} of price.", waiting=entry["atr"] <= 0),
     ]
-    result["factors"] = [{"id": key, "name": name, "status": "PASS" if ok else "BLOCK", "detail": detail} for key, name, ok, detail in factors]
-    contextual = [
-        ("trend_structure", "Market structure", structure["direction"], f"{structure['name']}; confirmed HH {structure['higher_high']}, HL {structure['higher_low']}, LH {structure['lower_high']}, LL {structure['lower_low']}."),
-        ("bos_choch", "BOS / CHoCH", structure["bos"] or structure["choch"], f"BOS {_label(structure['bos'])}; CHoCH {_label(structure['choch'])}."),
-        ("levels", "Support / resistance", 1, f"Support {structure['support']:.4f}; resistance {structure['resistance']:.4f}."),
-        ("liquidity", "Equal levels and liquidity sweep", structure["liquidity_sweep"], f"Sweep {_label(structure['liquidity_sweep'])}; equal highs {structure['equal_highs']}, equal lows {structure['equal_lows']}. Price geometry only."),
-        ("breakout_retest", "Breakout / retest", structure["breakout"] or structure["retest"], f"Breakout {_label(structure['breakout'])}; retest {_label(structure['retest'])}."),
-        ("candles", "Candlestick patterns", bool(pattern_names), ", ".join(pattern_names) if pattern_names else "No engulfing, pin bar or doji on the latest candle."),
-        ("ema", "EMA 20 / EMA 50", entry["trend"], f"EMA 20 {entry['ema20']:.4f}; EMA 50 {entry['ema50']:.4f}."),
-        ("rsi", "RSI momentum", 1, f"RSI 14: {entry['rsi']:.1f}."),
-        ("macd", "MACD", entry["macd_hist"], f"MACD histogram: {entry['macd_hist']:.5f}."),
-        ("atr", "ATR volatility", entry["atr"] > 0, f"ATR 14: {entry['atr']:.5f}; {entry['atr_pct']:.3%} of price."),
-    ]
-    result["factors"].extend({"id": key, "name": name, "status": "PASS" if present else "WAIT", "detail": detail} for key, name, present, detail in contextual)
     return result

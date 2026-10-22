@@ -1,8 +1,8 @@
-"""Model metadata compatibility checks for worker reload."""
+"""Legacy Touch model metadata compatibility checks for manual analysis."""
 
 from types import SimpleNamespace
 
-from app.worker import _metadata_compatible
+from app.signal_engine.manual_generate import _metadata_compatible
 
 
 def _conf(symbol="R_100", barrier="0.09", duration=540):
