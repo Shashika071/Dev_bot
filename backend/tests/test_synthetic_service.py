@@ -163,6 +163,13 @@ def test_fixed_product_validation(updates):
         validate_config(updates)
 
 
+def test_saved_five_minute_expiry_is_reset_to_one_minute():
+    config = validate_config({}, {"duration_seconds": 300, "stake": 2.0, "max_signals_per_day": 8, "demo_auto_trade": False})
+    assert config["duration_seconds"] == 60
+    assert config["stake"] == 2.0
+    assert config["max_signals_per_day"] == 8
+
+
 def test_chart_keeps_the_forming_candle_and_allows_one_minute():
     closed = {"epoch": NOW - 120, "open": 1, "high": 2, "low": 1, "close": 1.5}
     forming = {"epoch": NOW - 30, "open": 1.5, "high": 1.8, "low": 1.4, "close": 1.7}

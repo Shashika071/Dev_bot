@@ -24,7 +24,8 @@ def validate_config(updates: dict, previous: dict | None = None) -> dict:
     config = {**default_config(), **(previous or {}), **updates}
     if config["symbols"] != [SYMBOL]:
         raise ValueError("This strategy uses Volatility 100 (R_100) only")
-    if config["duration_seconds"] != DURATION_SECONDS:
+    requested = updates.get("duration_seconds", DURATION_SECONDS)
+    if requested not in (None, DURATION_SECONDS):
         raise ValueError("Rise/Fall expiry is fixed at one minute")
     if isinstance(config["stake"], bool):
         raise ValueError("Invalid stake")
