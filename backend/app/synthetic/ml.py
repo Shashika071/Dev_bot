@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from app.synthetic.analysis import FEATURE_COLUMNS, feature_table, features_from_frames
+from app.synthetic.analysis import FEATURE_COLUMNS, _COMPUTE, feature_table, features_from_frames
 from app.synthetic.history import SYMBOL, TIMEFRAMES, clean_candles, history_status, load_frames
 
 DURATION = 60
@@ -72,7 +72,23 @@ def label_outcome(entry_price: float, exit_price: float, direction: str) -> str:
     return "win" if won else "loss"
 
 
-def build_dataset(frames: dict, *, now: int | None = None) -> pd.DataFrame:
+def publish_train_job(model_base: str | Path, job: dict) -> None:
+    """Remember the train stage on disk. The in-memory job disappears if the process is killed."""
+    payload = {
+        "status": job.get("status") or "idle",
+        "progress": job.get("progress") if isinstance(job.get("progress"), str) else "",
+        "error": job.get("error") if isinstance(job.get("error"), str) else None,
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+    }
+    try:
+        _json_write(Path(model_base) / "synthetic_r100" / "train_job.json", payload)
+    except Exception:
+        return
+
+
+def build_dataset(frames: dict, *, now: int | None = None, progress: dict | None = None,
+                  on_progress=None) -> pd.DataFrame:
     """Use the exact live feature computation and only an aligned next candle.
 
     Class 0 = FALL, 1 = RISE, 2 = TIE. Ties are never converted into FALL.
@@ -81,7 +97,7 @@ def build_dataset(frames: dict, *, now: int | None = None) -> pd.DataFrame:
     cutoff = int(time.time()) if now is None else int(now)
     cleaned = {tf: clean_candles(frames.get(tf, []), step, now=cutoff)
                for tf, step in TIMEFRAMES.items()}
-    features = feature_table(cleaned, now=cutoff)
+    features = feature_table(cleaned, now=cutoff, progress=progress, on_progress=on_progress)
     if features.empty:
         return pd.DataFrame()
     entry = pd.DataFrame(cleaned["1m"])
@@ -316,32 +332,52 @@ def _fit_evaluate(train: pd.DataFrame, validation: pd.DataFrame, *,
 def train_model(model_base: str | Path, *, progress: dict | None = None,
                 iterations: int = 250, threads: int = 2) -> dict:
     """Train a candidate and retain evidence even when promotion is rejected."""
-    import joblib
-
     if not 20 <= int(iterations) <= 1000 or not 1 <= int(threads) <= 4:
         raise ValueError("Use 20–1000 iterations and 1–4 CPU threads")
     job = progress if progress is not None else {}
     job.update(status="running", progress="Checking R_100 history", error=None, started_at=int(time.time()))
+
+    def note(message: str) -> None:
+        job["progress"] = message
+        publish_train_job(model_base, job)
+
+    try:
+        publish_train_job(model_base, job)
+        with _COMPUTE:
+            return _train_locked(model_base, job, note, iterations=int(iterations), threads=int(threads))
+    except Exception as exc:
+        job.update(status="error", progress="Training failed", error=f"{type(exc).__name__}: {exc}",
+                   finished_at=int(time.time()))
+        publish_train_job(model_base, job)
+        raise
+
+
+def _train_locked(model_base, job, note, *, iterations: int, threads: int) -> dict:
+    import joblib
+
     try:
         history = history_status(model_base)
         if not history["ready_for_train"]:
             raise ValueError("Download at least 60 days of R_100 1m, 5m and 15m history first")
-        job["progress"] = "Building shared closed-candle features and next-one-minute labels"
+        note("Building shared closed-candle features and next-one-minute labels")
         frames = load_frames(model_base)
         feature_origins = {tf: int(rows[0]["epoch"]) for tf, rows in frames.items() if rows}
-        dataset = build_dataset(frames)
+        dataset = build_dataset(frames, progress=job, on_progress=lambda: publish_train_job(model_base, job))
+        import gc
+        del frames
+        gc.collect()
         if len(dataset) < MIN_DATASET_SAMPLES:
             raise ValueError(f"Need at least {MIN_DATASET_SAMPLES} valid labeled rows; found {len(dataset)}")
         folds, development, final_test = purged_walk_forward(dataset)
         fold_results, fold_predictions = [], []
         for index, (train, validation) in enumerate(folds, 1):
-            job["progress"] = f"Walk-forward fold {index}/{len(folds)}: CatBoost versus Logistic Regression"
+            note(f"Walk-forward fold {index}/{len(folds)}: CatBoost versus Logistic Regression")
             _, _, metrics, predictions = _fit_evaluate(train, validation, iterations=iterations, threads=threads)
             metrics["fold"] = index
             predictions["fold"] = index
             fold_results.append(metrics)
             fold_predictions.append(predictions)
-        job["progress"] = "Fitting on development history; evaluating untouched final 20%"
+        note("Fitting on development history; evaluating untouched final 20%")
         candidate, control, final_metrics, predictions = _fit_evaluate(
             development, final_test, iterations=iterations, threads=threads)
         final_metrics.update(samples=len(final_test), decision_start=int(final_test["decision_epoch"].min()))
@@ -395,10 +431,12 @@ def train_model(model_base: str | Path, *, progress: dict | None = None,
             _json_write(paths["active"], report)
         job.update(status="done", progress="Validated CatBoost promoted" if accepted else "Candidate saved; evidence gates did not pass",
                    error=None, result=report, finished_at=int(time.time()))
+        publish_train_job(model_base, job)
         return report
     except Exception as exc:
         job.update(status="error", progress="Training failed", error=f"{type(exc).__name__}: {exc}",
                    finished_at=int(time.time()))
+        publish_train_job(model_base, job)
         raise
 
 

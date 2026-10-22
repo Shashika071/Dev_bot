@@ -10,7 +10,10 @@ for a synthetic market. Pattern names describe price geometry only.
 from __future__ import annotations
 
 import bisect
+import gc
 import math
+import threading
+import time
 from typing import Any
 
 from app.synthetic.indicators import frama_channel, range_filter, technical_series
@@ -26,6 +29,23 @@ REFERENCE_URLS = {
     "frama": "https://www.tradingview.com/script/hskyfPWP-FRAMA-Channel-BigBeluga/",
     "range_filter": "https://www.tradingview.com/script/J8GzFGfD-Range-Filter-Buy-and-Sell-5min-guikroth-version/",
 }
+# Training and a live scan must not build this at the same time: each pass
+# holds the full one-minute history, and the API process is memory limited.
+_COMPUTE = threading.RLock()
+_TOP_KEYS = (
+    "trend", "ema_gap_atr", "return_1_atr", "return_3_atr", "return_6_atr",
+    "body_fraction", "upper_wick", "lower_wick", "close_ema20_atr", "rsi14", "rsi",
+    "macd_hist", "macd_hist_atr", "macd_change_atr", "atr", "atr_pct", "atr_ratio",
+    "engulfing", "pin_bar", "doji", "momentum", "candle_strength", "close", "bars",
+    "ema20", "ema50", "frama_position", "frama_slope_atr", "frama_alpha", "frama_dimension",
+    "frama_direction", "frama_signal_age", "range_position", "range_slope",
+    "range_width_atr", "range_direction", "range_signal_age",
+)
+_STRUCTURE_KEYS = (
+    "direction", "higher_high", "higher_low", "lower_high", "lower_low",
+    "bos", "choch", "breakout", "liquidity_sweep", "retest", "equal_highs", "equal_lows",
+    "support_distance_atr", "resistance_distance_atr",
+)
 FEATURE_COLUMNS = [
     "return_1_atr", "return_3_atr", "return_6_atr", "body_fraction", "upper_wick", "lower_wick",
     "ema_gap_atr", "close_ema20_atr", "rsi14", "macd_hist_atr", "macd_change_atr",
@@ -152,7 +172,11 @@ def _frame_series(rows: list[dict], step: int) -> dict:
     structures = _structure_series(rows, technical["atr"])
     framas = frama_channel(rows) if step == ENTRY_SECONDS else []
     filters = range_filter(rows) if step == ENTRY_SECONDS else []
-    result = []
+    columns = {key: [] for key in _TOP_KEYS}
+    structure_columns = {key: [] for key in _STRUCTURE_KEYS}
+    closes: list[int] = []
+    contiguous_values: list[int] = []
+    last = None
     contiguous = 0
     for index, row in enumerate(rows):
         contiguous = contiguous + 1 if not index or row["epoch"] - rows[index - 1]["epoch"] == step else 1
@@ -207,8 +231,25 @@ def _frame_series(rows: list[dict], step: int) -> dict:
                 "range_width_atr": rf["range"] / scale, "range_direction": _direction(rf["direction"]),
                 "range_signal_age": min(rf["signal_age"], 999) if rf["signal_age"] is not None else 999,
             })
-        result.append(snap)
-    return {"rows": rows, "snapshots": result, "closes": [item["closed_at"] for item in result]}
+        structure = snap["structure"]
+        for key in _TOP_KEYS:
+            value = snap.get(key)
+            columns[key].append(0.0 if value is None else float(value))
+        for key in _STRUCTURE_KEYS:
+            value = structure.get(key)
+            structure_columns[key].append(0.0 if value is None else float(value))
+        closes.append(int(snap["closed_at"]))
+        contiguous_values.append(int(snap["contiguous"]))
+        last = snap
+    # Drop every bar except the latest. Training reads the numeric columns;
+    # keeping a dict per candle exhausts the API memory limit and the process dies.
+    del framas, filters, structures
+    if len(rows) > 5000:
+        gc.collect()
+    return {
+        "closes": closes, "columns": columns, "structure": structure_columns,
+        "contiguous": contiguous_values, "last": last,
+    }
 
 
 def _assemble(entry: dict, m5: dict, m15: dict) -> tuple[dict, list[str]]:
@@ -253,6 +294,15 @@ def _prepared(frames: dict, now: int) -> tuple[dict, list[str]]:
     return prepared, errors
 
 
+def _view(series: dict, index: int) -> dict:
+    """One candle's features without retaining a dict for every candle."""
+    snap = {key: values[index] for key, values in series["columns"].items()}
+    snap["structure"] = {key: values[index] for key, values in series["structure"].items()}
+    snap["closed_at"] = series["closes"][index]
+    snap["contiguous"] = series["contiguous"][index]
+    return snap
+
+
 def _select(prepared: dict, decision: int) -> tuple[dict | None, list[str]]:
     selected = {}
     errors = []
@@ -262,17 +312,27 @@ def _select(prepared: dict, decision: int) -> tuple[dict | None, list[str]]:
         if index < 0:
             errors.append(f"{name}: no closed candles.")
             continue
-        snapshot = series["snapshots"][index]
-        selected[name] = snapshot
-        if snapshot["contiguous"] < MIN_BARS:
-            errors.append(f"{name}: need {MIN_BARS} consecutive closed candles; have {snapshot['contiguous']}.")
-        if decision - snapshot["closed_at"] >= step:
+        contiguous = series["contiguous"][index]
+        closed_at = series["closes"][index]
+        selected[name] = series["last"] if index == len(series["closes"]) - 1 and series["last"] is not None else _view(series, index)
+        if contiguous < MIN_BARS:
+            errors.append(f"{name}: need {MIN_BARS} consecutive closed candles; have {contiguous}.")
+        if decision - closed_at >= step:
             errors.append(f"{name}: closed-candle history is stale.")
     return (selected if len(selected) == len(INTERVALS) else None), errors
 
 
 def features_from_frames(frames: dict[str, list[dict]], now: int) -> dict | None:
     """Return finite causal model inputs, or None for bad/stale/short history."""
+    if not _COMPUTE.acquire(blocking=False):
+        return None
+    try:
+        return _features_from_frames(frames, now)
+    finally:
+        _COMPUTE.release()
+
+
+def _features_from_frames(frames: dict[str, list[dict]], now: int) -> dict | None:
     prepared, invalid = _prepared(frames, int(now))
     if invalid or not prepared[ENTRY]["closes"]:
         return None
@@ -284,7 +344,8 @@ def features_from_frames(frames: dict[str, list[dict]], now: int) -> dict | None
     return features if all(math.isfinite(value) for value in features.values()) else None
 
 
-def feature_table(frames: dict[str, list[dict]], now: int | None = None):
+def feature_table(frames: dict[str, list[dict]], now: int | None = None,
+                  progress: dict | None = None, on_progress=None):
     """Efficient causal batch features, with exactly the live technical rule gates.
 
     Output columns are decision_epoch and FEATURE_COLUMNS. The caller labels the
@@ -299,11 +360,26 @@ def feature_table(frames: dict[str, list[dict]], now: int | None = None):
                        for name in INTERVALS for row in frames.get(name, [])), default=0)
         except (TypeError, ValueError, KeyError, OverflowError):
             return pd.DataFrame(columns=["decision_epoch", *FEATURE_COLUMNS])
+    with _COMPUTE:
+        return _feature_table(frames, int(now), progress, on_progress)
+
+
+def _feature_table(frames, now: int, progress, on_progress):
+    import pandas as pd
+
     prepared, invalid = _prepared(frames, int(now))
     if invalid:
         return pd.DataFrame(columns=["decision_epoch", *FEATURE_COLUMNS])
     records = []
-    for decision in prepared[ENTRY]["closes"]:
+    closes = prepared[ENTRY]["closes"]
+    total = len(closes)
+    for count, decision in enumerate(closes):
+        if count % 5000 == 0:
+            if progress is not None:
+                progress["progress"] = f"Building features {count} of {total} closed 1-minute candles"
+            if on_progress is not None:
+                on_progress()
+            time.sleep(0.001)
         selected, errors = _select(prepared, decision)
         if selected is None or errors:
             continue
@@ -335,7 +411,27 @@ def chart_overlays(candles: list[dict]) -> dict:
     }
 
 
+def _busy_analysis() -> dict:
+    return {
+        "symbol": "R_100", "direction": "NO TRADE", "eligible": False,
+        "blockers": ["Training is using the candle history. This scan was skipped."],
+        "decision_epoch": None, "expiry_seconds": ENTRY_SECONDS, "timeframe": ENTRY,
+        "indicators": {}, "timeframes": {}, "factors": [], "features": {},
+        "levels": [], "events": [],
+    }
+
+
 def analyze_synthetic(frames: dict[str, list[dict]], now: int) -> dict:
+    """Evaluate the current closed candle. Skips instead of doubling memory during training."""
+    if not _COMPUTE.acquire(blocking=False):
+        return _busy_analysis()
+    try:
+        return _analyze_synthetic(frames, now)
+    finally:
+        _COMPUTE.release()
+
+
+def _analyze_synthetic(frames: dict[str, list[dict]], now: int) -> dict:
     """Evaluate the current closed candle; model approval remains the caller's gate."""
     prepared, errors = _prepared(frames, int(now))
     decision = prepared[ENTRY]["closes"][-1] if prepared[ENTRY]["closes"] else None

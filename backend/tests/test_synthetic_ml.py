@@ -285,3 +285,17 @@ def test_real_catboost_and_scaled_control_support_explicit_three_class_probabili
         probabilities = _probabilities(model, values)
         assert probabilities.shape == (59, 3)
         np.testing.assert_allclose(probabilities.sum(axis=1), 1)
+
+
+def test_restart_during_training_is_reported_instead_of_going_idle(tmp_path):
+    from app.synthetic.jobs import load_saved_train_job
+    from app.synthetic.ml import publish_train_job
+
+    publish_train_job(tmp_path, {
+        "status": "running",
+        "progress": "Building features 5000 of 120000 closed 1-minute candles",
+    })
+    job = load_saved_train_job(tmp_path)
+    assert job["status"] == "error"
+    assert "restarted" in job["error"]
+    assert "Idle" not in job["status"]

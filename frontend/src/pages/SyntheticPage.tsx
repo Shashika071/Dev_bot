@@ -50,11 +50,12 @@ function JobProgress({ job, label }: { job?: JobState; label: string }) {
   if (!job?.status) return null;
   const progress = job.progress;
   const value = typeof progress === 'number' && Number.isFinite(progress) ? Math.max(0, Math.min(100, progress)) : undefined;
+  const detail = typeof progress === 'string' && progress ? progress : job.message;
   const active = /running|pending|queued|training|downloading/i.test(job.status);
   return <div className="sy-job" aria-live="polite">
     <div><span>{active && <Loader2 size={12} className="sy-spin" />}{label}: {job.status.replace(/_/g, ' ')}</span>{value != null && <strong>{value.toFixed(0)}%</strong>}</div>
     {value != null && <progress max={100} value={value} aria-label={`${label} progress`} />}
-    {job.message && <p>{job.message}</p>}
+    {detail && <p>{detail}</p>}
     {job.error && <p className="sy-error">{job.error}</p>}
   </div>;
 }

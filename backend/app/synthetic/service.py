@@ -190,6 +190,8 @@ class SyntheticService:
             await asyncio.sleep(4)
 
     async def _refresh_confidence(self) -> None:
+        if synthetic_jobs.train_job.get("status") == "running":
+            return
         state = self.store.state()
         analyses = state.get("analyses") or []
         last_scan = int(state.get("last_scan") or 0)

@@ -3,16 +3,47 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
+from pathlib import Path
 
 from app.config import settings
 from app.synthetic.history import DEFAULT_DAYS, download_history, history_status, validate_days
-from app.synthetic.ml import train_model
+from app.synthetic.ml import publish_train_job, train_model
+
+
+def load_saved_train_job(model_base: str | Path) -> dict:
+    """Restore the last train stage. A leftover 'running' job means the process died."""
+    default = {"status": "idle", "progress": "", "error": None, "result": None}
+    path = Path(model_base) / "synthetic_r100" / "train_job.json"
+    if not path.is_file():
+        return dict(default)
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError):
+        return dict(default)
+    if not isinstance(saved, dict):
+        return dict(default)
+    job = {
+        **default,
+        "status": saved.get("status") if isinstance(saved.get("status"), str) else "idle",
+        "progress": saved.get("progress") if isinstance(saved.get("progress"), str) else "",
+        "error": saved.get("error") if isinstance(saved.get("error"), str) else None,
+        "started_at": saved.get("started_at"),
+        "finished_at": saved.get("finished_at"),
+    }
+    if job["status"] == "running":
+        job.update(
+            status="error", progress="Training failed",
+            error="Training stopped because the backend restarted before it finished. No model was saved.",
+        )
+        publish_train_job(model_base, job)
+    return job
 
 
 class SyntheticJobs:
     def __init__(self) -> None:
         self.history_job = {"status": "idle", "progress": "", "error": None}
-        self.train_job = {"status": "idle", "progress": "", "error": None, "result": None}
+        self.train_job = load_saved_train_job(settings.model_dir)
         self._history_task: asyncio.Task | None = None
         self._train_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
@@ -50,6 +81,7 @@ class SyntheticJobs:
             if not history_status(settings.model_dir)["ready_for_train"]:
                 raise ValueError("Download at least 60 days of history before training")
             self.train_job = {"status": "running", "progress": "Starting CatBoost/control validation", "error": None, "result": None}
+            publish_train_job(settings.model_dir, self.train_job)
 
             async def run() -> None:
                 try:
@@ -57,6 +89,7 @@ class SyntheticJobs:
                     self.train_job["result"] = result
                 except Exception as exc:
                     self.train_job.update(status="error", error=str(exc), progress="Training failed")
+                    publish_train_job(settings.model_dir, self.train_job)
 
             self._train_task = asyncio.create_task(run())
             return self.snapshot()
