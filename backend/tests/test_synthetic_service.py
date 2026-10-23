@@ -281,6 +281,18 @@ def test_tick_feed_rejects_invalid_stale_and_out_of_order_updates(monkeypatch, t
     assert scanner._quote["quote"] == 123.45
 
 
+def test_tick_feed_keeps_same_second_price_and_small_clock_skew(monkeypatch):
+    scanner = service.SyntheticService()
+    monkeypatch.setattr(service.time, "time", lambda: NOW)
+    scanner._accept_tick({"tick": {"symbol": "R_100", "epoch": NOW - 1, "quote": 10}})
+    scanner._accept_tick({"tick": {"symbol": "R_100", "epoch": NOW - 1, "quote": 11}})
+    assert scanner._quote["epoch"] == NOW - 1
+    assert scanner._quote["quote"] == 11
+    scanner._accept_tick({"tick": {"symbol": "R_100", "epoch": NOW + 1, "quote": 12}})
+    assert scanner._quote["epoch"] == NOW + 1
+    assert scanner._quote["quote"] == 12
+
+
 def test_quote_reports_staleness_and_recovers_on_a_fresh_tick(monkeypatch):
     scanner = service.SyntheticService()
     clock = [NOW]

@@ -47,12 +47,15 @@ export interface SyntheticAnalysis {
   ml?: Prediction;
 }
 export interface SyntheticSignal {
+  paper?: { outcome?: string; profit_per_stake?: number | null; reason?: string };
   id?: string; symbol?: string; direction?: string; created_at?: string;
   created_epoch?: number; decision_epoch?: number; expiry_epoch?: number;
   execution_status?: string; execution_result?: Record<string, unknown> | null;
   result?: string; [key: string]: unknown;
 }
 export interface SyntheticStatus {
+  performance?: { note?: string; groups: Array<{ strategy: string; duration_seconds: number; recorded: number; resolved: number; pending: number; unresolved: number; win_rate: number | null; wilson_lower: number | null; wilson_upper: number | null; priced: number; profit_per_unit_stake: number | null; max_drawdown_units: number | null }> };
+  evidence?: { status?: string; progress?: string; error?: string | null; result?: { reason?: string; note?: string; comparisons?: Array<{ variant: string; entry_delay_seconds: number; duration_seconds: number; holdout: { resolved: number; unresolved: number; win_rate: number | null; ev_lower_bound: number | null } }> } };
   running: boolean;
   config?: { symbols?: string[]; duration_seconds?: number; stake?: number; max_signals_per_day?: number; demo_auto_trade?: boolean };
   analyses?: SyntheticAnalysis[]; signals?: SyntheticSignal[];
@@ -187,6 +190,8 @@ const post = <T,>(path: string, body: unknown = {}) =>
   request<T>(path, { method: 'POST', body: JSON.stringify(body) }, path === '/scan' ? 120000 : 45000);
 
 export const syntheticApi = {
+  repairHistory: () => post<unknown>('/history/repair'),
+  compareFilters: (payout: number | null) => post<unknown>('/evidence/replay', { payout }),
   status: (signal?: AbortSignal) => request<SyntheticStatus>('/status', { signal }),
   chart: (timeframe: string, signal?: AbortSignal) =>
     request<SyntheticChartPayload>(`/chart?symbol=R_100&timeframe=${encodeURIComponent(timeframe)}&count=1000`, { signal }, 50000),

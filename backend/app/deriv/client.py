@@ -154,14 +154,16 @@ class DerivWSClient:
         self._ensure_background_tasks()
 
     @retry(
-        wait=wait_exponential(multiplier=1, min=1, max=60),
-        stop=stop_after_attempt(50),
+        wait=wait_exponential(multiplier=1, min=0.4, max=1.5),
+        stop=stop_after_attempt(2),
         retry=retry_if_exception_type(Exception),
+        reraise=True,
     )
     async def _connect_with_retry(self):
         try:
             self.ws = await websockets.connect(
                 self._url,
+                open_timeout=6,
                 ping_interval=HEARTBEAT_INTERVAL,
                 ping_timeout=10,
                 close_timeout=5,
@@ -180,7 +182,7 @@ class DerivWSClient:
 
         except Exception as e:
             self._connected = False
-            logger.error("deriv_ws_connect_failed", error=str(e))
+            logger.error("deriv_ws_connect_failed", error=f"{type(e).__name__}: {e!r}")
             raise
 
     async def disconnect(self):

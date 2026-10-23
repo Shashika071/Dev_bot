@@ -46,15 +46,20 @@ class SyntheticJobs:
         self.train_job = load_saved_train_job(settings.model_dir)
         self._history_task: asyncio.Task | None = None
         self._train_task: asyncio.Task | None = None
+        self._evidence_task: asyncio.Task | None = None
+        self.evidence_job = {"status": "idle", "progress": "", "error": None}
         self._lock = asyncio.Lock()
 
     def snapshot(self) -> dict:
         return {
             "history": history_status(settings.model_dir, copy.deepcopy(self.history_job)),
             "train": copy.deepcopy(self.train_job),
+            "evidence": copy.deepcopy(self.evidence_job),
         }
 
     def _check_busy(self) -> None:
+        if self._evidence_task is not None and not self._evidence_task.done():
+            raise ValueError("Signal evidence job is already running")
         if self._history_task is not None and not self._history_task.done():
             raise ValueError("Synthetic history download is already running")
         if self._train_task is not None and not self._train_task.done():
@@ -77,6 +82,50 @@ class SyntheticJobs:
 
     async def start_train(self) -> dict:
         raise ValueError("The previous CatBoost model was removed. Use the research signal engine.")
+
+    async def start_evidence(self, *, repair: bool = False, payout: float | None = None) -> dict:
+        from app.trading_ml.config import validate_payout
+        from app.trading_ml.service import research_status
+        payout = validate_payout(payout)
+        async with self._lock:
+            self._check_busy()
+            if research_status(settings.model_dir).get("job", {}).get("status") == "running":
+                raise ValueError("Wait for the research job to finish")
+            self.evidence_job = {"status": "running", "progress": "Recovering missing candles" if repair else "Comparing filters at 0, 5, 10 and 20 second entry delays", "error": None}
+
+            async def run():
+                try:
+                    if repair:
+                        from app.synthetic.history import repair_gaps
+                        from app.deriv.client import DerivWSClient
+                        client = DerivWSClient()
+                        try:
+                            await client.connect()
+                            result = await repair_gaps(settings.model_dir, client)
+                        finally:
+                            await client.disconnect()
+                    else:
+                        def replay():
+                            import pandas as pd
+                            from app.synthetic.history import load_frames
+                            from app.synthetic.replay import compare_filters
+                            root = Path(settings.model_dir) / "synthetic_r100" / "trading_ml"
+                            ticks = []
+                            for path in (root / "ticks.parquet", root / "live_ticks.parquet"):
+                                if path.exists():
+                                    ticks.extend(pd.read_parquet(path).to_dict("records"))
+                            return compare_filters(load_frames(settings.model_dir), ticks, net_payout=payout)
+                        result = await asyncio.to_thread(replay)
+                    target = Path(settings.model_dir) / "synthetic_r100" / ("gap_repair.json" if repair else "filter_comparison.json")
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = target.with_suffix(".tmp")
+                    temporary.write_text(json.dumps(result, allow_nan=False, indent=2), encoding="utf-8")
+                    temporary.replace(target)
+                    self.evidence_job.update(status="done", progress="Gap repair complete" if repair else "Filter comparison complete", result=result)
+                except Exception as exc:
+                    self.evidence_job.update(status="error", error=f"Evidence job failed ({type(exc).__name__})")
+            self._evidence_task = asyncio.create_task(run())
+            return copy.deepcopy(self.evidence_job)
 
 
 synthetic_jobs = SyntheticJobs()

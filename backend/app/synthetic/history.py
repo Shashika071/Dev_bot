@@ -77,6 +77,37 @@ def load_frames(model_base: str | Path, *, now: int | None = None) -> dict[str, 
     return {tf: load_candles(root, tf, now=now) for tf in TIMEFRAMES}
 
 
+async def repair_gaps(model_base: str | Path, client, *, max_pages: int = 30) -> dict:
+    """Recover only absent candles from public history; preserve existing OHLC."""
+    root = history_root(model_base)
+    now = int(time.time())
+    report = {}
+    for tf, step in TIMEFRAMES.items():
+        rows = load_candles(root, tf, now=now)
+        missing = {epoch for a, b in zip(rows, rows[1:])
+                   for epoch in range(a["epoch"] + step, b["epoch"], step)}
+        before = len(missing)
+        recovered = []
+        attempted = set()
+        for _ in range(max_pages):
+            remaining = missing - attempted
+            if not remaining:
+                break
+            first = min(remaining)
+            end = min(first + (PAGE_COUNT - 1) * step, max(remaining)) + step - 1
+            batch = await client.get_candles(SYMBOL, granularity=step, count=PAGE_COUNT, end=end)
+            for row in clean_candles(batch, step, now=now):
+                if row["epoch"] in missing:
+                    recovered.append(row)
+                    missing.remove(row["epoch"])
+            attempted.update(epoch for epoch in remaining if first <= epoch <= end)
+            await asyncio.sleep(0.25)
+        if recovered:
+            await asyncio.to_thread(save_candles, root, tf, recovered, now=now)
+        report[tf] = {"missing_before": before, "recovered": len(recovered), "missing_after": len(missing)}
+    return report
+
+
 def span_summary(rows: list[dict], step: int) -> dict:
     if not rows:
         return {"bars": 0, "from_epoch": None, "to_epoch": None, "days": 0.0, "gaps": 0}

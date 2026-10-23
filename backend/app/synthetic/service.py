@@ -25,8 +25,10 @@ from app.synthetic.policy import (
 # Entries use the closed 1m candle. 5m and 15m confirm the direction.
 CHART_TIMEFRAMES = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "1d": 86400}
 QUOTE_STALE_SECONDS = 15
+TICK_CLOCK_SKEW_SECONDS = 2
 CONFIDENCE_STALE_SECONDS = 90
 from app.synthetic.store import SyntheticStore
+from app.synthetic.evidence import STRATEGY_VERSION
 from app.trade_prefs import load_trade_prefs, token_status
 
 
@@ -83,8 +85,8 @@ def execution_status() -> dict:
     configured = bool(token_status().get("token_configured"))
     allowed = settings.bot_mode == "synthetic" and configured and server_execution_allowed()
     return {
-        "allowed": allowed, "token_configured": configured, "demo_only": True,
-        "reason": "Demo account and quote are verified before each purchase" if allowed else
+        "allowed": False, "account_ready": allowed, "token_configured": configured, "demo_only": True,
+        "reason": "The one-minute technical strategy has no validated win probability. Use monitoring to collect paper outcomes; demo purchases remain blocked." if allowed else
         "Set BOT_MODE=synthetic and restart the backend" if settings.bot_mode != "synthetic" else
         "Save a demo token and enable demo execution" if not configured else
         "Enable demo execution in account settings",
@@ -112,6 +114,8 @@ class SyntheticService:
         self._confidence_retry_at = 0
         self._research_ticks: list[dict] = []
         self._research_flush_at = 0.0
+        self._market_lock = asyncio.Lock()
+        self._chart_cache: dict[str, tuple[float, dict]] = {}
 
     @property
     def store(self) -> SyntheticStore:
@@ -130,6 +134,7 @@ class SyntheticService:
             "execution": execution_status(), "daily_count": count,
             "signals_remaining_today": max(0, state["config"]["max_signals_per_day"] - count),
             "signals": self.store.signals(),
+            "performance": self.store.performance(),
             "research": research_status(
                 settings.model_dir,
                 quote_epoch=self._quote.get("epoch") if isinstance(self._quote, dict) else None,
@@ -142,13 +147,20 @@ class SyntheticService:
             },
         }
 
+    def _cached_chart(self, timeframe: str) -> dict | None:
+        cached = self._chart_cache.get(timeframe)
+        if cached is None:
+            return None
+        return {**cached[1], "server_time": int(time.time())}
+
     async def symbols(self) -> dict:
         client = DerivWSClient()
         try:
-            async with asyncio.timeout(25):
-                await client.connect()
-                listing = await client.get_active_symbols()
-                return {"symbols": synthetic_symbols(listing.get("active_symbols", []))}
+            async with self._market_lock:
+                async with asyncio.timeout(20):
+                    await client.connect()
+                    listing = await client.get_active_symbols()
+                    return {"symbols": synthetic_symbols(listing.get("active_symbols", []))}
         except Exception as exc:
             return {"symbols": [], "error": f"Market discovery unavailable ({type(exc).__name__})"}
         finally:
@@ -158,20 +170,39 @@ class SyntheticService:
         if timeframe not in CHART_TIMEFRAMES:
             raise ValueError("Choose 1m, 5m, 15m, 1h or 1d")
         step = CHART_TIMEFRAMES[timeframe]
-        client = DerivWSClient()
+        cached = self._chart_cache.get(timeframe)
+        if cached and (time.monotonic() - cached[0] < 12 or self._market_lock.locked()):
+            return self._cached_chart(timeframe)
+        client: DerivWSClient | None = None
+        rows: list[dict] = []
+        captured = int(time.time())
         try:
-            async with asyncio.timeout(45):
-                await client.connect()
-                captured = int(time.time())
-                rows = await client.get_candles(SYMBOL, granularity=step, count=max(240, min(count, 1000)))
+            async with self._market_lock:
+                cached = self._chart_cache.get(timeframe)
+                if cached and time.monotonic() - cached[0] < 12:
+                    return self._cached_chart(timeframe)
+                client = DerivWSClient()
+                async with asyncio.timeout(12):
+                    await client.connect()
+                    captured = int(time.time())
+                    rows = await client.get_candles(SYMBOL, granularity=step, count=max(240, min(count, 1000)))
+        except Exception:
+            cached_body = self._cached_chart(timeframe)
+            if cached_body is not None:
+                return cached_body
+            raise
         finally:
-            await client.disconnect()
+            if client is not None:
+                await client.disconnect()
         rows = _chart_candles(rows, step, captured)
         if not rows:
+            cached_body = self._cached_chart(timeframe)
+            if cached_body is not None:
+                return cached_body
             raise ValueError("No candles returned by Deriv")
         last_epoch = int(rows[-1]["epoch"])
         forming = last_epoch + step > captured
-        return {
+        payload = {
             "symbol": SYMBOL, "timeframe": timeframe, "granularity": step,
             "candles": rows, "overlays": chart_overlays(rows),
             "trend_system": trend_confirmation(rows),
@@ -181,11 +212,15 @@ class SyntheticService:
             "bar_count": len(rows), "forming": forming,
             "last_candle_age_seconds": max(0, captured - last_epoch),
         }
+        self._chart_cache[timeframe] = (time.monotonic(), payload)
+        return payload
 
     async def start(self, updates: dict) -> dict:
         if settings.bot_mode != "synthetic":
             raise ValueError("Set BOT_MODE=synthetic and restart the backend")
         config = validate_config(updates, self.store.state().get("config"))
+        if config["demo_auto_trade"] and not execution_status()["allowed"]:
+            raise ValueError(execution_status()["reason"])
         self.store.update_state(config=config, running=True, last_error=None)
         self._ensure_loop()
         return await asyncio.to_thread(self.status)
@@ -274,12 +309,13 @@ class SyntheticService:
         frames: dict[str, list[dict]] = {}
         client = DerivWSClient()
         try:
-            async with asyncio.timeout(45):
-                await client.connect()
-                for name, step in TIMEFRAMES.items():
-                    captured = int(time.time())
-                    rows = await client.get_candles(SYMBOL, granularity=step, count=500)
-                    frames[name] = captured_closed_candles(rows, step, captured)
+            async with self._market_lock:
+                async with asyncio.timeout(20):
+                    await client.connect()
+                    for name, step in TIMEFRAMES.items():
+                        captured = int(time.time())
+                        rows = await client.get_candles(SYMBOL, granularity=step, count=500)
+                        frames[name] = captured_closed_candles(rows, step, captured)
         finally:
             await client.disconnect()
         now = int(time.time())
@@ -331,14 +367,21 @@ class SyntheticService:
         except (KeyError, TypeError, ValueError, OverflowError):
             return
         now = time.time()
-        if not 0 <= now - epoch <= QUOTE_STALE_SECONDS or price <= 0:
+        # Deriv's tick clock runs a fraction of a second ahead of this host.
+        # Dropping those prints freezes the candle until the feed is torn down.
+        if price <= 0 or epoch - now > TICK_CLOCK_SKEW_SECONDS or now - epoch > QUOTE_STALE_SECONDS:
             return
-        if self._quote is not None and epoch <= self._quote["epoch"]:
+        if self._quote is not None and epoch < self._quote["epoch"]:
+            return
+        self._quote_received_at = time.monotonic()
+        if self._quote is not None and epoch == self._quote["epoch"] and price == self._quote["quote"]:
             return
         self._quote = {"symbol": SYMBOL, "epoch": epoch, "quote": price, "updated_at": int(now)}
-        self._quote_received_at = time.monotonic()
         self._quote_error = None
-        self._research_ticks.append({"epoch": epoch, "quote": price})
+        if self._research_ticks and self._research_ticks[-1]["epoch"] == epoch:
+            self._research_ticks[-1]["quote"] = price
+        else:
+            self._research_ticks.append({"epoch": epoch, "quote": price})
         if len(self._research_ticks) > 5000:
             self._research_ticks = self._research_ticks[-5000:]
 
@@ -384,6 +427,7 @@ class SyntheticService:
             from app.trading_ml.data.ticks import append_live_ticks
             from app.trading_ml.service import research_root
             append_live_ticks(research_root(settings.model_dir) / "live_ticks.parquet", snapshot)
+            self.store.observe_ticks(snapshot, int(time.time()))
 
         try:
             await asyncio.to_thread(write)
@@ -422,6 +466,7 @@ class SyntheticService:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        await self._flush_research_ticks()
 
     async def _loop(self):
         while self.store.state().get("running") and settings.bot_mode == "synthetic":
@@ -451,23 +496,24 @@ class SyntheticService:
         config = self.store.state()["config"]
         blockers: list[str] = []
         frames: dict[str, list[dict]] = {}
-        client = DerivWSClient()
-        try:
-            await client.connect()
-            listing = await client.get_active_symbols()
-            markets = synthetic_symbols(listing.get("active_symbols", []))
-            if not markets or not markets[0]["is_open"]:
-                blockers.append("Volatility 100 is unavailable or suspended")
-            else:
-                contracts = (await client.get_contracts_for(SYMBOL)).get("contracts_for", {}).get("available", [])
-                if not supports_rise_fall(contracts, DURATION_SECONDS):
-                    blockers.append("One-minute Rise/Fall contracts are unavailable")
-                for name, step in TIMEFRAMES.items():
-                    captured = int(time.time())
-                    rows = await client.get_candles(SYMBOL, granularity=step, count=500)
-                    frames[name] = captured_closed_candles(rows, step, captured)
-        finally:
-            await client.disconnect()
+        async with self._market_lock:
+            client = DerivWSClient()
+            try:
+                await client.connect()
+                listing = await client.get_active_symbols()
+                markets = synthetic_symbols(listing.get("active_symbols", []))
+                if not markets or not markets[0]["is_open"]:
+                    blockers.append("Volatility 100 is unavailable or suspended")
+                else:
+                    contracts = (await client.get_contracts_for(SYMBOL)).get("contracts_for", {}).get("available", [])
+                    if not supports_rise_fall(contracts, DURATION_SECONDS):
+                        blockers.append("One-minute Rise/Fall contracts are unavailable")
+                    for name, step in TIMEFRAMES.items():
+                        captured = int(time.time())
+                        rows = await client.get_candles(SYMBOL, granularity=step, count=500)
+                        frames[name] = captured_closed_candles(rows, step, captured)
+            finally:
+                await client.disconnect()
         now = int(time.time())
         # Recursive FRAMA/range/EMA state must start at the training origin.
         # A short live-only seed would otherwise change feature values.
@@ -496,7 +542,38 @@ class SyntheticService:
             "symbol": SYMBOL, "direction": technical_direction, "duration_seconds": DURATION_SECONDS,
             "created_epoch": now, "decision_epoch": decision, "expiry_epoch": now + DURATION_SECONDS,
             "setup_key": f"{SYMBOL}:{decision}", "stake": config["stake"],
+            "observed_at": time.time(), "strategy_version": STRATEGY_VERSION,
+            "features": analysis.get("features", {}), "checks": analysis.get("factors", []),
+            "paper": {"source": "forward_tick_paper", "outcome": "pending"},
+            "net_payout": None,
         }
+        # Pricing is read-only and optional. Do not invent a payout when public
+        # quotes are unavailable. USD is explicitly a paper reference currency.
+        quote_client = DerivWSClient()
+        try:
+            async with asyncio.timeout(3):
+                await quote_client.connect()
+                response = await quote_client.send({
+                    "proposal": 1, "amount": 1, "basis": "stake", "currency": "USD",
+                    "contract_type": "CALL" if technical_direction == "RISE" else "PUT",
+                    "duration": 1, "duration_unit": "m", "underlying_symbol": SYMBOL,
+                })
+                from app.synthetic.execution import _validate_proposal
+                proposal = response.get("proposal")
+                _, ask, payout = _validate_proposal(proposal, stake=1, now=time.time())
+                signal.update(net_payout=payout / ask - 1, paper_quote={
+                    "ask": ask, "payout": payout, "currency": "USD", "spot_time": proposal["spot_time"],
+                    "source": "public_proposal", "break_even": ask / payout,
+                })
+        except Exception:
+            pass
+        finally:
+            await quote_client.disconnect()
+        now = int(time.time())
+        if not 0 <= now - decision <= MAX_ENTRY_AGE:
+            self.store.update_state(last_error="Pricing exceeded the entry window; wait for the next candle")
+            return
+        signal.update(observed_at=time.time(), created_epoch=now, expiry_epoch=now + DURATION_SECONDS)
         limit = float(load_trade_prefs().get("daily_loss_limit") or 0)
         reserved, reason = self.store.reserve(signal, now, expected_config=config, stake_budget=limit if limit > 0 else None)
         if not reserved:
@@ -609,6 +686,7 @@ def confidence_view(analysis: dict, *, updated_at: int | None = -1) -> dict:
         "p_fall": None,
         "p_tie": None,
         "confidence": None,
+        "probability_note": "Indicator agreement is not a win probability.",
         "combined_p_rise": combined_rise,
         "combined_p_fall": combined_fall,
         "combined_confidence": combined_confidence,

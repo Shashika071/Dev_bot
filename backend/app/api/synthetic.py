@@ -40,6 +40,24 @@ class TickBody(BaseModel):
     hours: int = Field(6, ge=1, le=24)
 
 
+@router.post("/evidence/replay")
+async def evidence_replay(body: ScoreBody, x_forex_control_token: str | None = Header(default=None)):
+    require_forex_control(x_forex_control_token)
+    try:
+        return await synthetic_jobs.start_evidence(payout=body.payout)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/history/repair")
+async def repair_history(x_forex_control_token: str | None = Header(default=None)):
+    require_forex_control(x_forex_control_token)
+    try:
+        return await synthetic_jobs.start_evidence(repair=True)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @router.get("/status")
 async def status():
     synthetic_service._ensure_confidence()

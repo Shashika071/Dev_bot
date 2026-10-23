@@ -118,6 +118,8 @@ def _status(model_dir: str | Path, *, now: int | None, quote_epoch: int | None) 
 def _guard_other_jobs() -> None:
     from app.synthetic.jobs import synthetic_jobs
     snapshot = synthetic_jobs.snapshot()
+    if snapshot.get("evidence", {}).get("status") == "running":
+        raise ValueError("Wait for the signal evidence job to finish.")
     history_state = ((snapshot.get("history") or {}).get("job") or {}).get("status")
     if history_state == "running" or snapshot.get("train", {}).get("status") == "running":
         raise ValueError("Wait for the current history download or one-minute model training to finish.")

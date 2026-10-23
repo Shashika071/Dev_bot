@@ -27,6 +27,7 @@ class SyntheticStore:
                     expiry_epoch INTEGER NOT NULL, setup_key TEXT NOT NULL UNIQUE,
                     execution_status TEXT NOT NULL, payload TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS synthetic_lease (id INTEGER PRIMARY KEY CHECK(id=1), owner TEXT, expires INTEGER);
+                CREATE TABLE IF NOT EXISTS evidence_ticks (epoch INTEGER PRIMARY KEY, quote REAL NOT NULL);
             """)
             db.execute("INSERT OR IGNORE INTO synthetic_state VALUES(1, ?)",
                        (json.dumps({"running": False, "config": default_config()}),))
@@ -124,3 +125,48 @@ class SyntheticStore:
                     signal["expiry_epoch"] = max(signal["expiry_epoch"], int(value))
             db.execute("UPDATE synthetic_signals SET execution_status=?,expiry_epoch=?,payload=? WHERE id=?",
                        (signal["execution_status"], signal["expiry_epoch"], json.dumps(signal, allow_nan=False), signal_id))
+
+    def observe_ticks(self, ticks: list[dict], now: int) -> None:
+        """Persist before resolving; restart/gaps cannot silently become winning trades."""
+        from app.synthetic.evidence import clean_ticks, tick_outcome
+        ticks = clean_ticks(ticks)
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.executemany("INSERT OR IGNORE INTO evidence_ticks VALUES (?,?)",
+                           [(row["epoch"], row["quote"]) for row in ticks])
+            records = db.execute("SELECT id,payload FROM synthetic_signals WHERE created_epoch>=?", (now - 86400,)).fetchall()
+            for record in records:
+                signal = json.loads(record["payload"])
+                paper = signal.get("paper")
+                if not paper or paper.get("outcome") not in {"pending", "unresolved"}:
+                    continue
+                requested = signal.get("observed_at", signal["created_epoch"])
+                duration = signal["duration_seconds"]
+                if now < requested + duration + 12:
+                    continue
+                path = [dict(row) for row in db.execute(
+                    "SELECT epoch,quote FROM evidence_ticks WHERE epoch>=? AND epoch<=? ORDER BY epoch",
+                    (requested, requested + duration + 12))]
+                result = tick_outcome(path, requested_entry=requested, duration=duration,
+                                      direction=signal["direction"], net_payout=signal.get("net_payout"))
+                signal["paper"] = result
+                db.execute("UPDATE synthetic_signals SET payload=? WHERE id=?",
+                           (json.dumps(signal, allow_nan=False), record["id"]))
+            db.execute("DELETE FROM evidence_ticks WHERE epoch<?", (now - 86400,))
+
+    def performance(self) -> dict:
+        from app.synthetic.evidence import summarize
+        with self.connection() as db:
+            rows = [json.loads(row[0]) for row in db.execute(
+                "SELECT payload FROM synthetic_signals ORDER BY created_epoch")]
+        groups = {}
+        for signal in rows:
+            if not signal.get("paper"):
+                continue
+            key = (signal.get("strategy_version", "legacy"), signal["duration_seconds"])
+            groups.setdefault(key, []).append(signal["paper"])
+        return {
+            "source": "forward_tick_paper", "broker_settlement": False,
+            "note": "First observed tick at entry and expiry. Paper estimates; broker settlements can differ. Missing quotes leave profit unknown.",
+            "groups": [{"strategy": key[0], "duration_seconds": key[1], **summarize(items)} for key, items in groups.items()],
+        }

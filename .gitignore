@@ -27,7 +27,7 @@ frontend/dist/
 *.log
 
 # Data & models (large / generated)
-data/
+/data/
 # Local SQLite tick dumps (too large for GitHub; keep on disk only)
 candel/
 *.sqlite
