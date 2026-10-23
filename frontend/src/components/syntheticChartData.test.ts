@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { appendTick, candleRefresh, chartCandles, chartSignalMarkers, freshTick, MAX_CHART_BARS, pollResource, reconcileCandles } from './syntheticChartData';
+import { appendTick, candleRefresh, chartCandles, chartSignalMarkers, freshTick, MAX_CHART_BARS, pollResource, reconcileCandles, signalPaths } from './syntheticChartData';
 
 const bar = (epoch: number, close = 10) => ({ epoch, open: 10, high: Math.max(11, close), low: 9, close });
 
@@ -123,5 +123,34 @@ describe('generated signal markers', () => {
       { time: 120, direction: 'RISE' },
       { time: 180, direction: 'RISE' },
     ]);
+  });
+});
+
+describe('five-minute signal path', () => {
+  const bars = [
+    { time: 60, open: 10, high: 10.2, low: 9.8, close: 10 },
+    { time: 120, open: 10, high: 10.4, low: 9.7, close: 10.1 },
+    { time: 180, open: 10.1, high: 10.8, low: 10, close: 10.2 },
+    { time: 240, open: 10.2, high: 10.3, low: 9.5, close: 9.6 },
+    { time: 300, open: 9.6, high: 9.9, low: 9.4, close: 9.7 },
+    { time: 360, open: 9.7, high: 9.8, low: 9.6, close: 9.75 },
+  ];
+
+  it('reports the farthest move in the signaled direction before the 5 minutes finish', () => {
+    const [path] = signalPaths([{ direction: 'RISE', decision_epoch: 120 }], bars, 150, 60, { epoch: 140, price: 11 });
+    expect(path.entry).toBe(10);
+    expect(path.maxMove).toBeCloseTo(1);
+    expect(path.followed).toBeNull();
+    expect(path.complete).toBe(false);
+  });
+
+  it('says whether the 5-minute price finished in the told direction', () => {
+    const [rise] = signalPaths([{ direction: 'RISE', decision_epoch: 120 }], bars, 420, 60);
+    expect(rise.complete).toBe(true);
+    expect(rise.followed).toBe(false);
+    expect(rise.maxMove).toBeCloseTo(0.8);
+    const [fall] = signalPaths([{ direction: 'FALL', decision_epoch: 120 }], bars, 420, 60);
+    expect(fall.followed).toBe(true);
+    expect(fall.maxMove).toBeCloseTo(0.6);
   });
 });

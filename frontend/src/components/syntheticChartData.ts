@@ -82,6 +82,76 @@ export interface ChartSignal {
   created_epoch?: number;
 }
 
+export const SIGNAL_HORIZON_SECONDS = 300;
+
+export interface PriceBar { time: number; open: number; high: number; low: number; close: number }
+
+export interface SignalPath {
+  key: string;
+  direction: 'RISE' | 'FALL';
+  entry: number | null;
+  maxMove: number | null;
+  followed: boolean | null;
+  complete: boolean;
+}
+
+/** How far price traveled in the signaled direction during the next 5 minutes. */
+export function signalPaths(
+  signals: ChartSignal[],
+  bars: PriceBar[],
+  now: number,
+  step: number,
+  live?: { epoch: number; price: number } | null,
+): SignalPath[] {
+  if (step <= 0) return [];
+  return signals.flatMap(signal => {
+    const direction = signal.direction === 'RISE' || signal.direction === 'FALL' ? signal.direction : null;
+    const start = signal.decision_epoch ?? signal.created_epoch;
+    if (!direction || start == null || !Number.isFinite(start) || start <= 0) return [];
+    const entryOpen = start % step === 0 ? start - step : Math.floor(start / step) * step;
+    const entryBar = bars.find(bar => bar.time === entryOpen);
+    const entry = entryBar && Number.isFinite(entryBar.close) ? entryBar.close : null;
+    const end = start + SIGNAL_HORIZON_SECONDS;
+    const window = bars.filter(bar => bar.time >= start && bar.time < end && bar.time <= now);
+    const liveInWindow = live && live.epoch >= start && live.epoch < end ? live.price : null;
+    let maxMove: number | null = null;
+    let followed: boolean | null = null;
+    if (entry != null) {
+      const highs = window.map(bar => bar.high);
+      const lows = window.map(bar => bar.low);
+      if (liveInWindow != null) {
+        highs.push(liveInWindow);
+        lows.push(liveInWindow);
+      }
+      const top = highs.length ? Math.max(entry, ...highs) : entry;
+      const bottom = lows.length ? Math.min(entry, ...lows) : entry;
+      maxMove = direction === 'RISE' ? top - entry : entry - bottom;
+      if (now >= end) {
+        const finished = [...window].reverse().find(bar => bar.time + step <= end) ?? window[window.length - 1];
+        const endPrice = finished?.close ?? liveInWindow;
+        followed = endPrice == null ? null : direction === 'RISE' ? endPrice > entry : endPrice < entry;
+      }
+    }
+    return [{
+      key: `${start}:${direction}`,
+      direction,
+      entry,
+      maxMove,
+      followed,
+      complete: entry != null && now >= end,
+    }];
+  }).filter((path, index, all) => all.findIndex(item => item.key === path.key) === index);
+}
+
+export function pathLabel(path?: SignalPath | null): string {
+  if (!path || path.entry == null || path.maxMove == null) return 'Signal candle is not on the 1-minute chart';
+  const side = path.direction === 'RISE' ? 'Rise' : 'Fall';
+  const far = path.maxMove.toFixed(2);
+  if (!path.complete) return `Watching 5 minutes · farthest ${side} ${far}`;
+  if (path.followed == null) return `5 minutes ended · farthest ${side} ${far}`;
+  return `${path.followed ? 'Went' : 'Did not go'} ${side} · farthest ${side} ${far}`;
+}
+
 /** Place a generated Rise or Fall on the candle that contains its decision time. */
 export function chartSignalMarkers(signals: ChartSignal[], candleTimes: number[], step: number): Array<{ time: number; direction: 'RISE' | 'FALL' }> {
   const available = new Set(candleTimes.filter(time => Number.isFinite(time)));

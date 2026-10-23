@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Activity, ArrowDownRight, ArrowUpRight, Check, ChevronDown, Clock, Download, Loader2, Pause, Play, RefreshCw, ShieldCheck } from 'lucide-react';
 import { syntheticApi, IndicatorState, JobState, SyntheticStatus } from '../api/synthetic';
 import { SyntheticChart } from '../components/SyntheticChart';
+import { pathLabel, SignalPath } from '../components/syntheticChartData';
 import { decisionIsFresh } from './syntheticPresentation';
 import './SyntheticPage.css';
 
@@ -99,6 +100,10 @@ export function SyntheticPage() {
   const [busy, setBusy] = useState<Action | null>(null);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  const [paths, setPaths] = useState<SignalPath[]>([]);
+  const rememberPaths = useCallback((next: SignalPath[]) => {
+    setPaths(current => JSON.stringify(current) === JSON.stringify(next) ? current : next);
+  }, []);
   const [stake, setStake] = useState('1');
   const [cap, setCap] = useState('20');
   const [demoAutoTrade, setDemoAutoTrade] = useState(false);
@@ -228,6 +233,7 @@ export function SyntheticPage() {
           online={online}
           signals={status?.signals || []}
           liveSignal={finalDirection === 'RISE' || finalDirection === 'FALL' ? { direction: finalDirection, decision_epoch: analysis?.decision_epoch } : undefined}
+          onPaths={rememberPaths}
         />
         <section className="sy-panel">
           <div className="sy-panel-title"><div><h2><Check size={17} /> Entry confirmation</h2><p>Both indicators must agree, then pass the 5-minute and 15-minute checks.</p></div><span className="sy-tag">M1 closed</span></div>
@@ -284,8 +290,12 @@ export function SyntheticPage() {
     </section>
 
     <section className="sy-panel">
-      <div className="sy-panel-title"><div><h2><Clock size={17} /> Recent signals</h2><p>Qualified decisions and their execution status</p></div><span className="sy-tag">1-minute expiry</span></div>
-      {latestSignals.length ? <div className="sy-table-wrap"><table><thead><tr><th>Decision time · Colombo</th><th>Market</th><th>Signal</th><th>Expiry</th><th>Execution</th></tr></thead><tbody>{latestSignals.map((signal, index) => <tr key={signal.id || index}><td>{dateTime(signal.decision_epoch || signal.created_epoch || signal.created_at)}</td><td>Volatility 100</td><td><Direction value={signal.direction} /></td><td>{dateTime(signal.expiry_epoch)}</td><td>{signal.execution_status?.replace(/_/g, ' ') || 'Recorded'}</td></tr>)}</tbody></table></div> : <div className="sy-empty"><Activity size={22} /><strong>No qualified signals yet</strong><p>A signal appears when FRAMA, Range Filter, and the 5-minute and 15-minute checks pass together.</p></div>}
+      <div className="sy-panel-title"><div><h2><Clock size={17} /> Recent signals</h2><p>Each arrow is watched for 5 minutes: whether price went that way, and the farthest move in that direction.</p></div><span className="sy-tag">5-minute path</span></div>
+      {latestSignals.length ? <div className="sy-table-wrap"><table><thead><tr><th>Decision time · Colombo</th><th>Market</th><th>Signal</th><th>5-minute path</th><th>Expiry</th><th>Execution</th></tr></thead><tbody>{latestSignals.map((signal, index) => {
+        const key = `${signal.decision_epoch ?? signal.created_epoch ?? ''}:${signal.direction ?? ''}`;
+        const path = paths.find(item => item.key === key);
+        return <tr key={signal.id || index}><td>{dateTime(signal.decision_epoch || signal.created_epoch || signal.created_at)}</td><td>Volatility 100</td><td><Direction value={signal.direction} /></td><td>{path ? pathLabel(path) : 'Open the 1-minute chart to measure this arrow'}</td><td>{dateTime(signal.expiry_epoch)}</td><td>{signal.execution_status?.replace(/_/g, ' ') || 'Recorded'}</td></tr>;
+      })}</tbody></table></div> : <div className="sy-empty"><Activity size={22} /><strong>No qualified signals yet</strong><p>A Rise or Fall arrow appears when FRAMA, Range Filter, and the 5-minute and 15-minute checks pass together. The chart then shows how far price goes that way for 5 minutes.</p></div>}
     </section>
 
     <footer className="sy-footer"><p>Indicator adaptations inspired by <a href="https://www.tradingview.com/script/hskyfPWP-FRAMA-Channel-BigBeluga/" target="_blank" rel="noreferrer">FRAMA Channel [BigBeluga]</a> and <a href="https://www.tradingview.com/script/J8GzFGfD-Range-Filter-Buy-and-Sell-5min-guikroth-version/" target="_blank" rel="noreferrer">Range Filter Buy and Sell 5min</a>. Exact Pine Script parity has not been verified.</p><span>Updated {dateTime(lastReceived)} · Asia/Colombo</span></footer>

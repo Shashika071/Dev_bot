@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Activity, Maximize2, Minimize2, RefreshCw } from 'lucide-react';
 import { CandlestickData, ColorType, IChartApi, ISeriesApi, LineData, LineStyle, SeriesMarker, createChart } from 'lightweight-charts';
 import { syntheticApi, SyntheticChartPayload, SyntheticConfidence } from '../api/synthetic';
-import { appendTick, candleRefresh, chartSignalMarkers, freshTick, pollResource, reconcileCandles, Tick, ChartSignal } from './syntheticChartData';
+import { appendTick, candleRefresh, chartSignalMarkers, freshTick, pathLabel, pollResource, reconcileCandles, signalPaths, Tick, ChartSignal, SignalPath } from './syntheticChartData';
 
 const TIMEFRAMES = ['1m', '5m', '15m', '1h', '1d'] as const;
 const STEP: Record<(typeof TIMEFRAMES)[number], number> = {
@@ -52,7 +52,7 @@ function LiveConfidence({ reading, stale, error }: { reading: SyntheticConfidenc
   );
 }
 
-export function SyntheticChart({ online, signals = [], liveSignal }: { online: boolean; signals?: ChartSignal[]; liveSignal?: ChartSignal }) {
+export function SyntheticChart({ online, signals = [], liveSignal, onPaths }: { online: boolean; signals?: ChartSignal[]; liveSignal?: ChartSignal; onPaths?: (paths: SignalPath[]) => void }) {
   const panel = useRef<HTMLElement | null>(null);
   const host = useRef<HTMLDivElement | null>(null);
   const chart = useRef<IChartApi | null>(null);
@@ -76,6 +76,7 @@ export function SyntheticChart({ online, signals = [], liveSignal }: { online: b
   const [loading, setLoading] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const [paths, setPaths] = useState<SignalPath[]>([]);
   const full = fullscreen || expanded;
   const quoteAge = tickReceived ? tickAge + Math.max(0, (now - tickReceived) / 1000) : null;
   const feedLive = online && !feedError && quoteAge != null && quoteAge <= 8;
@@ -227,7 +228,7 @@ export function SyntheticChart({ online, signals = [], liveSignal }: { online: b
         position: rise ? 'belowBar' : 'aboveBar',
         color: rise ? '#3dd68c' : '#ff5d73',
         shape: rise ? 'arrowUp' : 'arrowDown',
-        size: 2,
+        size: 3,
         text: mark.direction,
       });
     }
@@ -258,6 +259,23 @@ export function SyntheticChart({ online, signals = [], liveSignal }: { online: b
     }
     series.setMarkers(markers.sort((a, b) => Number(a.time) - Number(b.time)));
   }, [payload, timeframe, signals, liveSignal]);
+
+  useEffect(() => {
+    if (timeframe !== '1m') return;
+    const bars = drawn.current.map(bar => ({
+      time: Number(bar.time), open: bar.open, high: bar.high, low: bar.low, close: bar.close,
+    }));
+    const tick = lastTick.current;
+    const next = signalPaths(
+      liveSignal ? [...signals, liveSignal] : signals,
+      bars,
+      Math.floor(now / 1000),
+      60,
+      tick && livePrice != null ? { epoch: tick.epoch, price: livePrice } : null,
+    );
+    setPaths(current => JSON.stringify(current) === JSON.stringify(next) ? current : next);
+    onPaths?.(next);
+  }, [timeframe, signals, liveSignal, payload, livePrice, now, onPaths]);
 
   useEffect(() => {
     if (!online) return;
@@ -325,6 +343,7 @@ export function SyntheticChart({ online, signals = [], liveSignal }: { online: b
     {!online && <p className="sy-muted">Waiting for the analysis service.</p>}
     {online && !loading && payload && !payload.candles?.length && <p className="sy-muted">No completed candles available yet.</p>}
     <div ref={host} className="sy-chart-host" />
-    <p className="sy-footnote">Green Rise and red Fall arrows are generated signals. A demo trade still needs FRAMA and the Range Filter to agree.</p>
+    <p className="sy-footnote">Green Rise and red Fall arrows are generated signals. For 5 minutes after each arrow, the path shows whether price went that way and the farthest move in that direction.</p>
+    {paths.slice(0, 3).map(path => <p className="sy-footnote" key={path.key}>{path.direction} arrow · {pathLabel(path)}</p>)}
   </section>;
 }
