@@ -105,7 +105,7 @@ export function signalPaths(
 ): SignalPath[] {
   if (step <= 0) return [];
   return signals.flatMap(signal => {
-    const direction = signal.direction === 'RISE' || signal.direction === 'FALL' ? signal.direction : null;
+    const direction: 'RISE' | 'FALL' | null = signal.direction === 'RISE' ? 'RISE' : signal.direction === 'FALL' ? 'FALL' : null;
     const start = signal.decision_epoch ?? signal.created_epoch;
     if (!direction || start == null || !Number.isFinite(start) || start <= 0) return [];
     const entryOpen = start % step === 0 ? start - step : Math.floor(start / step) * step;
@@ -157,7 +157,7 @@ export function chartSignalMarkers(signals: ChartSignal[], candleTimes: number[]
   const available = new Set(candleTimes.filter(time => Number.isFinite(time)));
   const placed = new Map<number, { time: number; direction: 'RISE' | 'FALL'; order: number }>();
   signals.forEach((signal, order) => {
-    const direction = signal.direction === 'RISE' || signal.direction === 'FALL' ? signal.direction : null;
+    const direction: 'RISE' | 'FALL' | null = signal.direction === 'RISE' ? 'RISE' : signal.direction === 'FALL' ? 'FALL' : null;
     const epoch = signal.decision_epoch ?? signal.created_epoch;
     if (!direction || epoch == null || !Number.isFinite(epoch) || epoch <= 0 || step <= 0) return;
     const time = Math.floor(epoch / step) * step;
