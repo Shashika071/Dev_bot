@@ -1,19 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Activity, ArrowDownRight, ArrowUpRight, Brain, Check, ChevronDown, Clock, Download, Loader2, Pause, Play, RefreshCw, ShieldCheck } from 'lucide-react';
+import { Activity, ArrowDownRight, ArrowUpRight, Check, ChevronDown, Clock, Download, Loader2, Pause, Play, RefreshCw, ShieldCheck } from 'lucide-react';
 import { syntheticApi, IndicatorState, JobState, SyntheticStatus } from '../api/synthetic';
 import { SyntheticChart } from '../components/SyntheticChart';
-import { combinedSignal, decisionIsFresh, researchPresentation } from './syntheticPresentation';
+import { decisionIsFresh } from './syntheticPresentation';
 import './SyntheticPage.css';
 
 const FEATURE_NAMES = ['Market trend · HH / HL / LH / LL', 'BOS / CHoCH and market structure', 'Multi-timeframe alignment', 'Support and resistance', 'Equal highs / lows and liquidity sweeps', 'Breakouts, retests and false breaks', 'Candlestick patterns and rejection wicks', 'EMA 20 / 50, RSI, MACD and ATR', 'Momentum and follow-through'];
 const TIMEZONE = 'Asia/Colombo';
-type Action = 'scan' | 'start' | 'stop' | 'account' | 'download' | 'research' | 'score' | 'paper' | 'ticks';
+type Action = 'scan' | 'start' | 'stop' | 'account' | 'download';
 
 function number(value?: number, digits = 2) {
   return value != null && Number.isFinite(value) ? value.toLocaleString('en-GB', { maximumFractionDigits: digits }) : '—';
-}
-function percentage(value?: number | null) {
-  return value != null && Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : '—';
 }
 function dateTime(value?: number | string) {
   if (!value) return 'Not yet';
@@ -107,8 +104,6 @@ export function SyntheticPage() {
   const [demoAutoTrade, setDemoAutoTrade] = useState(false);
   const [token, setToken] = useState('');
   const [appId, setAppId] = useState('');
-  const [researchDuration, setResearchDuration] = useState('300');
-  const [researchPayout, setResearchPayout] = useState('');
   const [lastReceived, setLastReceived] = useState<string>();
   const mounted = useRef(false);
   const initialized = useRef(false);
@@ -185,15 +180,7 @@ export function SyntheticPage() {
         if (mounted.current) { setToken(''); if (!enabled) setDemoAutoTrade(false); }
         setMessage(enabled ? 'Demo account settings saved. Enable demo auto-trading and start when ready.' : 'Demo account disabled.');
       }
-      if (action === 'download') { await syntheticApi.download(90); setMessage('History download requested. Progress appears in the research panel.'); }
-      const payout = researchPayout.trim() === '' ? null : Number(researchPayout);
-      if (action === 'research') {
-        await syntheticApi.evaluateResearch({ duration_seconds: Number(researchDuration), payout });
-        setMessage('Research evaluation started. It uses stored R_100 candles and does not place a trade.');
-      }
-      if (action === 'score') { await syntheticApi.scoreResearch({ payout }); setMessage('Scoring the latest closed candle with the saved research model.'); }
-      if (action === 'paper') { await syntheticApi.recordPaper(); setMessage('Paper observation recorded. It is kept separate from the backtest.'); }
-      if (action === 'ticks') { await syntheticApi.downloadTicks(6); setMessage('Recent R_100 tick download started.'); }
+      if (action === 'download') { await syntheticApi.download(90); setMessage('History download requested.'); }
       if (!next) next = await syntheticApi.status();
       if (mounted.current && currentRevision === revision.current) applyStatus(next);
     } catch (err) {
@@ -217,17 +204,10 @@ export function SyntheticPage() {
     ...(analysis && !freshDecision ? ['This decision candle is outside the 20-second entry window. Waiting for a fresh completed-candle decision.'] : []),
     ...(analysis?.blockers || [])];
   const latestSignals = (status?.signals || []).slice(0, 10);
-  const researchView = researchPresentation(status?.research);
-  const combined = combinedSignal(analysis, status?.research, online && freshDecision);
-  const researchJob = status?.research?.job;
-  const researchBusy = jobActive(researchJob);
-  const payoutValue = researchPayout.trim() === '' ? null : Number(researchPayout);
-  const researchInputsValid = ['60', '120', '180', '300', '600', '900', '1800', '3600'].includes(researchDuration)
-    && (payoutValue === null || (Number.isFinite(payoutValue) && payoutValue > 0 && payoutValue <= 3));
 
   return <div className="sy-page">
     <header className="sy-header">
-      <div><div className="sy-eyebrow"><Activity size={14} /> DERIV / SYNTHETIC MARKETS</div><h1>Volatility 100 <span>Rise / Fall</span></h1><p>1-minute FRAMA bot, plus a separate research signal engine. Research signals never place trades.</p></div>
+      <div><div className="sy-eyebrow"><Activity size={14} /> DERIV / SYNTHETIC MARKETS</div><h1>Volatility 100 <span>Rise / Fall</span></h1><p>FRAMA Channel and Range Filter on the closed 1-minute candle, confirmed by 5m and 15m.</p></div>
       <div className="sy-header-status"><span className={`sy-service ${online ? 'connected' : ''}`}><i />{loading ? 'Connecting' : online ? 'Service connected' : 'Service unavailable'}</span><span className="sy-demo-label"><ShieldCheck size={13} /> Demo execution only</span></div>
     </header>
 
@@ -247,7 +227,7 @@ export function SyntheticPage() {
         <SyntheticChart
           online={online}
           signals={status?.signals || []}
-          liveSignal={combined.direction === 'RISE' || combined.direction === 'FALL' ? { direction: combined.direction, decision_epoch: analysis?.decision_epoch } : undefined}
+          liveSignal={finalDirection === 'RISE' || finalDirection === 'FALL' ? { direction: finalDirection, decision_epoch: analysis?.decision_epoch } : undefined}
         />
         <section className="sy-panel">
           <div className="sy-panel-title"><div><h2><Check size={17} /> Entry confirmation</h2><p>Both indicators must agree, then pass the 5-minute and 15-minute checks.</p></div><span className="sy-tag">M1 closed</span></div>
@@ -264,16 +244,10 @@ export function SyntheticPage() {
 
       <aside>
         <section className="sy-panel sy-decision">
-          <div className="sy-panel-title"><h2>Final signal</h2><span className="sy-tag">{combined.direction !== 'NO TRADE' ? 'Confirmed' : 'Waiting'}</span></div>
-          <Direction value={combined.direction} large />
+          <div className="sy-panel-title"><h2>Final signal</h2><span className="sy-tag">{finalDirection !== 'NO TRADE' ? 'Confirmed' : 'Waiting'}</span></div>
+          <Direction value={finalDirection} large />
           <p className="sy-decision-time"><Clock size={12} /> Decision close: {dateTime(analysis?.decision_epoch)}</p>
-          <div className={`sy-confidence-summary ${!online || !freshDecision ? 'sy-neutral' : ''}`}>
-            <span>{combined.direction === 'NO TRADE' ? 'Agreement' : 'Combined confidence'}</span>
-            <strong>{percentage(combined.confidence)}</strong>
-            <small>Model lean plus market evidence. This share is not a guaranteed win rate and it does not place a trade.</small>
-          </div>
-          {!!combined.votes.length && <div className="sy-confidence-checks">{combined.votes.map(vote => <span key={vote.id} className={`sy-confidence-check ${vote.side === combined.modelLean ? 'pass' : 'block'}`}>{vote.name} {vote.side}</span>)}</div>}
-          <p className="sy-footnote">{combined.reason}</p>
+          <p className="sy-footnote">A demo entry needs FRAMA, the Range Filter, and the 5-minute and 15-minute checks to agree on the closed candle.</p>
           <div className="sy-blockers"><h3>{finalDirection === 'NO TRADE' ? 'What is blocking a demo entry' : 'Demo confirmation status'}</h3>
             {blockers.length ? <ul>{blockers.map((reason, index) => <li key={index}>{reason}</li>)}</ul> : <p>{analysis?.eligible ? 'The signal checks passed for this candle.' : 'Run a scan to evaluate FRAMA, the Range Filter, 5m and 15m.'}</p>}
           </div>
@@ -299,65 +273,14 @@ export function SyntheticPage() {
       </aside>
     </div>
 
-    <section className="sy-panel sy-learning">
-      <div className="sy-panel-title"><div><h2><Brain size={18} /> Research signal engine</h2><p>R_100 Rise/Fall probabilities from stored candles. This panel never buys a contract.</p></div><span className={`sy-tag sy-${researchView.status === 'SIGNAL_READY' ? 'positive' : 'neutral'}`}>{researchView.status.replace(/_/g, ' ')}</span></div>
-      <div className="sy-training-grid">
-        <div className="sy-model-readiness">
-          <h3>Latest decision</h3>
-          <Direction value={researchView.final} />
-          <dl>
-            <div><dt>Market</dt><dd>R_100</dd></div>
-            <div><dt>Contract</dt><dd>Rise/Fall · {status?.research?.duration_seconds ? `${status.research.duration_seconds / 60} min` : '5 min default'}</dd></div>
-            <div><dt>Calibrated win probability</dt><dd>{percentage(researchView.probability)}</dd></div>
-            <div><dt>Market regime</dt><dd>{researchView.regime.replace(/_/g, ' ')}</dd></div>
-            <div><dt>Volatility</dt><dd>{researchView.volatility}</dd></div>
-            <div><dt>Expected value</dt><dd>{researchView.expectedValue == null ? '—' : researchView.expectedValue.toFixed(3)}</dd></div>
-            <div><dt>Model status</dt><dd>{researchView.status.replace(/_/g, ' ')}</dd></div>
-            <div><dt>Final signal</dt><dd>{researchView.final}</dd></div>
-          </dl>
-          <p>{researchView.reason}</p>
-          {!!status?.research?.approval_reasons?.length && <ul>{status.research.approval_reasons.map((reason, index) => <li key={index}>{reason}</li>)}</ul>}
-        </div>
-        <div>
-          <h3>Run on stored history</h3>
-          <p className="sy-muted">Choose the contract duration and, if you have a quote, its net profit per 1 unit staked. Leave payout empty rather than assuming 80%.</p>
-          <div className="sy-fields">
-            <label>Duration
-              <select value={researchDuration} disabled={!!busy || researchBusy} onChange={event => setResearchDuration(event.target.value)}>
-                {[60, 120, 180, 300, 600, 900, 1800, 3600].map(seconds => <option key={seconds} value={seconds}>{seconds / 60} min</option>)}
-              </select>
-            </label>
-            <label>Net payout per stake<input type="number" min="0.01" max="3" step="0.01" placeholder="e.g. 0.95" value={researchPayout} disabled={!!busy || researchBusy} onChange={event => setResearchPayout(event.target.value)} /></label>
-          </div>
-          <div className="sy-actions">
-            <button type="button" className="sy-button sy-primary" disabled={!online || !!busy || researchBusy || !researchInputsValid} onClick={() => void act('research')}><Brain size={14} /> Evaluate research</button>
-            <button type="button" className="sy-button" disabled={!online || !!busy || researchBusy || !researchInputsValid} onClick={() => void act('score')}><RefreshCw size={14} /> Score latest candle</button>
-            <button type="button" className="sy-button" disabled={!online || !!busy || researchBusy} onClick={() => void act('paper')}><Check size={14} /> Record paper observation</button>
-            <button type="button" className="sy-button" disabled={!online || !!busy || researchBusy} onClick={() => void act('ticks')}><Download size={14} /> Download 6h ticks</button>
-          </div>
-          <h3>Stored candles</h3>
-          <p className="sy-muted">Download up to 90 days of Volatility 100 history. Research reads these candles and does not place a trade.</p>
-          <div className="sy-history-stats">{['1m', '5m', '15m'].map(tf => {
-            const history = status?.history?.timeframes?.[tf];
-            return <div key={tf}><span>{tf}</span><strong>{number(history?.bars, 0)}</strong><small>{number(history?.days, 1)} days · {number(history?.gaps, 0)} gaps</small></div>;
-          })}</div>
-          <div className="sy-actions"><button type="button" className="sy-button" disabled={!online || !!busy || jobBusy} onClick={() => void act('download')}><Download size={14} /> Download history</button></div>
-          <JobProgress job={status?.history?.job} label="History" />
-          <JobProgress job={researchJob} label="Research" />
-          <p className="sy-footnote">Backtest and paper results stay separate. Stake stays at 1 unit and is never increased after a loss. The 1-minute bot uses FRAMA and the Range Filter only.</p>
-        </div>
-      </div>
-      <div className="sy-history-stats">
-        <div><span>Backtest signals</span><strong>{number(status?.research?.backtest?.signals, 0)}</strong><small>Win rate {percentage(status?.research?.backtest?.win_rate)} · EV {status?.research?.backtest?.expected_profit_per_stake == null ? '—' : number(status.research.backtest.expected_profit_per_stake, 3)}</small></div>
-        <div><span>Paper trades</span><strong>{number(status?.research?.paper?.recorded, 0)}</strong><small>{number(status?.research?.paper?.wins, 0)} wins · {number(status?.research?.paper?.losses, 0)} losses · profit {status?.research?.paper?.profit == null ? '—' : number(status.research.paper.profit, 3)}</small></div>
-        <div><span>Paper rejections</span><strong>{number(status?.research?.paper?.rejections, 0)}</strong><small>Drawdown {status?.research?.paper?.max_drawdown == null ? '—' : number(status.research.paper.max_drawdown, 3)}</small></div>
-        <div><span>Labeled contracts</span><strong>{number(status?.research?.dataset?.rows, 0)}</strong><small>{status?.research?.data_quality?.reason || 'Waiting for stored 1-minute candles'}</small></div>
-      </div>
-      {!!status?.research?.models?.length && <div className="sy-table-wrap"><table><caption>Direction models use the untouched test. Sequence, HMM and neighbor rows do not vote.</caption><thead><tr><th>Model</th><th>Role</th><th>Validation log loss</th><th>Untouched test log loss</th><th>Test AUC</th><th>Test Brier</th><th>Earlier-slice log loss</th></tr></thead><tbody>{status.research.models.map(model => <tr key={model.name}><td>{model.name}{model.votes ? ' · selected' : ''}{model.error ? ' · unavailable' : ''}</td><td>{model.role || 'direction'}</td><td>{number(model.validation_log_loss ?? undefined, 3)}</td><td>{number(model.test_log_loss ?? undefined, 3)}</td><td>{number(model.test_auc ?? undefined, 3)}</td><td>{number(model.test_brier ?? undefined, 3)}</td><td>{number(model.research_log_loss ?? undefined, 3)}</td></tr>)}</tbody></table></div>}
-      {!!status?.research?.optional_research?.structures?.length && <div className="sy-table-wrap"><table><caption>Historical structures on earlier candles. These rates do not authorize a trade.</caption><thead><tr><th>Structure</th><th>Earlier samples</th><th>Later rise rate</th><th>95% lower bound</th></tr></thead><tbody>{status.research.optional_research.structures.map(row => <tr key={row.name}><td>{row.name}</td><td>{number(row.samples, 0)}</td><td>{percentage(row.rise_rate)}</td><td>{percentage(row.wilson_lower)}</td></tr>)}</tbody></table></div>}
-      {!!status?.research?.optional_research?.sequence?.reason && <p className="sy-footnote">{status.research.optional_research.sequence.reason}{status.research.optional_research.sequence.results ? ` LSTM ${number(status.research.optional_research.sequence.results.lstm?.test_log_loss, 3)}, GRU ${number(status.research.optional_research.sequence.results.gru?.test_log_loss, 3)}, CNN ${number(status.research.optional_research.sequence.results.cnn?.test_log_loss, 3)}.` : ''}</p>}
-      {!!status?.research?.notes?.length && <p className="sy-footnote">{status.research.notes.join(' ')}</p>}
-      {!!status?.research?.limitations?.length && <p className="sy-footnote">{status.research.limitations.join(' ')}</p>}
+    <section className="sy-panel">
+      <div className="sy-panel-title"><div><h2><Download size={17} /> Stored candles</h2><p>Download up to 90 days of Volatility 100 history for the closed-candle checks.</p></div></div>
+      <div className="sy-history-stats">{['1m', '5m', '15m'].map(tf => {
+        const history = status?.history?.timeframes?.[tf];
+        return <div key={tf}><span>{tf}</span><strong>{number(history?.bars, 0)}</strong><small>{number(history?.days, 1)} days · {number(history?.gaps, 0)} gaps</small></div>;
+      })}</div>
+      <div className="sy-actions"><button type="button" className="sy-button" disabled={!online || !!busy || jobBusy} onClick={() => void act('download')}><Download size={14} /> Download history</button></div>
+      <JobProgress job={status?.history?.job} label="History" />
     </section>
 
     <section className="sy-panel">
