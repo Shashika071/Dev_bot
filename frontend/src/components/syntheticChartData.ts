@@ -143,6 +143,21 @@ export function signalPaths(
   }).filter((path, index, all) => all.findIndex(item => item.key === path.key) === index);
 }
 
+export interface SignalWinRate { wins: number; losses: number; rate: number | null }
+
+/** Finished 5-minute paths only. A win is a price that ended in the called direction. */
+export function signalWinRate(paths: SignalPath[]): SignalWinRate {
+  const scored = paths.filter(path => path.complete && path.followed != null);
+  const wins = scored.filter(path => path.followed).length;
+  return { wins, losses: scored.length - wins, rate: scored.length ? wins / scored.length : null };
+}
+
+export function winRateLabel(rate: SignalWinRate): string {
+  if (rate.rate == null) return 'Win rate —';
+  const settled = rate.wins + rate.losses;
+  return `Win rate ${(rate.rate * 100).toFixed(1)}% · ${rate.wins} of ${settled}`;
+}
+
 export function pathLabel(path?: SignalPath | null): string {
   if (!path || path.entry == null || path.maxMove == null) return 'Signal candle is not on the 1-minute chart';
   const side = path.direction === 'RISE' ? 'Rise' : 'Fall';

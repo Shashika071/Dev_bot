@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { appendTick, candleRefresh, chartCandles, chartSignalMarkers, freshTick, MAX_CHART_BARS, pollResource, reconcileCandles, signalPaths } from './syntheticChartData';
+import { appendTick, candleRefresh, chartCandles, chartSignalMarkers, freshTick, MAX_CHART_BARS, pollResource, reconcileCandles, signalPaths, signalWinRate } from './syntheticChartData';
 
 const bar = (epoch: number, close = 10) => ({ epoch, open: 10, high: Math.max(11, close), low: 9, close });
 
@@ -152,5 +152,15 @@ describe('five-minute signal path', () => {
     const [fall] = signalPaths([{ direction: 'FALL', decision_epoch: 120 }], bars, 420, 60);
     expect(fall.followed).toBe(true);
     expect(fall.maxMove).toBeCloseTo(0.6);
+  });
+
+  it('counts the winning percentage from finished signals only', () => {
+    const finished = signalPaths([
+      { direction: 'RISE', decision_epoch: 120 },
+      { direction: 'FALL', decision_epoch: 120 },
+    ], bars, 420, 60);
+    const watching = signalPaths([{ direction: 'RISE', decision_epoch: 120 }], bars, 150, 60);
+    expect(signalWinRate([...finished, ...watching])).toEqual({ wins: 1, losses: 1, rate: 0.5 });
+    expect(signalWinRate(watching)).toEqual({ wins: 0, losses: 0, rate: null });
   });
 });

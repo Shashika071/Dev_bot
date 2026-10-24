@@ -38,7 +38,12 @@
 .sy-chart-tools { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .sy-chart-full { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #293c52; background: #111f30; color: #d5e2f0; border-radius: 6px; padding: 6px 10px; font-size: 10px; }
 .sy-chart:fullscreen, .sy-chart.sy-chart-expanded { position: fixed; inset: 0; z-index: 80; width: 100vw; height: 100vh; margin: 0; border-radius: 0; box-sizing: border-box; display: flex; flex-direction: column; background: #0a1421; }
-.sy-chart:fullscreen .sy-chart-host, .sy-chart.sy-chart-expanded .sy-chart-host { flex: 1 1 auto; min-height: 0; }
+.sy-chart:fullscreen .sy-panel-title p, .sy-chart.sy-chart-expanded .sy-panel-title p { display: none; }
+.sy-chart:fullscreen .sy-chart-legend, .sy-chart.sy-chart-expanded .sy-chart-legend { margin-bottom: 8px; }
+.sy-chart:fullscreen .sy-chart-host, .sy-chart.sy-chart-expanded .sy-chart-host { flex: 1 1 auto; min-height: 0; height: auto; }
+.sy-confidence-compact { display: flex; align-items: center; gap: 12px; padding: 6px 10px; }
+.sy-confidence-compact .sy-confidence-bar { flex: 1; margin: 0; height: 12px; }
+.sy-confidence-compact .sy-confidence-split { width: auto; gap: 14px; flex-shrink: 0; }
 .sy-chart-tabs { display: flex; gap: 4px; padding: 3px; border-radius: 6px; background: #111f30; border: 1px solid #293c52; }
 .sy-chart-tabs button { border: 0; background: transparent; color: #96a9c0; padding: 4px 10px; border-radius: 4px; font-size: 10px; }
 .sy-chart-tabs button.selected { color: #aaf1da; background: #214437; }
@@ -61,7 +66,8 @@
 .sy-confidence-check.pass { color: #3dbe8b; }
 .sy-confidence-check.block { color: #e06c75; }
 .sy-confidence-check.wait { color: #edbd71; }
-.sy-chart-count { margin-left: auto; }
+.sy-chart-wins { margin-left: auto; color: #d5e2f0; font-weight: 600; }
+.sy-chart-count { margin-left: 12px; }
 .sy-footnote { font-size: 10px; color: var(--sy-muted); line-height: 1.7; margin-top: 12px; }
 .sy-indicators { display: grid; grid-template-columns: 1fr 22px 1fr; gap: 9px; align-items: center; }
 .sy-indicator { border: 1px solid #2b4056; background: #101e2e; padding: 14px; border-radius: 8px; min-width: 0; }

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Activity, ArrowDownRight, ArrowUpRight, Check, ChevronDown, Clock, Download, Loader2, Pause, Play, RefreshCw, ShieldCheck } from 'lucide-react';
 import { syntheticApi, IndicatorState, JobState, SyntheticStatus } from '../api/synthetic';
 import { SyntheticChart } from '../components/SyntheticChart';
-import { pathLabel, SignalPath } from '../components/syntheticChartData';
+import { pathLabel, SignalPath, signalWinRate, winRateLabel } from '../components/syntheticChartData';
 import { decisionIsFresh } from './syntheticPresentation';
 import './SyntheticPage.css';
 
@@ -290,7 +290,7 @@ export function SyntheticPage() {
     </section>
 
     <section className="sy-panel">
-      <div className="sy-panel-title"><div><h2><Clock size={17} /> Recent signals</h2><p>Each arrow is watched for 5 minutes: whether price went that way, and the farthest move in that direction.</p></div><span className="sy-tag">5-minute path</span></div>
+      <div className="sy-panel-title"><div><h2><Clock size={17} /> Recent signals</h2><p>Each arrow is watched for 5 minutes. The win rate counts signals that finished in the called direction.</p></div><span className="sy-tag">{winRateLabel(signalWinRate(paths))}</span></div>
       {latestSignals.length ? <div className="sy-table-wrap"><table><thead><tr><th>Decision time · Colombo</th><th>Market</th><th>Signal</th><th>5-minute path</th><th>Expiry</th><th>Execution</th></tr></thead><tbody>{latestSignals.map((signal, index) => {
         const key = `${signal.decision_epoch ?? signal.created_epoch ?? ''}:${signal.direction ?? ''}`;
         const path = paths.find(item => item.key === key);

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Activity, Maximize2, Minimize2, RefreshCw } from 'lucide-react';
 import { CandlestickData, ColorType, IChartApi, ISeriesApi, LineData, LineStyle, SeriesMarker, createChart } from 'lightweight-charts';
 import { syntheticApi, SyntheticChartPayload, SyntheticConfidence } from '../api/synthetic';
-import { appendTick, candleRefresh, chartSignalMarkers, freshTick, pathLabel, pollResource, reconcileCandles, signalPaths, Tick, ChartSignal, SignalPath } from './syntheticChartData';
+import { appendTick, candleRefresh, chartSignalMarkers, freshTick, pathLabel, pollResource, reconcileCandles, signalPaths, signalWinRate, winRateLabel, Tick, ChartSignal, SignalPath } from './syntheticChartData';
 
 const TIMEFRAMES = ['1m', '5m', '15m', '1h', '1d'] as const;
 const STEP: Record<(typeof TIMEFRAMES)[number], number> = {
@@ -21,12 +21,26 @@ function percent(value?: number | null): string {
   return `${(value * 100).toFixed(1)}%`;
 }
 
-function LiveConfidence({ reading, stale, error }: { reading: SyntheticConfidence | null; stale: boolean; error: string }) {
+function LiveConfidence({ reading, stale, error, compact = false }: { reading: SyntheticConfidence | null; stale: boolean; error: string; compact?: boolean }) {
   const rise = reading?.combined_p_rise ?? reading?.p_rise;
   const fall = reading?.combined_p_fall ?? reading?.p_fall;
   const call = reading?.direction || 'NO TRADE';
   const tone = call === 'RISE' ? 'positive' : call === 'FALL' ? 'negative' : 'neutral';
   const checks = reading?.checks || [];
+  const riseWidth = `${Math.max(0, Math.min(100, (rise ?? 0) * 100))}%`;
+  const fallWidth = `${Math.max(0, Math.min(100, (fall ?? 0) * 100))}%`;
+  if (compact) {
+    return (
+      <div className="sy-confidence sy-confidence-compact" aria-live="polite">
+        <span className={`sy-tag sy-${tone}`}>{call}</span>
+        <div className="sy-confidence-bar" role="img" aria-label={`Rise ${percent(rise)}, Fall ${percent(fall)}`}>
+          <span className="sy-confidence-rise" style={{ width: riseWidth }} />
+          <span className="sy-confidence-fall" style={{ width: fallWidth }} />
+        </div>
+        <div className="sy-confidence-split"><span>Rise {percent(rise)}</span><span>Fall {percent(fall)}</span></div>
+      </div>
+    );
+  }
   return (
     <div className="sy-confidence" aria-live="polite">
       <div className="sy-confidence-head">
@@ -35,8 +49,8 @@ function LiveConfidence({ reading, stale, error }: { reading: SyntheticConfidenc
         <span className="sy-tag">{percent(reading?.combined_confidence ?? reading?.confidence)}</span>
       </div>
       <div className="sy-confidence-bar" role="img" aria-label={`Rise ${percent(rise)}, Fall ${percent(fall)}`}>
-        <span className="sy-confidence-rise" style={{ width: `${Math.max(0, Math.min(100, (rise ?? 0) * 100))}%` }} />
-        <span className="sy-confidence-fall" style={{ width: `${Math.max(0, Math.min(100, (fall ?? 0) * 100))}%` }} />
+        <span className="sy-confidence-rise" style={{ width: riseWidth }} />
+        <span className="sy-confidence-fall" style={{ width: fallWidth }} />
       </div>
       <div className="sy-confidence-split">
         <span>Rise {percent(rise)}</span>
@@ -330,20 +344,21 @@ export function SyntheticChart({ online, signals = [], liveSignal, onPaths }: { 
         </button>
       </div>
     </div>
-    <div className="sy-chart-legend">{OVERLAYS.map(overlay => <span key={overlay.key}><i style={{ background: overlay.color }} />{overlay.label}</span>)}<span><i style={{ background: '#3dd68c' }} />Generated signal</span><span className="sy-chart-count">{payload?.candles?.length ?? 0} candles {loading && <RefreshCw size={11} className="sy-spin" />}</span></div>
-    <div className="sy-trend-dash" aria-label="Trend confirmation">
+    <div className="sy-chart-legend">{OVERLAYS.map(overlay => <span key={overlay.key}><i style={{ background: overlay.color }} />{overlay.label}</span>)}<span><i style={{ background: '#3dd68c' }} />Generated signal</span><span className="sy-chart-wins">{winRateLabel(signalWinRate(paths))}</span><span className="sy-chart-count">{payload?.candles?.length ?? 0} candles {loading && <RefreshCw size={11} className="sy-spin" />}</span></div>
+    {!full && <div className="sy-trend-dash" aria-label="Trend confirmation">
       <strong>Trend confirmation</strong>
       <span>Structure <b>{payload?.trend_system?.dashboard?.trend || 'Waiting'}</b></span>
       <span>ROC <b>{payload?.trend_system?.dashboard?.roc || 'Waiting'}</b></span>
       <span>TSI <b>{payload?.trend_system?.dashboard?.tsi || 'Waiting'}</b></span>
-    </div>
-    <LiveConfidence reading={confidence} stale={confidenceStale} error={confidenceError} />
-    <p className="sy-footnote" role="status">{!online ? 'Analysis service offline. Reconnecting.' : feedLive ? `Price feed live · tick ${Math.floor(quoteAge ?? 0)}s ago` : feedError || 'Connecting to the live price feed…'}</p>
+    </div>}
+    <LiveConfidence reading={confidence} stale={confidenceStale} error={confidenceError} compact={full} />
+    {!full && <p className="sy-footnote" role="status">{!online ? 'Analysis service offline. Reconnecting.' : feedLive ? `Price feed live · tick ${Math.floor(quoteAge ?? 0)}s ago` : feedError || 'Connecting to the live price feed…'}</p>}
+    {full && !feedLive && <p className="sy-footnote" role="status">{!online ? 'Analysis service offline. Reconnecting.' : feedError || 'Connecting to the live price feed…'}</p>}
     {error && <p className="sy-error" role="alert">{error}</p>}
-    {!online && <p className="sy-muted">Waiting for the analysis service.</p>}
+    {!online && !full && <p className="sy-muted">Waiting for the analysis service.</p>}
     {online && !loading && payload && !payload.candles?.length && <p className="sy-muted">No completed candles available yet.</p>}
     <div ref={host} className="sy-chart-host" />
-    <p className="sy-footnote">Green Rise and red Fall arrows are generated signals. For 5 minutes after each arrow, the path shows whether price went that way and the farthest move in that direction.</p>
-    {paths.slice(0, 3).map(path => <p className="sy-footnote" key={path.key}>{path.direction} arrow · {pathLabel(path)}</p>)}
+    {!full && <p className="sy-footnote">Green Rise and red Fall arrows are generated signals. For 5 minutes after each arrow, the path shows whether price went that way and the farthest move in that direction.</p>}
+    {!full && paths.slice(0, 3).map(path => <p className="sy-footnote" key={path.key}>{path.direction} arrow · {pathLabel(path)}</p>)}
   </section>;
 }
