@@ -49,8 +49,8 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
         Buys Deriv <span className="text-slate-300">ONETOUCH</span> when live setup confidence is ≥{' '}
         <span className="text-slate-300">Min confidence</span> (default 80% = 4/5 conditions).
         <span className="text-slate-300"> UT is not required.</span>{' '}
-        Mode <span className="text-slate-300">both</span> places <span className="text-emerald-400">+barrier</span> and{' '}
-        <span className="text-rose-400">−barrier</span>. Settings, token, Auto trade ON, and connection are saved in this browser and restore after refresh.
+        Barriers follow the side: <span className="text-emerald-400">RISE → + only</span>,{' '}
+        <span className="text-rose-400">FALL → − only</span>. Settings restore after refresh.
       </p>
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -165,14 +165,14 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
 
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <label className="flex items-center gap-1.5 text-xs text-slate-300">
-          <span>Sides</span>
+          <span>Barrier</span>
           <select
-            className="field w-auto"
+            className="field w-auto min-w-[14rem]"
             value={trade.mode}
-            onChange={(e) => trade.setMode(e.target.value === 'signal' ? 'signal' : 'both')}
+            onChange={(e) => trade.setMode(e.target.value === 'both' ? 'both' : 'signal')}
           >
-            <option value="both">Both + and −</option>
-            <option value="signal">Signal side only</option>
+            <option value="signal">RISE → + only · FALL → − only</option>
+            <option value="both">Both + and − (two contracts)</option>
           </select>
         </label>
 

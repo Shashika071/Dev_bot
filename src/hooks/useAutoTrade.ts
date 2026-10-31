@@ -60,6 +60,8 @@ type StoredPrefs = {
   duration: number
   durationUnit: 's' | 'm' | 'h' | 'd'
   mode: TouchSideMode
+  /** dual = + and − every signal; single = RISE→+ only, FALL→− only */
+  barrierPair: 'single' | 'dual'
   cooldownSec: number
   minConfidencePct: number
   /** Restore Auto trade ON after refresh */
@@ -85,7 +87,8 @@ const DEFAULT_PREFS: StoredPrefs = {
   barrierAbs: 0.05,
   duration: 7,
   durationUnit: 'm',
-  mode: 'both',
+  mode: 'signal',
+  barrierPair: 'single',
   cooldownSec: 420,
   minConfidencePct: 80,
   autoEnabled: false,
@@ -107,7 +110,10 @@ function loadPrefs(): StoredPrefs {
       barrierAbs: typeof p.barrierAbs === 'number' && p.barrierAbs > 0 ? p.barrierAbs : 0.05,
       duration: typeof p.duration === 'number' && p.duration > 0 ? p.duration : 7,
       durationUnit: p.durationUnit === 's' || p.durationUnit === 'h' || p.durationUnit === 'd' ? p.durationUnit : 'm',
-      mode: p.mode === 'signal' ? 'signal' : 'both',
+      // Migrate: old default "both" dual-barrier → signal side only (+ for RISE, − for FALL).
+      // Dual barriers only if user explicitly saved barrierPair: 'dual'.
+      barrierPair: p.barrierPair === 'dual' ? 'dual' : 'single',
+      mode: p.barrierPair === 'dual' ? 'both' : 'signal',
       cooldownSec: typeof p.cooldownSec === 'number' && p.cooldownSec >= 0 ? p.cooldownSec : 420,
       minConfidencePct:
         typeof p.minConfidencePct === 'number' && p.minConfidencePct >= 0 && p.minConfidencePct <= 100
@@ -201,6 +207,7 @@ export function useAutoTrade(symbol: string) {
       duration,
       durationUnit,
       mode,
+      barrierPair: mode === 'both' ? 'dual' : 'single',
       cooldownSec,
       minConfidencePct,
       autoEnabled,
