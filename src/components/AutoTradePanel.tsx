@@ -53,8 +53,8 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
         <span className="text-rose-400">−barrier</span>. One entry per minute side; wait-after-trade blocks the next fill.
       </p>
 
-      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8">
-        <Field label="App ID">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <Field label="App ID" className="lg:col-span-1">
           <input
             className="field"
             value={trade.appId}
@@ -87,6 +87,9 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
             ))}
           </select>
         </Field>
+      </div>
+
+      <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
         <Field label="Stake">
           <input
             className="field"
@@ -108,29 +111,29 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
           />
         </Field>
         <Field label="Duration">
-          <div className="flex gap-1">
-            <input
-              className="field min-w-0 flex-1"
-              type="number"
-              min={1}
-              step={1}
-              value={Number.isFinite(trade.duration) && trade.duration > 0 ? trade.duration : 7}
-              onChange={(e) => {
-                const n = Number(e.target.value)
-                trade.setDuration(Number.isFinite(n) && n >= 1 ? Math.floor(n) : 7)
-              }}
-            />
-            <select
-              className="field w-14"
-              value={trade.durationUnit}
-              onChange={(e) => trade.setDurationUnit(e.target.value as 's' | 'm' | 'h' | 'd')}
-            >
-              <option value="s">s</option>
-              <option value="m">m</option>
-              <option value="h">h</option>
-              <option value="d">d</option>
-            </select>
-          </div>
+          <input
+            className="field"
+            type="number"
+            min={1}
+            step={1}
+            value={Number.isFinite(trade.duration) && trade.duration > 0 ? trade.duration : 7}
+            onChange={(e) => {
+              const n = Number(e.target.value)
+              trade.setDuration(Number.isFinite(n) && n >= 1 ? Math.floor(n) : 7)
+            }}
+          />
+        </Field>
+        <Field label="Unit">
+          <select
+            className="field"
+            value={trade.durationUnit}
+            onChange={(e) => trade.setDurationUnit(e.target.value as 's' | 'm' | 'h' | 'd')}
+          >
+            <option value="s">seconds</option>
+            <option value="m">minutes</option>
+            <option value="h">hours</option>
+            <option value="d">days</option>
+          </select>
         </Field>
         <Field label="Min confidence %">
           <input
@@ -144,7 +147,7 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
               const n = Math.floor(Number(e.target.value))
               trade.setMinConfidencePct(Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : 80)
             }}
-            title="Only trade when closed-candle confidence is at least this % (80 = 4 of 5 conditions)"
+            title="Only trade when live confidence is at least this % (80 = 4 of 5 conditions)"
           />
         </Field>
         <Field label="Wait after trade (sec)">
@@ -214,19 +217,24 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
 
       <style>{`
         .field {
+          box-sizing: border-box;
+          display: block;
           width: 100%;
+          min-width: 0;
+          min-height: 2.25rem;
           border-radius: 0.375rem;
           border: 1px solid rgb(51 65 85);
           background: #0b0f14;
-          padding: 0.35rem 0.5rem;
-          font-size: 0.75rem;
+          padding: 0.5rem 0.65rem;
+          font-size: 0.8125rem;
+          line-height: 1.25;
           color: rgb(226 232 240);
         }
         .field:focus { outline: 1px solid rgb(56 189 248); }
         .btn, .btn-muted {
           border-radius: 0.375rem;
           border: 1px solid rgb(51 65 85);
-          padding: 0.35rem 0.65rem;
+          padding: 0.45rem 0.75rem;
           font-size: 0.75rem;
           color: rgb(226 232 240);
           background: rgb(30 41 59);
@@ -239,10 +247,10 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
   )
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+function Field({ label, children, className = '' }: { label: string; children: ReactNode; className?: string }) {
   return (
-    <label className="block text-[10px] uppercase tracking-wide text-slate-500">
-      <span className="mb-1 block">{label}</span>
+    <label className={`block min-w-[8rem] text-[10px] uppercase tracking-wide text-slate-500 ${className}`}>
+      <span className="mb-1.5 block">{label}</span>
       {children}
     </label>
   )
