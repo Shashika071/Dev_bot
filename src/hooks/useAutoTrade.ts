@@ -129,6 +129,22 @@ function savePrefs(payload: StoredPrefs) {
   } catch { /* ignore quota */ }
 }
 
+function readStoredCooldownUntil(): number {
+  try {
+    const until = loadPrefs().cooldownUntil
+    return typeof until === 'number' && until > Date.now() ? until : 0
+  } catch {
+    return 0
+  }
+}
+
+function persistCooldownUntil(until: number) {
+  try {
+    const cur = loadPrefs()
+    savePrefs({ ...cur, cooldownUntil: until })
+  } catch { /* ignore */ }
+}
+
 export function useAutoTrade(symbol: string) {
   const prefs0 = useRef(loadPrefs()).current
   const [appId, setAppId] = useState(prefs0.appId)
@@ -156,6 +172,7 @@ export function useAutoTrade(symbol: string) {
   const clientRef = useRef<DerivTradingClient | null>(null)
   const tradedSignals = useRef(new Set<string>())
   const cooldownUntilRef = useRef(prefs0.cooldownUntil)
+  const tradeLockRef = useRef(false)
   const restoreTried = useRef(false)
   const pendingAuto = useRef(prefs0.autoEnabled)
   const readyToPersist = useRef(false)
@@ -374,6 +391,15 @@ export function useAutoTrade(symbol: string) {
     if (confPct < s.minConfidencePct) return
     const key = `${sig.time}:${sig.side}`
     if (tradedSignals.current.has(key)) return
+    if (tradeLockRef.current) return
+
+    // Sync cooldown from storage (survives refresh / HMR / other tab).
+    const storedUntil = readStoredCooldownUntil()
+    if (storedUntil > cooldownUntilRef.current) {
+      cooldownUntilRef.current = storedUntil
+      setCooldownUntil(storedUntil)
+    }
+
     const waitLeft = Math.max(0, Math.ceil((cooldownUntilRef.current - Date.now()) / 1000))
     if (waitLeft > 0) {
       const cdKey = `cd:${key}`
@@ -402,7 +428,22 @@ export function useAutoTrade(symbol: string) {
       }
       return
     }
+
+    // Lock + start cooldown BEFORE buy so another tick cannot open a second trade.
     tradedSignals.current.add(key)
+    tradeLockRef.current = true
+    if (s.cooldownSec > 0) {
+      const until = Date.now() + s.cooldownSec * 1000
+      cooldownUntilRef.current = until
+      setCooldownUntil(until)
+      persistCooldownUntil(until)
+      pushLog({
+        signal: sig.side,
+        barrier: '—',
+        ok: true,
+        message: `Cooldown started · next trade after ${s.cooldownSec}s`,
+      })
+    }
     setBusy(true)
     try {
       const results = await placeTouchTrades(client, {
@@ -423,18 +464,18 @@ export function useAutoTrade(symbol: string) {
           contractId: r.contractId,
         })
       }
-      if (results.length > 0 && s.cooldownSec > 0) {
-        const until = Date.now() + s.cooldownSec * 1000
-        cooldownUntilRef.current = until
-        setCooldownUntil(until)
-        pushLog({
-          signal: sig.side,
-          barrier: '—',
-          ok: true,
-          message: `Cooldown started · next trade after ${s.cooldownSec}s`,
-        })
+      if (!results.length && s.cooldownSec > 0) {
+        // No fill — release cooldown so a real opportunity is not blocked.
+        cooldownUntilRef.current = 0
+        setCooldownUntil(0)
+        persistCooldownUntil(0)
       }
     } catch (err) {
+      if (s.cooldownSec > 0) {
+        cooldownUntilRef.current = 0
+        setCooldownUntil(0)
+        persistCooldownUntil(0)
+      }
       pushLog({
         signal: sig.side,
         barrier: '—',
@@ -442,6 +483,7 @@ export function useAutoTrade(symbol: string) {
         message: err instanceof Error ? err.message : String(err),
       })
     } finally {
+      tradeLockRef.current = false
       setBusy(false)
     }
   }, [pushLog])
