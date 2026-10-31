@@ -1,121 +1,29 @@
-# VPS deploy beside Fiyola — does NOT bind host :80 or :443.
-# Existing fiyola-prod-nginx proxies:
-#   https://devbot.crexline.com  -> deriv-frontend:80
-#   https://backdev.crexline.com -> deriv-backend:8000
+# VPS deploy (same project name as before: deriv)
+# Does NOT bind host :80 or :443 — use ssl-ports edge on 8443.
 #
-# Usage on VPS:
-#   docker compose -p deriv -f docker-compose.prod.yml --env-file .env.prod up -d --build
-#   then attach nginx to this network (see deploy/fiyola-nginx-devbot.conf)
+#   docker compose -p deriv \
+#     -f docker-compose.prod.yml \
+#     -f docker-compose.ssl-ports.yml \
+#     --env-file .env.prod \
+#     up -d --build --force-recreate frontend edge
+#
+# URL: https://devbot.crexline.com:8443
+# Needs: ./certs/origin.pem + ./certs/origin.key (Cloudflare Origin Cert)
 
 name: deriv
 
 services:
-  postgres:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-deriv_bot}
-      POSTGRES_USER: ${POSTGRES_USER:-deriv}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.prod}
-    command:
-      - postgres
-      - -c
-      - shared_buffers=64MB
-      - -c
-      - work_mem=4MB
-      - -c
-      - maintenance_work_mem=64MB
-      - -c
-      - effective_cache_size=256MB
-      - -c
-      - max_connections=40
-      - -c
-      - wal_buffers=4MB
-    volumes:
-      - ./pgdata:/var/lib/postgresql/data
-    mem_limit: 768m
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-deriv} -d ${POSTGRES_DB:-deriv_bot}"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-      start_period: 20s
-    networks:
-      - deriv_net
-
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    # Use DATABASE_URL from .env.prod only (must be URL-encoded).
-    # Do NOT rebuild it here — passwords with @ # : break the host parse.
-    env_file: .env.prod
-    environment:
-      BACKEND_URL: http://backend:8000
-    volumes:
-      - ./data:/app/data
-    depends_on:
-      postgres:
-        condition: service_healthy
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
-    mem_limit: 1536m
-    networks:
-      - deriv_net
-
-  worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    restart: unless-stopped
-    env_file: .env.prod
-    environment:
-      BACKEND_URL: http://backend:8000
-    volumes:
-      - ./data:/app/data
-    depends_on:
-      postgres:
-        condition: service_healthy
-      backend:
-        condition: service_started
-    command: python -m app.worker
-    mem_limit: 1536m
-    networks:
-      - deriv_net
-
   frontend:
     build:
-      context: ./frontend
-      dockerfile: Dockerfile.prod
+      context: .
+      dockerfile: Dockerfile
       args:
-        VITE_API_URL: ${VITE_API_URL:-https://backdev.crexline.com}
-        VITE_WS_URL: ${VITE_WS_URL:-wss://backdev.crexline.com}
+        VITE_DERIV_PUBLIC_WS: ${VITE_DERIV_PUBLIC_WS:-wss://api.derivws.com/trading/v1/options/ws/public}
+        VITE_DERIV_SYMBOL: ${VITE_DERIV_SYMBOL:-R_100}
+        VITE_HISTORY_COUNT: ${VITE_HISTORY_COUNT:-5000}
+        VITE_SOUND_ALERTS: ${VITE_SOUND_ALERTS:-true}
     restart: unless-stopped
     mem_limit: 128m
-    networks:
-      - deriv_net
-
-  # One-off heavier training job (does not replace the live worker).
-  #   docker compose -p deriv -f docker-compose.prod.yml --env-file .env.prod \
-  #     --profile train run --rm train
-  train:
-    profiles: ["train"]
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    env_file: .env.prod
-    environment:
-      BACKEND_URL: http://backend:8000
-    volumes:
-      - ./data:/app/data
-    depends_on:
-      postgres:
-        condition: service_healthy
-      backend:
-        condition: service_started
-    # Prefer HTTP train via UI; this profile is for CLI / ops runs.
-    command: python -c "print('Use UI Train tab or POST /train/start; models land in /app/data/models')"
-    mem_limit: 3072m
     networks:
       - deriv_net
 
