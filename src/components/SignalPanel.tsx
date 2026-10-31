@@ -91,7 +91,7 @@ export function SignalPanel({
           <SetupCard setup={liveSetup.fall} active={liveSetup.lean === 'FALL'} minConfidencePct={minConfidencePct} />
         </div>
         <p className="mt-2 text-[10px] leading-snug text-slate-500">
-          Chart: solid ▲/▼ = full 5/5 · circle R80/F80 = partial ≥{minConfidencePct}%. Auto trade can use partial.
+          Live condition count this minute. Full alert = 5/5; auto trade can fire from ≥{minConfidencePct}%.
         </p>
       </div>
 

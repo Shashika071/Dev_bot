@@ -112,7 +112,6 @@ export default function App() {
                 candles={market?.candles ?? []}
                 evaluations={evaluations}
                 lastPrice={market?.lastPrice ?? null}
-                minConfidencePct={trade.minConfidencePct}
               />
             </main>
             <SignalPanel
