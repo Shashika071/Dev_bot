@@ -16,11 +16,14 @@ import {
   computeDynamicSRv2,
   DYNAMIC_SR_V2_DEFAULTS,
 } from '../lib/indicators/dynamicSRv2'
+import { computeSetupChartMarkers } from '../lib/strategy/liveConfidence'
 
 interface Props {
   candles: Candle[]
   evaluations: SignalEvaluation[]
   lastPrice: number | null
+  /** Show partial setups at/above this % (default 80). Full 5/5 still drawn differently. */
+  minConfidencePct?: number
 }
 
 function lineStyleFromSetting(style: 'Solid' | 'Dashed' | 'Dotted'): LineStyle {
@@ -38,7 +41,7 @@ function horizSegment(fromTime: number, toTime: number, price: number) {
   ]
 }
 
-export function TradingChart({ candles, lastPrice, evaluations }: Props) {
+export function TradingChart({ candles, lastPrice, evaluations, minConfidencePct = 80 }: Props) {
   const mainRef = useRef<HTMLDivElement>(null)
   const fittedLen = useRef(0)
   const charts = useRef<{
@@ -54,6 +57,11 @@ export function TradingChart({ candles, lastPrice, evaluations }: Props) {
   const sr = useMemo(
     () => computeDynamicSRv2(candles, DYNAMIC_SR_V2_DEFAULTS),
     [candles],
+  )
+
+  const setupMarkers = useMemo(
+    () => computeSetupChartMarkers(candles, Math.max(0, Math.min(100, minConfidencePct)) / 100),
+    [candles, minConfidencePct],
   )
 
   useEffect(() => {
@@ -121,28 +129,42 @@ export function TradingChart({ candles, lastPrice, evaluations }: Props) {
       fittedLen.current = candles.length
     }
 
-    const byTime = new Map(evaluations.map((e) => [e.time, e]))
+    // Prefer setup markers (80%+ and full). Full = solid arrows; partial = circles + %.
+    const bySetup = new Map(setupMarkers.map((m) => [m.time, m]))
+    const byEval = new Map(evaluations.map((e) => [e.time, e]))
     const markers = []
-    for (let i = 0; i < candles.length; i++) {
-      const e = byTime.get(candles[i].time) as SignalEvaluation | undefined
-      if (!e?.isQualified) continue
-      if (e.final === 'RISE') {
+    const times = new Set<number>([
+      ...setupMarkers.map((m) => m.time),
+      ...evaluations.filter((e) => e.isQualified).map((e) => e.time),
+    ])
+    for (const t of times) {
+      const setup = bySetup.get(t)
+      const ev = byEval.get(t)
+      const full =
+        setup?.full
+        || (ev?.isQualified && (ev.final === 'RISE' || ev.final === 'FALL'))
+      const side =
+        setup?.side
+        ?? (ev?.final === 'RISE' || ev?.final === 'FALL' ? ev.final : null)
+      if (!side) continue
+      const pct = setup ? Math.round(100 * setup.confidence) : 100
+      if (full) {
         markers.push({
-          time: candles[i].time as Time,
-          position: 'belowBar' as const,
-          color: '#00e676',
-          shape: 'arrowUp' as const,
-          text: 'RISE',
+          time: t as Time,
+          position: (side === 'RISE' ? 'belowBar' : 'aboveBar') as 'belowBar' | 'aboveBar',
+          color: side === 'RISE' ? '#00e676' : '#ff1744',
+          shape: (side === 'RISE' ? 'arrowUp' : 'arrowDown') as 'arrowUp' | 'arrowDown',
+          text: side,
           size: 2,
         })
-      } else if (e.final === 'FALL') {
+      } else {
         markers.push({
-          time: candles[i].time as Time,
-          position: 'aboveBar' as const,
-          color: '#ff1744',
-          shape: 'arrowDown' as const,
-          text: 'FALL',
-          size: 2,
+          time: t as Time,
+          position: (side === 'RISE' ? 'belowBar' : 'aboveBar') as 'belowBar' | 'aboveBar',
+          color: side === 'RISE' ? '#26c6da' : '#ffa726',
+          shape: 'circle' as const,
+          text: `${side[0]}${pct}`,
+          size: 1,
         })
       }
     }
@@ -231,7 +253,15 @@ export function TradingChart({ candles, lastPrice, evaluations }: Props) {
         title: 'Last',
       })
     }
-  }, [candles, lastPrice, evaluations, sr])
+  }, [candles, lastPrice, evaluations, sr, setupMarkers])
 
-  return <div ref={mainRef} className="h-full min-h-0 w-full" />
+  return (
+    <div className="relative h-full min-h-0 w-full">
+      <div ref={mainRef} className="h-full min-h-0 w-full" />
+      <div className="pointer-events-none absolute bottom-2 left-2 flex flex-wrap gap-2 rounded bg-[#0b0f14]/85 px-2 py-1 text-[10px] text-slate-400">
+        <span><span className="text-emerald-400">▲ RISE</span> / <span className="text-rose-400">▼ FALL</span> = full 5/5</span>
+        <span><span className="text-cyan-400">● R80</span> / <span className="text-amber-400">● F80</span> = partial ≥{minConfidencePct}%</span>
+      </div>
+    </div>
+  )
 }

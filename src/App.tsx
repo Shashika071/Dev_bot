@@ -78,10 +78,29 @@ export default function App() {
             liveSignal.final === 'FALL' ? 'bg-rose-600' : 'bg-emerald-600'
           }`}
         >
-          {liveSignal.final} · all 5 conditions met on completed candle
+          FULL {liveSignal.final} · 5/5 on completed candle
           {trade.autoEnabled ? ' · auto Touch firing' : ''}
         </div>
       )}
+      {!liveSignal && (() => {
+        const risePct = Math.round(100 * liveSetup.rise.confidence)
+        const fallPct = Math.round(100 * liveSetup.fall.confidence)
+        const side = risePct >= fallPct ? 'RISE' as const : 'FALL' as const
+        const pct = Math.max(risePct, fallPct)
+        if (pct < trade.minConfidencePct) return null
+        return (
+          <div
+            className={`shrink-0 px-3 py-1 text-center text-xs font-semibold ${
+              side === 'FALL'
+                ? 'bg-amber-500/20 text-amber-200'
+                : 'bg-cyan-500/20 text-cyan-200'
+            }`}
+          >
+            PARTIAL {side} {pct}% · {pct >= 100 ? '5/5' : `${Math.round(pct / 20)}/5`} (not full signal)
+            {trade.autoEnabled ? ' · auto may fire' : ''}
+          </div>
+        )
+      })()}
 
       {storageWarning && <p role="alert" className="px-3 py-1 text-xs text-amber-300">{storageWarning}</p>}
 
@@ -93,6 +112,7 @@ export default function App() {
                 candles={market?.candles ?? []}
                 evaluations={evaluations}
                 lastPrice={market?.lastPrice ?? null}
+                minConfidencePct={trade.minConfidencePct}
               />
             </main>
             <SignalPanel
@@ -100,6 +120,7 @@ export default function App() {
               eval_={latestEval}
               liveSignal={liveSignal}
               liveSetup={liveSetup}
+              minConfidencePct={trade.minConfidencePct}
               sound={sound}
               onToggleSound={() => setSound((v) => !v)}
             />

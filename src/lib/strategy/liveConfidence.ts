@@ -148,3 +148,54 @@ export function computeLiveSetupConfidence(candles: Candle[]): LiveSetupConfiden
     lean,
   }
 }
+
+export type SetupChartMarker = {
+  time: number
+  side: 'RISE' | 'FALL'
+  confidence: number
+  passed: number
+  total: number
+  /** true when all 5 conditions passed */
+  full: boolean
+}
+
+/**
+ * Closed-candle setups at/above minConfidence for chart markers.
+ * Scans a recent window only (perf). Full (5/5) and partial (e.g. 4/5) both included.
+ */
+export function computeSetupChartMarkers(
+  candles: Candle[],
+  minConfidence = 0.8,
+  maxBars = 800,
+): SetupChartMarker[] {
+  const closed = candles.filter((c) => c.isClosed)
+  const window = closed.length > maxBars ? closed.slice(-maxBars) : closed
+  const out: SetupChartMarker[] = []
+
+  for (const segment of closedSegments(window)) {
+    if (segment.length <= WARMUP_BARS) continue
+    const series = enrich(segment)
+    for (let i = WARMUP_BARS; i < segment.length; i++) {
+      const rise = scoreRise(series, i)
+      const fall = scoreFall(series, i)
+      const pick =
+        rise.confidence > fall.confidence
+          ? rise
+          : fall.confidence > rise.confidence
+            ? fall
+            : rise.confidence > 0
+              ? rise
+              : fall
+      if (pick.confidence + 1e-12 < minConfidence) continue
+      out.push({
+        time: series.candles[i].time,
+        side: pick.side,
+        confidence: pick.confidence,
+        passed: pick.passed,
+        total: pick.total,
+        full: pick.passed >= pick.total,
+      })
+    }
+  }
+  return out
+}
