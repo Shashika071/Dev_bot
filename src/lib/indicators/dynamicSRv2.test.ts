@@ -37,13 +37,16 @@ describe('Dynamic S/R v2', () => {
   })
 
   it('returns at most maxSR levels with strength >= minStrength', () => {
-    const { levels } = computeDynamicSRv2(makeCandles(400))
+    const { levels, swingRays } = computeDynamicSRv2(makeCandles(400))
     expect(levels.length).toBeLessThanOrEqual(DYNAMIC_SR_V2_DEFAULTS.maxSR)
     for (const lvl of levels) {
       expect(lvl.strength).toBeGreaterThanOrEqual(DYNAMIC_SR_V2_DEFAULTS.minStrength)
       expect(lvl.type === 'support' || lvl.type === 'resistance').toBe(true)
       expect(lvl.price).toBeGreaterThan(0)
+      expect(lvl.fromTime).toBeGreaterThan(0)
     }
+    expect(swingRays.length).toBeGreaterThanOrEqual(0)
+    expect(swingRays.length).toBeLessThanOrEqual(2)
   })
 
   it('colors resistance above close and support below', () => {

@@ -43,12 +43,22 @@ export interface DynamicSRLevel {
   strength: number
   type: 'support' | 'resistance'
   color: string
+  /** Earliest pivot time that formed this channel (line starts here, TV-style) */
+  fromTime: number
 }
 
 export interface DynamicSRPivot {
   time: number
   price: number
   kind: 'H' | 'L'
+}
+
+/** Latest swing high / low rays — same look as classic TV S/R on the last pivots. */
+export interface SwingRay {
+  price: number
+  fromTime: number
+  type: 'support' | 'resistance'
+  color: string
 }
 
 function isPivotHigh(src: number[], i: number, prd: number): boolean {
@@ -104,6 +114,7 @@ function checkSr(
   srUp: number[],
   srDn: number[],
   srStrength: number[],
+  srFrom: number[],
 ): boolean {
   for (let i = 0; i < srUp.length; ) {
     const included =
@@ -113,6 +124,7 @@ function checkSr(
         srStrength.splice(i, 1)
         srUp.splice(i, 1)
         srDn.splice(i, 1)
+        srFrom.splice(i, 1)
       } else {
         return false
       }
@@ -126,7 +138,7 @@ function checkSr(
 export function computeDynamicSRv2(
   candles: Candle[],
   settings: DynamicSRv2Settings = DYNAMIC_SR_V2_DEFAULTS,
-): { levels: DynamicSRLevel[]; pivots: DynamicSRPivot[] } {
+): { levels: DynamicSRLevel[]; pivots: DynamicSRPivot[]; swingRays: SwingRay[] } {
   const {
     pivotPeriod: prd,
     source,
@@ -140,7 +152,7 @@ export function computeDynamicSRv2(
 
   const closed = candles.filter((c) => c.isClosed)
   const n = closed.length
-  if (n < prd * 2 + 2) return { levels: [], pivots: [] }
+  if (n < prd * 2 + 2) return { levels: [], pivots: [], swingRays: [] }
 
   const src1 = closed.map((c) => (source === 'High/Low' ? c.high : Math.max(c.close, c.open)))
   const src2 = closed.map((c) => (source === 'High/Low' ? c.low : Math.min(c.close, c.open)))
@@ -163,7 +175,7 @@ export function computeDynamicSRv2(
     }
   }
 
-  if (pivotvals.length === 0) return { levels: [], pivots: [] }
+  if (pivotvals.length === 0) return { levels: [], pivots: [], swingRays: [] }
 
   const lookback = Math.min(300, n)
   let prdhighest = -Infinity
@@ -177,19 +189,29 @@ export function computeDynamicSRv2(
   const srUp: number[] = []
   const srDn: number[] = []
   const srStrength: number[] = []
+  const srFrom: number[] = []
 
   for (let x = 0; x < pivotvals.length; x++) {
     const [hi, lo, strength] = getSrVals(pivotvals, x, cwidth)
-    if (!checkSr(hi, lo, strength, srUp, srDn, srStrength)) continue
+    if (!checkSr(hi, lo, strength, srUp, srDn, srStrength, srFrom)) continue
     const loc = findLoc(srStrength, strength)
+    // Oldest pivot time among pivots that sit in this channel
+    let fromTime = closed[n - 1].time
+    for (const p of pivots) {
+      if (p.price >= lo - 1e-9 && p.price <= hi + 1e-9) {
+        fromTime = Math.min(fromTime, p.time)
+      }
+    }
     if (loc < maxSR && strength >= minStrength) {
       srStrength.splice(loc, 0, strength)
       srUp.splice(loc, 0, hi)
       srDn.splice(loc, 0, lo)
+      srFrom.splice(loc, 0, fromTime)
       if (srStrength.length > maxSR) {
         srStrength.pop()
         srUp.pop()
         srDn.pop()
+        srFrom.pop()
       }
     }
   }
@@ -206,8 +228,30 @@ export function computeDynamicSRv2(
       strength: srStrength[i],
       type: resistance ? 'resistance' : 'support',
       color: resistance ? resistanceColor : supportColor,
+      fromTime: srFrom[i],
     })
   }
 
-  return { levels, pivots }
+  // TV-style active swing rays: newest confirmed pivot high + pivot low
+  const swingRays: SwingRay[] = []
+  const lastHigh = pivots.find((p) => p.kind === 'H')
+  const lastLow = pivots.find((p) => p.kind === 'L')
+  if (lastHigh) {
+    swingRays.push({
+      price: lastHigh.price,
+      fromTime: lastHigh.time,
+      type: lastHigh.price >= lastClose ? 'resistance' : 'support',
+      color: lastHigh.price >= lastClose ? resistanceColor : supportColor,
+    })
+  }
+  if (lastLow) {
+    swingRays.push({
+      price: lastLow.price,
+      fromTime: lastLow.time,
+      type: lastLow.price >= lastClose ? 'resistance' : 'support',
+      color: lastLow.price >= lastClose ? resistanceColor : supportColor,
+    })
+  }
+
+  return { levels, pivots, swingRays }
 }

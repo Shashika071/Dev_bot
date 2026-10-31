@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from 'react'
 import {
   createChart,
   CandlestickSeries,
+  LineSeries,
   createSeriesMarkers,
   type IChartApi,
   type ISeriesApi,
@@ -28,6 +29,15 @@ function lineStyleFromSetting(style: 'Solid' | 'Dashed' | 'Dotted'): LineStyle {
   return LineStyle.Solid
 }
 
+function horizSegment(fromTime: number, toTime: number, price: number) {
+  const start = Math.min(fromTime, toTime)
+  const end = Math.max(fromTime, toTime)
+  return [
+    { time: start as Time, value: price },
+    { time: end as Time, value: price },
+  ]
+}
+
 export function TradingChart({ candles, lastPrice, evaluations }: Props) {
   const mainRef = useRef<HTMLDivElement>(null)
   const fittedLen = useRef(0)
@@ -37,8 +47,9 @@ export function TradingChart({ candles, lastPrice, evaluations }: Props) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     markers?: any
     priceLine?: IPriceLine
-    srLines: IPriceLine[]
-  }>({ srLines: [] })
+    srPriceLines: IPriceLine[]
+    srSeries: ISeriesApi<'Line'>[]
+  }>({ srPriceLines: [], srSeries: [] })
 
   const sr = useMemo(
     () => computeDynamicSRv2(candles, DYNAMIC_SR_V2_DEFAULTS),
@@ -74,7 +85,7 @@ export function TradingChart({ candles, lastPrice, evaluations }: Props) {
       wickDownColor: '#ef5350',
     })
     const markers = createSeriesMarkers(candle, [])
-    charts.current = { main, candle, markers, srLines: [] }
+    charts.current = { main, candle, markers, srPriceLines: [], srSeries: [] }
 
     const ro = new ResizeObserver(() => {
       if (mainRef.current) {
@@ -94,7 +105,7 @@ export function TradingChart({ candles, lastPrice, evaluations }: Props) {
 
   useEffect(() => {
     const c = charts.current
-    if (!c.candle || candles.length === 0) return
+    if (!c.main || !c.candle || candles.length === 0) return
 
     c.candle.setData(
       candles.map((x) => ({
@@ -105,13 +116,11 @@ export function TradingChart({ candles, lastPrice, evaluations }: Props) {
         close: x.close,
       })),
     )
-    // Fit once when history grows a lot (e.g. after paginated sync).
     if (candles.length >= fittedLen.current + 100 || fittedLen.current === 0) {
-      c.main?.timeScale().fitContent()
+      c.main.timeScale().fitContent()
       fittedLen.current = candles.length
     }
 
-    // Only fully qualified RISE / FALL markers (all 5 rules passed)
     const byTime = new Map(evaluations.map((e) => [e.time, e]))
     const markers = []
     for (let i = 0; i < candles.length; i++) {
@@ -137,8 +146,6 @@ export function TradingChart({ candles, lastPrice, evaluations }: Props) {
         })
       }
     }
-
-    // Optional pivot markers (off by default — Show Pivot Points = Off)
     if (DYNAMIC_SR_V2_DEFAULTS.showPivotPoints) {
       for (const p of sr.pivots) {
         markers.push({
@@ -153,17 +160,65 @@ export function TradingChart({ candles, lastPrice, evaluations }: Props) {
     }
     c.markers?.setMarkers(markers)
 
-    for (const line of c.srLines) c.candle.removePriceLine(line)
-    c.srLines = sr.levels.map((lvl) =>
-      c.candle!.createPriceLine({
-        price: lvl.price,
+    // Clear previous S/R drawings
+    for (const line of c.srPriceLines) c.candle.removePriceLine(line)
+    for (const series of c.srSeries) c.main.removeSeries(series)
+    c.srPriceLines = []
+    c.srSeries = []
+
+    const endTime = candles[candles.length - 1].time
+    const style = lineStyleFromSetting(DYNAMIC_SR_V2_DEFAULTS.lineStyle)
+    const width = DYNAMIC_SR_V2_DEFAULTS.lineWidth as 1 | 2 | 3 | 4
+
+    // Dynamic v2 channel mids — TV-style segments from channel start → now
+    for (const lvl of sr.levels) {
+      const series = c.main.addSeries(LineSeries, {
         color: lvl.color,
-        lineWidth: DYNAMIC_SR_V2_DEFAULTS.lineWidth as 1 | 2 | 3 | 4,
-        lineStyle: lineStyleFromSetting(DYNAMIC_SR_V2_DEFAULTS.lineStyle),
-        axisLabelVisible: true,
+        lineWidth: width,
+        lineStyle: style,
+        priceLineVisible: false,
+        lastValueVisible: true,
+        crosshairMarkerVisible: false,
         title: `${lvl.type === 'resistance' ? 'R' : 'S'}${lvl.strength}`,
-      }),
-    )
+      })
+      series.setData(horizSegment(lvl.fromTime, endTime, lvl.price))
+      c.srSeries.push(series)
+      c.srPriceLines.push(
+        c.candle.createPriceLine({
+          price: lvl.price,
+          color: lvl.color,
+          lineWidth: width,
+          lineStyle: style,
+          axisLabelVisible: true,
+          title: `${lvl.type === 'resistance' ? 'R' : 'S'}${lvl.strength}`,
+        }),
+      )
+    }
+
+    // Active swing high / low rays (like your TradingView screenshot)
+    for (const ray of sr.swingRays) {
+      const series = c.main.addSeries(LineSeries, {
+        color: ray.color,
+        lineWidth: 2,
+        lineStyle: LineStyle.Solid,
+        priceLineVisible: false,
+        lastValueVisible: true,
+        crosshairMarkerVisible: false,
+        title: ray.type === 'resistance' ? 'R' : 'S',
+      })
+      series.setData(horizSegment(ray.fromTime, endTime, ray.price))
+      c.srSeries.push(series)
+      c.srPriceLines.push(
+        c.candle.createPriceLine({
+          price: ray.price,
+          color: ray.color,
+          lineWidth: 2,
+          lineStyle: LineStyle.Solid,
+          axisLabelVisible: true,
+          title: ray.type === 'resistance' ? 'R' : 'S',
+        }),
+      )
+    }
 
     if (lastPrice != null) {
       if (c.priceLine) c.candle.removePriceLine(c.priceLine)
