@@ -8,6 +8,7 @@ import { summarize } from '../lib/research/statistics'
 import type { Candle, SignalEvaluation, SignalHistoryRow } from '../lib/types'
 import type { AutoTradeSignal } from './useAutoTrade'
 
+/** Soft beep for full 5/5 qualified alerts. */
 function playBeep() {
   try {
     const ctx = new AudioContext()
@@ -23,7 +24,34 @@ function playBeep() {
   } catch { /* Sound may require a browser interaction. */ }
 }
 
-export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => void) {
+/** Louder multi-tone alert when confidence hits ≥80% (partial setup). */
+function playBigAlert() {
+  try {
+    const ctx = new AudioContext()
+    const now = ctx.currentTime
+    const tones = [988, 1319, 1568]
+    for (let i = 0; i < tones.length; i++) {
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.type = 'square'
+      osc.frequency.value = tones[i]!
+      osc.connect(gain)
+      gain.connect(ctx.destination)
+      const t0 = now + i * 0.2
+      gain.gain.setValueAtTime(0.0001, t0)
+      gain.gain.exponentialRampToValueAtTime(0.28, t0 + 0.03)
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.18)
+      osc.start(t0)
+      osc.stop(t0 + 0.19)
+    }
+    window.setTimeout(() => { void ctx.close() }, 900)
+  } catch { /* Sound may require a browser interaction. */ }
+}
+
+export function useMarketAndSignals(
+  onTradeSignal?: (sig: AutoTradeSignal) => void,
+  minConfidencePct = 80,
+) {
   const [market, setMarket] = useState<MarketState | null>(null)
   const [history, setHistory] = useState(() => advancePaper(loadHistory(), null, false))
   const rowsRef = useRef(history)
@@ -33,11 +61,13 @@ export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => vo
   const [sound, setSound] = useState(() => (import.meta.env.VITE_SOUND_ALERTS ?? 'true') !== 'false')
   const soundRef = useRef(sound)
   const onTradeRef = useRef(onTradeSignal)
+  const minConfRef = useRef(minConfidencePct)
   const [storageWarning, setStorageWarning] = useState<string | null>(null)
   const [netWinReturn, setNetWinReturn] = useState(0.8)
 
   useEffect(() => { soundRef.current = sound }, [sound])
   useEffect(() => { onTradeRef.current = onTradeSignal }, [onTradeSignal])
+  useEffect(() => { minConfRef.current = minConfidencePct }, [minConfidencePct])
 
   useEffect(() => {
     const feed = new MarketFeed()
@@ -46,6 +76,7 @@ export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => vo
     let expiresAt = 0
     // Keep deduplication for this session even if the visible history is cleared.
     const notified = new Set(rowsRef.current.map((row) => row.id))
+    const sounded80 = new Set<string>()
     saveHistory(rowsRef.current)
     const unsubscribe = feed.subscribe((state, event) => {
       setMarket({ ...state })
@@ -113,6 +144,16 @@ export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => vo
             confidence = rise
           }
           if (side) {
+            const confPct = Math.round(100 * confidence)
+            const soundKey = `${setup.candleTime}:${side}`
+            if (
+              soundRef.current
+              && confPct >= minConfRef.current
+              && !sounded80.has(soundKey)
+            ) {
+              sounded80.add(soundKey)
+              playBigAlert()
+            }
             onTradeRef.current?.({
               side,
               confidence,

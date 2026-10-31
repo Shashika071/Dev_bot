@@ -33,7 +33,7 @@ export default function App() {
   const {
     market, evaluations, latestEval, liveSignal, sound, setSound, history, clearHistory,
     research, storageWarning, netWinReturn, setNetWinReturn, liveSetup,
-  } = useMarketAndSignals(trade.onTradeSignal)
+  } = useMarketAndSignals(trade.onTradeSignal, trade.minConfidencePct)
 
   const tradeConnected = trade.status === 'CONNECTED'
 
