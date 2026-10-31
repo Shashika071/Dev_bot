@@ -1,20 +1,25 @@
 import { TradingChart } from './components/TradingChart'
 import { SignalPanel } from './components/SignalPanel'
 import { useMarketAndSignals } from './hooks/useMarketAndSignals'
+import { useAutoTrade } from './hooks/useAutoTrade'
 import { ResearchPanel } from './components/ResearchPanel'
 import { SignalHistory } from './components/SignalHistory'
+import { AutoTradePanel } from './components/AutoTradePanel'
+
+const SYMBOL = import.meta.env.VITE_DERIV_SYMBOL || 'R_100'
 
 export default function App() {
+  const trade = useAutoTrade(SYMBOL)
   const {
     market, evaluations, latestEval, liveSignal, sound, setSound, history, clearHistory,
     research, storageWarning, netWinReturn, setNetWinReturn, liveSetup,
-  } = useMarketAndSignals()
+  } = useMarketAndSignals(trade.onTradeSignal)
 
   return (
     <div className="flex h-screen min-h-[650px] flex-col bg-[#0b0f14] text-slate-100">
       <header className="flex h-9 shrink-0 items-center gap-3 border-b border-slate-800 px-3 text-sm">
         <span className="font-bold text-white">V100 Smart Signal Bot</span>
-        <span className="hidden text-slate-500 sm:inline">R_100 · M1</span>
+        <span className="hidden text-slate-500 sm:inline">R_100 · M1 · Touch auto</span>
         <div className="ml-auto flex items-center gap-3 text-xs tabular-nums">
           <span className="text-emerald-400">RISE {Math.round(100 * liveSetup.rise.confidence)}%</span>
           <span className="text-rose-400">FALL {Math.round(100 * liveSetup.fall.confidence)}%</span>
@@ -42,6 +47,7 @@ export default function App() {
           }`}
         >
           {liveSignal.final} · all 5 conditions met on completed candle
+          {trade.autoEnabled ? ' · auto Touch firing' : ''}
         </div>
       )}
 
@@ -63,6 +69,7 @@ export default function App() {
           onToggleSound={() => setSound((v) => !v)}
         />
       </div>
+      <AutoTradePanel trade={trade} />
       <ResearchPanel research={research} netWinReturn={netWinReturn} onReturnChange={setNetWinReturn} />
       <details className="shrink-0 border-t border-slate-800">
         <summary className="cursor-pointer px-3 py-2 text-xs text-slate-300">Signal history and CSV export ({history.length})</summary>

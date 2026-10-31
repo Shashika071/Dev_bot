@@ -5,7 +5,14 @@ import { advancePaper, startPaper } from '../lib/history/paperTracker'
 import { evaluateAll } from '../lib/strategy/signalEngine'
 import { computeLiveSetupConfidence } from '../lib/strategy/liveConfidence'
 import { summarize } from '../lib/research/statistics'
-import type { Candle, SignalEvaluation, SignalHistoryRow } from '../lib/types'
+import type { Candle, ConfirmationFlags, SignalEvaluation, SignalHistoryRow } from '../lib/types'
+import type { AutoTradeSignal } from './useAutoTrade'
+
+function confidenceFromFlags(flags: ConfirmationFlags): number {
+  const keys = Object.keys(flags) as (keyof ConfirmationFlags)[]
+  if (!keys.length) return 0
+  return keys.filter((k) => flags[k]).length / keys.length
+}
 
 function playBeep() {
   try {
@@ -22,7 +29,7 @@ function playBeep() {
   } catch { /* Sound may require a browser interaction. */ }
 }
 
-export function useMarketAndSignals() {
+export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => void) {
   const [market, setMarket] = useState<MarketState | null>(null)
   const [history, setHistory] = useState(() => advancePaper(loadHistory(), null, false))
   const rowsRef = useRef(history)
@@ -31,10 +38,12 @@ export function useMarketAndSignals() {
   const [liveSignal, setLiveSignal] = useState<SignalEvaluation | null>(null)
   const [sound, setSound] = useState(() => (import.meta.env.VITE_SOUND_ALERTS ?? 'true') !== 'false')
   const soundRef = useRef(sound)
+  const onTradeRef = useRef(onTradeSignal)
   const [storageWarning, setStorageWarning] = useState<string | null>(null)
   const [netWinReturn, setNetWinReturn] = useState(0.8)
 
   useEffect(() => { soundRef.current = sound }, [sound])
+  useEffect(() => { onTradeRef.current = onTradeSignal }, [onTradeSignal])
 
   useEffect(() => {
     const feed = new MarketFeed()
@@ -79,6 +88,16 @@ export function useMarketAndSignals() {
               expiresAt = ev.time + 60 + SIGNAL_WINDOW_SECONDS
               setLiveSignal(ev)
               if (soundRef.current) playBeep()
+            }
+            // Auto-trade candidate: UT direction on closed candle + condition confidence
+            const side = ev.rawUt === 'BUY' ? 'RISE' as const : ev.rawUt === 'SELL' ? 'FALL' as const : null
+            if (side) {
+              onTradeRef.current?.({
+                side,
+                confidence: confidenceFromFlags(ev.confirmations),
+                time: ev.time,
+                isQualified: ev.isQualified,
+              })
             }
           }
         }
