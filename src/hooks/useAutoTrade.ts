@@ -60,24 +60,44 @@ type StoredPrefs = {
   duration: number
   durationUnit: 's' | 'm' | 'h' | 'd'
   mode: TouchSideMode
-  /** Seconds to wait after a trade before the next auto entry */
   cooldownSec: number
-  /** Only trade when side confidence % is at least this (4/5 = 80) */
   minConfidencePct: number
+  /** Restore Auto trade ON after refresh */
+  autoEnabled: boolean
+  /** Reconnect trade WS after refresh when true */
+  wantConnected: boolean
+  cooldownUntil: number
+  currency: string
 }
 
 export type AutoTradeSignal = {
   side: 'RISE' | 'FALL'
-  /** 0–1 from how many of the 5 conditions passed on the closed candle */
   confidence: number
   time: number
   isQualified: boolean
 }
 
+const DEFAULT_PREFS: StoredPrefs = {
+  appId: '',
+  token: '',
+  accountId: '',
+  stake: 1,
+  barrierAbs: 0.05,
+  duration: 7,
+  durationUnit: 'm',
+  mode: 'both',
+  cooldownSec: 420,
+  minConfidencePct: 80,
+  autoEnabled: false,
+  wantConnected: false,
+  cooldownUntil: 0,
+  currency: 'USD',
+}
+
 function loadPrefs(): StoredPrefs {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) throw new Error('empty')
+    if (!raw) return { ...DEFAULT_PREFS }
     const p = JSON.parse(raw) as Partial<StoredPrefs>
     return {
       appId: typeof p.appId === 'string' ? p.appId : '',
@@ -93,14 +113,20 @@ function loadPrefs(): StoredPrefs {
         typeof p.minConfidencePct === 'number' && p.minConfidencePct >= 0 && p.minConfidencePct <= 100
           ? p.minConfidencePct
           : 80,
+      autoEnabled: p.autoEnabled === true,
+      wantConnected: p.wantConnected === true,
+      cooldownUntil: typeof p.cooldownUntil === 'number' && p.cooldownUntil > Date.now() ? p.cooldownUntil : 0,
+      currency: typeof p.currency === 'string' && p.currency ? p.currency : 'USD',
     }
   } catch {
-    return {
-      appId: '', token: '', accountId: '',
-      stake: 1, barrierAbs: 0.05, duration: 7, durationUnit: 'm', mode: 'both',
-      cooldownSec: 420, minConfidencePct: 80,
-    }
+    return { ...DEFAULT_PREFS }
   }
+}
+
+function savePrefs(payload: StoredPrefs) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
+  } catch { /* ignore quota */ }
 }
 
 export function useAutoTrade(symbol: string) {
@@ -117,17 +143,20 @@ export function useAutoTrade(symbol: string) {
   const [cooldownSec, setCooldownSec] = useState(prefs0.cooldownSec)
   const [minConfidencePct, setMinConfidencePct] = useState(prefs0.minConfidencePct)
   const [autoEnabled, setAutoEnabled] = useState(false)
+  const [wantConnected, setWantConnected] = useState(prefs0.wantConnected)
   const [status, setStatus] = useState<ConnectionStatus>('DISCONNECTED')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [balance, setBalance] = useState<number | null>(null)
-  const [currency, setCurrency] = useState('USD')
+  const [currency, setCurrency] = useState(prefs0.currency)
   const [log, setLog] = useState<TradeLogRow[]>(() => loadTradeHistory())
-  const [cooldownUntil, setCooldownUntil] = useState(0)
+  const [cooldownUntil, setCooldownUntil] = useState(prefs0.cooldownUntil)
   const [cooldownLeft, setCooldownLeft] = useState(0)
   const clientRef = useRef<DerivTradingClient | null>(null)
   const tradedSignals = useRef(new Set<string>())
-  const cooldownUntilRef = useRef(0)
+  const cooldownUntilRef = useRef(prefs0.cooldownUntil)
+  const restoreTried = useRef(false)
+  const pendingAuto = useRef(prefs0.autoEnabled)
   const settingsRef = useRef({
     stake, barrierAbs, duration, durationUnit, mode, cooldownSec, minConfidencePct, currency, symbol, autoEnabled,
   })
@@ -139,27 +168,39 @@ export function useAutoTrade(symbol: string) {
   }, [stake, barrierAbs, duration, durationUnit, mode, cooldownSec, minConfidencePct, currency, symbol, autoEnabled])
 
   useEffect(() => {
-    const payload: StoredPrefs = {
-      appId, token, accountId, stake, barrierAbs, duration, durationUnit, mode, cooldownSec, minConfidencePct,
-    }
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(payload))
-    } catch { /* ignore quota */ }
-  }, [appId, token, accountId, stake, barrierAbs, duration, durationUnit, mode, cooldownSec, minConfidencePct])
+    savePrefs({
+      appId,
+      token,
+      accountId,
+      stake,
+      barrierAbs,
+      duration,
+      durationUnit,
+      mode,
+      cooldownSec,
+      minConfidencePct,
+      autoEnabled,
+      wantConnected,
+      cooldownUntil,
+      currency,
+    })
+  }, [
+    appId, token, accountId, stake, barrierAbs, duration, durationUnit, mode,
+    cooldownSec, minConfidencePct, autoEnabled, wantConnected, cooldownUntil, currency,
+  ])
 
   useEffect(() => {
     const tick = () => {
       const left = Math.max(0, Math.ceil((cooldownUntilRef.current - Date.now()) / 1000))
       setCooldownLeft(left)
+      if (left === 0 && cooldownUntilRef.current !== 0) {
+        cooldownUntilRef.current = 0
+        setCooldownUntil(0)
+      }
     }
     tick()
     const id = setInterval(tick, 500)
     return () => clearInterval(id)
-  }, [])
-
-  useEffect(() => () => {
-    clientRef.current?.close()
-    clientRef.current = null
   }, [])
 
   const pushLog = useCallback((row: Omit<TradeLogRow, 'id' | 'at'>) => {
@@ -176,45 +217,65 @@ export function useAutoTrade(symbol: string) {
   }, [])
 
   const disconnect = useCallback(() => {
+    pendingAuto.current = false
     setAutoEnabled(false)
+    setWantConnected(false)
     clientRef.current?.close()
     clientRef.current = null
     setStatus('DISCONNECTED')
     setBalance(null)
   }, [])
 
-  const loadAccounts = useCallback(async () => {
+  const loadAccounts = useCallback(async (override?: { token?: string; appId?: string; accountId?: string }) => {
+    const t = (override?.token ?? token).trim()
+    const a = (override?.appId ?? appId).trim()
+    const preferId = override?.accountId ?? accountId
+    if (!t || !a) {
+      setError('Enter App ID and API token first')
+      return [] as DerivAccount[]
+    }
     setBusy(true)
     setError(null)
     try {
-      const rows = await listDerivAccounts(token.trim(), appId.trim())
+      const rows = await listDerivAccounts(t, a)
       setAccounts(rows)
       const preferred =
-        rows.find((a) => a.account_id === accountId) ||
-        rows.find((a) => (a.account_type || '').toLowerCase() === 'demo') ||
+        rows.find((row) => row.account_id === preferId) ||
+        rows.find((row) => (row.account_type || '').toLowerCase() === 'demo') ||
         rows[0]
       if (preferred) {
         setAccountId(preferred.account_id)
         if (preferred.currency) setCurrency(preferred.currency)
         if (typeof preferred.balance === 'number') setBalance(preferred.balance)
       }
+      return rows
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       setAccounts([])
+      return [] as DerivAccount[]
     } finally {
       setBusy(false)
     }
   }, [token, appId, accountId])
 
-  const connect = useCallback(async () => {
-    if (!appId.trim() || !token.trim() || !accountId.trim()) {
+  const connect = useCallback(async (override?: {
+    token?: string
+    appId?: string
+    accountId?: string
+    enableAuto?: boolean
+  }) => {
+    const t = (override?.token ?? token).trim()
+    const a = (override?.appId ?? appId).trim()
+    const id = (override?.accountId ?? accountId).trim()
+    if (!t || !a || !id) {
       setError('Enter App ID, API token, and select an account')
-      return
+      return false
     }
     setBusy(true)
     setError(null)
+    setWantConnected(true)
     clientRef.current?.close()
-    const client = new DerivTradingClient(token.trim(), appId.trim(), accountId.trim())
+    const client = new DerivTradingClient(t, a, id)
     client.setStatusHandler(setStatus)
     client.subscribe((msg) => {
       if (msg.msg_type === 'balance') {
@@ -230,22 +291,70 @@ export function useAutoTrade(symbol: string) {
       const b = bal.balance as { balance?: number; currency?: string } | undefined
       if (typeof b?.balance === 'number') setBalance(b.balance)
       if (typeof b?.currency === 'string') setCurrency(b.currency)
+      const enable = override?.enableAuto ?? pendingAuto.current
+      if (enable) {
+        pendingAuto.current = true
+        setAutoEnabled(true)
+      }
+      return true
     } catch (err) {
       client.close()
       clientRef.current = null
       setStatus('DISCONNECTED')
+      setAutoEnabled(false)
       setError(err instanceof Error ? err.message : String(err))
+      return false
     } finally {
       setBusy(false)
     }
   }, [appId, token, accountId])
+
+  // Restore saved credentials + reconnect after refresh/close.
+  useEffect(() => {
+    if (restoreTried.current) return
+    restoreTried.current = true
+    const prefs = loadPrefs()
+    if (!prefs.appId.trim() || !prefs.token.trim()) return
+
+    let cancelled = false
+    void (async () => {
+      const rows = await loadAccounts({
+        token: prefs.token,
+        appId: prefs.appId,
+        accountId: prefs.accountId,
+      })
+      if (cancelled) return
+      const id =
+        rows.find((r) => r.account_id === prefs.accountId)?.account_id
+        || rows[0]?.account_id
+        || prefs.accountId
+      if (!prefs.wantConnected || !id) return
+      pendingAuto.current = prefs.autoEnabled
+      await connect({
+        token: prefs.token,
+        appId: prefs.appId,
+        accountId: id,
+        enableAuto: prefs.autoEnabled,
+      })
+    })()
+
+    return () => {
+      cancelled = true
+      clientRef.current?.close()
+      clientRef.current = null
+    }
+  }, [loadAccounts, connect])
+
+  const setAutoEnabledSafe = useCallback((on: boolean) => {
+    pendingAuto.current = on
+    setAutoEnabled(on)
+  }, [])
 
   const onTradeSignal = useCallback(async (sig: AutoTradeSignal) => {
     const s = settingsRef.current
     if (!s.autoEnabled) return
     if (sig.side !== 'RISE' && sig.side !== 'FALL') return
     const confPct = Math.round(100 * sig.confidence)
-    // Below min confidence: silent (checked every tick; do not spam history)
     if (confPct < s.minConfidencePct) return
     const key = `${sig.time}:${sig.side}`
     if (tradedSignals.current.has(key)) return
@@ -334,9 +443,12 @@ export function useAutoTrade(symbol: string) {
     cooldownSec, setCooldownSec,
     minConfidencePct, setMinConfidencePct,
     cooldownLeft, cooldownUntil,
-    autoEnabled, setAutoEnabled,
+    autoEnabled, setAutoEnabled: setAutoEnabledSafe,
     status, busy, error, balance, currency, log,
     clearTradeHistory,
-    loadAccounts, connect, disconnect, onTradeSignal,
+    loadAccounts: () => void loadAccounts(),
+    connect: () => void connect(),
+    disconnect,
+    onTradeSignal,
   }
 }

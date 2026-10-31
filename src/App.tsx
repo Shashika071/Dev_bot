@@ -8,12 +8,28 @@ import { SignalHistory } from './components/SignalHistory'
 import { AutoTradePanel } from './components/AutoTradePanel'
 
 const SYMBOL = import.meta.env.VITE_DERIV_SYMBOL || 'R_100'
+const TAB_KEY = 'v100_ui_tab_v1'
 
 type TabId = 'chart' | 'trade'
 
+function loadTab(): TabId {
+  try {
+    return localStorage.getItem(TAB_KEY) === 'trade' ? 'trade' : 'chart'
+  } catch {
+    return 'chart'
+  }
+}
+
 export default function App() {
-  const [tab, setTab] = useState<TabId>('chart')
+  const [tab, setTab] = useState<TabId>(() => loadTab())
   const trade = useAutoTrade(SYMBOL)
+
+  const selectTab = (next: TabId) => {
+    setTab(next)
+    try {
+      localStorage.setItem(TAB_KEY, next)
+    } catch { /* ignore */ }
+  }
   const {
     market, evaluations, latestEval, liveSignal, sound, setSound, history, clearHistory,
     research, storageWarning, netWinReturn, setNetWinReturn, liveSetup,
@@ -28,8 +44,8 @@ export default function App() {
         <span className="hidden text-slate-500 sm:inline">R_100 · M1</span>
 
         <nav className="ml-2 flex items-center gap-1 rounded-md border border-slate-800 bg-[#0c1118] p-0.5 text-xs">
-          <TabButton active={tab === 'chart'} onClick={() => setTab('chart')}>Chart</TabButton>
-          <TabButton active={tab === 'trade'} onClick={() => setTab('trade')}>
+          <TabButton active={tab === 'chart'} onClick={() => selectTab('chart')}>Chart</TabButton>
+          <TabButton active={tab === 'trade'} onClick={() => selectTab('trade')}>
             Trade settings
             {trade.autoEnabled && (
               <span className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-emerald-400" title="Auto trade ON" />

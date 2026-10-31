@@ -50,7 +50,7 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
         <span className="text-slate-300">Min confidence</span> (default 80% = 4/5 conditions).
         <span className="text-slate-300"> UT is not required.</span>{' '}
         Mode <span className="text-slate-300">both</span> places <span className="text-emerald-400">+barrier</span> and{' '}
-        <span className="text-rose-400">−barrier</span>. One entry per minute side; wait-after-trade blocks the next fill.
+        <span className="text-rose-400">−barrier</span>. Settings, token, Auto trade ON, and connection are saved in this browser and restore after refresh.
       </p>
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
