@@ -1,45 +1,93 @@
-# Deriv Forex Rise/Fall Bot
+# V100 Smart Signal Bot
 
-A Forex research dashboard with optional **demo-only** Rise/Fall execution.
-Contracts last **four hours**, with a maximum of **two signals per Asia/Colombo
-day across all watched pairs**. Weak or incomplete setups produce no signal.
+R_100 (Deriv Volatility 100, not the 1-second index), M1 signal dashboard.
+Signal-only: no account token, purchases, or automatic trades. The strategy has **not** demonstrated a profitable edge; see [BOT_VALIDATION.md](BOT_VALIDATION.md).
 
-The strategy uses closed 1m, 5m, 15m, 1h, 4h and daily candles. Daily/H4 trends
-set direction, H1 confirms, and M15 supplies a breakout or pullback trigger.
-The 37-factor checklist covers price structure, support/resistance, Fibonacci,
-candle/chart patterns, technical indicators, currency-strength estimates,
-sessions, and sourced news context. Scores describe rule agreement, not win
-probabilities. Missing fundamentals, volume and bid/ask data are shown explicitly.
+## Exactly how a signal is selected
 
-## Start locally
+All five conditions must pass on the **same completed one-minute candle**:
 
-1. Copy `.env.example` to `.env`; keep `BOT_MODE=forex`.
-2. Configure a current economic-calendar feed using `FOREX_CONTEXT_FILE`,
-   `FOREX_CONTEXT_URL`, or `TRADING_ECONOMICS_API_KEY`.
-3. Run `docker compose up --build`.
-4. Open [the dashboard](http://localhost:5173). Use **Scan now** while stopped
-   to inspect analysis without emitting signals or placing orders.
-5. Configure the encrypted demo token and App ID in **Demo account connection**,
-   enable demo execution, and select **Start demo auto-trading** when ready.
+| Check | RISE | FALL |
+|---|---|---|
+| UT Bot | New BUY crossover | New SELL crossover |
+| Supertrend | Bullish direction | Bearish direction |
+| SMA20 | Close above SMA; SMA higher than previous candle | Close below SMA; SMA lower than previous candle |
+| Awesome Oscillator | Above zero and higher than previous candle | Below zero and lower than previous candle |
+| RSI14 | Strictly greater than 52 and less than 70 | Strictly greater than 30 and less than 48 |
 
-Missing, stale, incomplete or sample news data blocks entries. Every buy verifies
-a demo account and a fresh zero-barrier CALL/PUT quote. Real accounts are rejected.
-Fixed stake defaults to 1 account-currency unit and is limited to 0.35–10.
+UT settings: key 2, ATR10, ordinary candle closes (Heikin Ashi off). A BUY crosses from at/below the prior ATR trail to above the current trail; SELL is the opposite. Supertrend uses Wilder ATR7, multiplier 2 and HL2. AO is SMA5(HL2) minus SMA34(HL2). RSI14 uses Wilder smoothing. Slope means comparison with the preceding completed candle.
 
-## Persistence and limits
+No fresh UT trigger, any failed condition, or both UT directions means **NO TRADE**. Equal SMA/AO values and RSI boundary values fail. Support/resistance is not a filter. No additional filters were fitted to make the historical results look better.
 
-The scanner runs every five minutes. `MODEL_DIR/forex.sqlite` preserves quotas,
-settings and attempts across restarts. Entries have at least four hours of spacing
-and cannot overlap the previous holding period. Unknown purchase outcomes block
-further purchases and are never automatically retried. Stop prevents new entries;
-existing contracts keep their expiry. Consult Deriv for actual settlement/P&L.
+Data checks also have to pass:
 
-The current workspace also includes chart history and EURUSD model-training tools.
-These do not bypass technical, calendar, account or quota checks. No live win rate
-or profitability has been established.
+- Only R_100, valid OHLC data and consecutive M1 candles; 60 completed candles for warmup before evaluating the next candle.
+- Synchronize history after the first live tick; history ends before that tick and buffered ticks are replayed in order. Recovery does not emit historical alerts.
+- Reject older and duplicate ticks. Pause and recover when ticks are missing for over 10 seconds, or when disconnected. Device clock and tick timestamp must agree within 10 seconds.
+- Only alert within five seconds of candle close, checking both the tick timestamp and local delivery time. The live signal disappears when this window expires. Historical chart arrows are not fresh alerts.
+- Request up to 5,000 candles and retain at most that many in memory. The server may return fewer (the verification run returned 1,000 per request). Recursive indicator seeds can differ with the loaded history window.
 
-See [setup, feed schema, execution safeguards and limitations](docs/forex-rise-fall.md).
-API documentation is available at [localhost:8000/docs](http://localhost:8000/docs).
+## Run
 
-Stack: Python/FastAPI, React/TypeScript/Vite, PostgreSQL and local SQLite storage.
-Legacy Touch research modules remain in the source tree; the product UI/API is Forex.
+Node.js 20.19+ and a modern browser are required.
+
+```powershell
+npm install
+# Optional on a fresh setup; do not overwrite an existing .env:
+copy .env.example .env
+npm run dev
+```
+
+Open the URL printed by Vite. Wait for **READY**, a changing price and populated candles. SYNCING / PAUSED blocks live signals. The right panel shows the last completed candle's checks and the exact rules. Expand the bottom history section for results and CSV export.
+
+```powershell
+npm test
+npm run build
+npm run lint
+```
+
+Tests cover accepted/rejected signals, strict boundaries, exclusion of open candles, no future-data changes, gaps, history recovery, stale/duplicate/out-of-order ticks, socket lifecycle, paper outcomes and research statistics.
+
+## What the result metrics mean
+
+**Paper 60s observations:** start at the public tick that delivers a fresh qualified alert. Exit at the first observed tick at or after entry + 60 seconds, at most five seconds late. RISE needs exit > entry; FALL needs exit < entry; ties count as losses. Disconnections, reloads, missing ticks, or missing expiry ticks mark the result UNKNOWN/INVALID. Unknown results are excluded from the win rate and reported separately; exclusions can bias results.
+
+This is **not a broker demo account and not an actual contract settlement**. It does not model order submission, broker entry delay, quoted payout, execution or settlement rules. No trades are placed. Keep the browser open to collect observations. History is stored locally, capped at 2,000 rows. Export CSV to preserve results. Clearing completed history resets the sample; pending observations remain.
+
+**Assumed net win return:** defaults to 80% profit on a win, with a one-unit loss on a loss. This is an editable research assumption, not a broker quote. Net units, drawdown and break-even rate use that assumption retrospectively. Break-even = 1 / (1 + net win return).
+
+**Historical candle proxy:** signal candle close to the next completed candle close. This is a different measurement from paper observations. Small favorable price touches are no longer counted as wins. Win-rate intervals use Wilson 95% intervals; serial correlation can make these too narrow. No percentage is a guaranteed future accuracy.
+
+## Reproducible research
+
+```powershell
+# Public market data only; 30 days plus one hour of warmup:
+npm run backtest -- --days 30 --net-win-return 0.8
+# Re-run a saved dataset without downloading it again:
+npm run backtest -- --input research-output/candles.json --output research-output/replay-report.json
+```
+
+The runner paginates candle history using server time, excludes the forming candle, and calls the same TypeScript strategy as the live dashboard. It saves the dataset and JSON report under `research-output/` (ignored by Git). It reports the first 70%, the final 30%, four chronological quarters, and six fixed variants: current rules, UT alone, and each confirmation removed in turn. Both a signal and its outcome must fit inside the evaluated window. Gaps restart warmup.
+
+No parameters are optimized. Once you inspect the holdout to choose a strategy, it is no longer unseen: test the chosen change on a later untouched period. The compatibility script `node scripts/backtest-12h.mjs` uses the same runner for a shorter sample.
+
+Data endpoint: `wss://api.derivws.com/trading/v1/options/ws/public`. [Deriv candle history API](https://developers.deriv.com/docs/data/ticks-history/). [Deriv contract descriptions](https://dsmarttrader.deriv.com/explanation).
+
+## Directional ±0.03 touch research
+
+This separate measurement asks whether the next completed minute reaches signal close +0.03 for RISE, or signal close −0.03 for FALL. It does not change the live signal rules or paper settlement metric.
+
+```powershell
+# Download/resume the maximum history exposed by the public endpoint:
+node scripts/download-max-history.mjs
+# Audit any missing minute and append candles completed during the download:
+node scripts/audit-history-cache.mjs
+# Generate the report and per-signal CSV from the cached data:
+node scripts/touch-backtest.mjs
+# Compare a seven-minute window using exactly the same saved candles and signals:
+node scripts/touch-backtest.mjs --minutes 7
+```
+
+Results are in `research-output/touch-003/TOUCH_REPORT.md`, `touch-report.json`, and `signal-touches.csv`. The 31 October 2026 run obtained 525,598 valid M1 candles, from 31 October 2025 through 31 October 2026, with one unavailable minute and a partial oldest candle excluded. 4,587 of 5,233 qualified signals touched 0.03 in the signal direction (87.66%). Both directions touched in 3,978 cases; the matched 50/50-direction baseline was 88.01%. A high excursion rate is not evidence of better direction selection or profitable contract trading. Refer to the report for monthly results, exact timestamps, entry-reference sensitivity and limitations.
+
+The seven-minute report is saved separately under `research-output/touch-003-7m/`. It requires seven consecutive completed candles, uses their high/low extremes for touches and the seventh close for end direction, and includes first-touch timing at minute resolution. It does not change the live bot's one-minute signal rules or its 60-second paper tracker.

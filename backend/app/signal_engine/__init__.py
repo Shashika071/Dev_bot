@@ -1,1 +1,0 @@
-"""Signal engine package initialization."""

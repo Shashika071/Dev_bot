@@ -1,47 +1,12 @@
-# Secrets & local env
+node_modules
+dist
+dist-ssr
+*.local
 .env
-.env.local
-# .env.prod is tracked for this private repo (replace placeholders with real VPS secrets)
-*.pem
-certs/origin.pem
-certs/origin.key
-certs/letsencrypt/
-certs/certbot-work/
-certs/certbot-logs/
-
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
-venv/
-.pytest_cache/
-.test-output/
-.mypy_cache/
-.coverage
-htmlcov/
-
-# Node / frontend
-frontend/node_modules/
-frontend/dist/
-*.log
-
-# Data & models (large / generated)
-/data/
-# Local SQLite tick dumps (too large for GitHub; keep on disk only)
-candel/
-*.sqlite
-*.sqlite-shm
-*.sqlite-wal
-# Postgres host data — NEVER delete if you want to keep ticks
-pgdata/
-*.cbm
-*.pkl
-*.parquet
-
-# OS / IDE
+.env.backup
 .DS_Store
-Thumbs.db
-.idea/
-.vscode/
-*.swp
+coverage
+research-output
+*.log
+.vscode/*
+!.vscode/extensions.json
