@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 import { enrich, evaluateAll, evaluateIndex, evaluateLatestClosed } from './signalEngine'
-import { FILTER_PRESETS } from './filters'
 import { fixtureCandles } from '../testFixtures'
 
 function passing(side: 'RISE' | 'FALL') {
@@ -66,13 +65,5 @@ describe('signal acceptance and boundaries', () => {
     const invalid = fixtureCandles(150)
     invalid[100].high = NaN
     expect(evaluateLatestClosed(invalid)).toBeNull()
-  })
-  it('optional filters can reject an otherwise-qualified RISE', () => {
-    const s = passing('RISE')
-    const atr = s.filters.atr14[99]
-    expect(atr).toBeTypeOf('number')
-    s.candles[99] = { ...s.candles[99], high: s.candles[99].low + (atr as number) * 3 }
-    expect(evaluateIndex(s, 99).final).toBe('RISE')
-    expect(evaluateIndex(s, 99, FILTER_PRESETS.skip_large_candle_1_5x).final).toBe('NO_TRADE')
   })
 })

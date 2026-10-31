@@ -3,7 +3,6 @@ import { fixtureCandles } from '../testFixtures'
 import {
   applyOptionalFilters,
   buildFilterSeries,
-  DEFAULT_FILTER_CONFIG,
   FILTER_PRESETS,
 } from './filters'
 import { enrich, evaluateIndex } from './signalEngine'
@@ -24,28 +23,29 @@ function passingRise() {
 }
 
 describe('optional filters', () => {
-  it('baseline accepts when five rules pass', () => {
+  it('baseline five rules still pass without filters wired into evaluateIndex', () => {
     const { s, i } = passingRise()
-    expect(evaluateIndex(s, i, DEFAULT_FILTER_CONFIG).final).toBe('RISE')
+    expect(evaluateIndex(s, i).final).toBe('RISE')
   })
 
   it('large-candle filter rejects oversized range', () => {
     const { s, i } = passingRise()
-    const atr = s.filters.atr14[i]
+    const filters = buildFilterSeries(s.candles)
+    const atr = filters.atr14[i]
     expect(atr).toBeTypeOf('number')
     s.candles[i] = {
       ...s.candles[i],
       high: s.candles[i].low + (atr as number) * 2,
     }
-    const check = applyOptionalFilters(s.candles, s.filters, i, 'RISE', FILTER_PRESETS.skip_large_candle_1_5x)
+    const check = applyOptionalFilters(s.candles, filters, i, 'RISE', FILTER_PRESETS.skip_large_candle_1_5x)
     expect(check.passed).toBe(false)
-    expect(evaluateIndex(s, i, FILTER_PRESETS.skip_large_candle_1_5x).final).toBe('NO_TRADE')
   })
 
   it('volatility min filter rejects low ATR vs target', () => {
     const { s, i } = passingRise()
-    s.filters.atr14[i] = 0.03 * 5 // below 10× target
-    const check = applyOptionalFilters(s.candles, s.filters, i, 'RISE', FILTER_PRESETS.vol_atr_ge_10x)
+    const filters = buildFilterSeries(s.candles)
+    filters.atr14[i] = 0.03 * 5 // below 10× target
+    const check = applyOptionalFilters(s.candles, filters, i, 'RISE', FILTER_PRESETS.vol_atr_ge_10x)
     expect(check.passed).toBe(false)
   })
 
@@ -55,7 +55,6 @@ describe('optional filters', () => {
     const i = candles.length - 1
     expect(series.m5Close[i]).not.toBeNull()
     const cfg = FILTER_PRESETS.m5_trend
-    // Force mismatch: RISE needs close > rising SMA
     series.m5Close[i] = 1
     series.m5Sma20[i] = 100
     series.m5SmaRising[i] = false
