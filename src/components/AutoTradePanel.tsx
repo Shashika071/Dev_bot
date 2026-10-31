@@ -46,10 +46,11 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
       </div>
 
       <p className="mb-3 max-w-4xl text-[11px] leading-snug text-slate-500">
-        On each qualified RISE/FALL signal the bot buys Deriv <span className="text-slate-300">ONETOUCH</span> contracts.
+        Buys Deriv <span className="text-slate-300">ONETOUCH</span> when live setup confidence is ≥{' '}
+        <span className="text-slate-300">Min confidence</span> (default 80% = 4/5 conditions).
+        <span className="text-slate-300"> UT is not required.</span>{' '}
         Mode <span className="text-slate-300">both</span> places <span className="text-emerald-400">+barrier</span> and{' '}
-        <span className="text-rose-400">−barrier</span> together. Trades only when closed-candle confidence is ≥{' '}
-        <span className="text-slate-300">Min confidence</span> (default 80% = 4/5 conditions). After a fill, wait-after-trade blocks new entries.
+        <span className="text-rose-400">−barrier</span>. One entry per minute side; wait-after-trade blocks the next fill.
       </p>
 
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8">
@@ -113,8 +114,11 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
               type="number"
               min={1}
               step={1}
-              value={trade.duration}
-              onChange={(e) => trade.setDuration(Math.max(1, Number(e.target.value) || 1))}
+              value={Number.isFinite(trade.duration) && trade.duration > 0 ? trade.duration : 7}
+              onChange={(e) => {
+                const n = Number(e.target.value)
+                trade.setDuration(Number.isFinite(n) && n >= 1 ? Math.floor(n) : 7)
+              }}
             />
             <select
               className="field w-14"
@@ -196,6 +200,15 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
       </div>
 
       {trade.error && <p role="alert" className="mt-2 text-xs text-rose-300">{trade.error}</p>}
+
+      <div className="mt-3 rounded border border-slate-800 bg-[#0b0f14] px-3 py-2 text-[11px] leading-snug text-slate-400">
+        <p className="font-semibold text-slate-300">Why no trade yet?</p>
+        <ul className="mt-1 list-disc space-y-0.5 pl-4">
+          <li>Chart must show <span className="text-emerald-400">READY</span> (not “Recovering / signals paused”).</li>
+          <li>Live RISE/FALL confidence must be ≥ {trade.minConfidencePct}% (UT not required).</li>
+          <li>Auto trade ON + trade socket connected; cooldown may still be blocking.</li>
+        </ul>
+      </div>
 
       <TradeHistory rows={trade.log} onClear={trade.clearTradeHistory} />
 

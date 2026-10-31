@@ -5,14 +5,8 @@ import { advancePaper, startPaper } from '../lib/history/paperTracker'
 import { evaluateAll } from '../lib/strategy/signalEngine'
 import { computeLiveSetupConfidence } from '../lib/strategy/liveConfidence'
 import { summarize } from '../lib/research/statistics'
-import type { Candle, ConfirmationFlags, SignalEvaluation, SignalHistoryRow } from '../lib/types'
+import type { Candle, SignalEvaluation, SignalHistoryRow } from '../lib/types'
 import type { AutoTradeSignal } from './useAutoTrade'
-
-function confidenceFromFlags(flags: ConfirmationFlags): number {
-  const keys = Object.keys(flags) as (keyof ConfirmationFlags)[]
-  if (!keys.length) return 0
-  return keys.filter((k) => flags[k]).length / keys.length
-}
 
 function playBeep() {
   try {
@@ -89,19 +83,46 @@ export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => vo
               setLiveSignal(ev)
               if (soundRef.current) playBeep()
             }
-            // Auto-trade candidate: UT direction on closed candle + condition confidence
-            const side = ev.rawUt === 'BUY' ? 'RISE' as const : ev.rawUt === 'SELL' ? 'FALL' as const : null
-            if (side) {
-              onTradeRef.current?.({
-                side,
-                confidence: confidenceFromFlags(ev.confirmations),
-                time: ev.time,
-                isQualified: ev.isQualified,
-              })
-            }
           }
         }
       }
+
+      // Auto-trade: confidence ≥ min (default 80%) — no UT required.
+      // Uses live setup on the current minute; once per candle side.
+      if (state.ready) {
+        const setup = computeLiveSetupConfidence(state.candles)
+        if (setup.ready && setup.candleTime != null) {
+          const rise = setup.rise.confidence
+          const fall = setup.fall.confidence
+          let side: 'RISE' | 'FALL' | null = null
+          let confidence = 0
+          if (rise > fall) {
+            side = 'RISE'
+            confidence = rise
+          } else if (fall > rise) {
+            side = 'FALL'
+            confidence = fall
+          } else if (rise > 0 && setup.lean === 'RISE') {
+            side = 'RISE'
+            confidence = rise
+          } else if (fall > 0 && setup.lean === 'FALL') {
+            side = 'FALL'
+            confidence = fall
+          } else if (rise >= fall && rise > 0) {
+            side = 'RISE'
+            confidence = rise
+          }
+          if (side) {
+            onTradeRef.current?.({
+              side,
+              confidence,
+              time: setup.candleTime,
+              isQualified: confidence >= 1,
+            })
+          }
+        }
+      }
+
       if (rows !== rowsRef.current) {
         rowsRef.current = rows
         setHistory(rows)

@@ -245,30 +245,36 @@ export function useAutoTrade(symbol: string) {
     if (!s.autoEnabled) return
     if (sig.side !== 'RISE' && sig.side !== 'FALL') return
     const confPct = Math.round(100 * sig.confidence)
+    // Below min confidence: silent (checked every tick; do not spam history)
+    if (confPct < s.minConfidencePct) return
     const key = `${sig.time}:${sig.side}`
     if (tradedSignals.current.has(key)) return
-    if (confPct < s.minConfidencePct) {
-      pushLog({
-        signal: sig.side,
-        barrier: '—',
-        ok: false,
-        message: `Skipped · confidence ${confPct}% < min ${s.minConfidencePct}%`,
-      })
-      return
-    }
     const waitLeft = Math.max(0, Math.ceil((cooldownUntilRef.current - Date.now()) / 1000))
     if (waitLeft > 0) {
-      pushLog({
-        signal: sig.side,
-        barrier: '—',
-        ok: false,
-        message: `Skipped · cooldown ${waitLeft}s left`,
-      })
+      const cdKey = `cd:${key}`
+      if (!tradedSignals.current.has(cdKey)) {
+        tradedSignals.current.add(cdKey)
+        pushLog({
+          signal: sig.side,
+          barrier: '—',
+          ok: false,
+          message: `Skipped · cooldown ${waitLeft}s left · conf ${confPct}%`,
+        })
+      }
       return
     }
     const client = clientRef.current
     if (!client || client.connectionStatus !== 'CONNECTED') {
-      pushLog({ signal: sig.side, barrier: '—', ok: false, message: 'Auto trade on but trading socket not connected' })
+      const ncKey = `nc:${key}`
+      if (!tradedSignals.current.has(ncKey)) {
+        tradedSignals.current.add(ncKey)
+        pushLog({
+          signal: sig.side,
+          barrier: '—',
+          ok: false,
+          message: `Skipped · conf ${confPct}% but trading socket not connected`,
+        })
+      }
       return
     }
     tradedSignals.current.add(key)
