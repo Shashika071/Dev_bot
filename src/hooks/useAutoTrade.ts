@@ -130,7 +130,7 @@ function savePrefs(payload: StoredPrefs) {
 }
 
 export function useAutoTrade(symbol: string) {
-  const prefs0 = loadPrefs()
+  const prefs0 = useRef(loadPrefs()).current
   const [appId, setAppId] = useState(prefs0.appId)
   const [token, setToken] = useState(prefs0.token)
   const [accountId, setAccountId] = useState(prefs0.accountId)
@@ -142,7 +142,8 @@ export function useAutoTrade(symbol: string) {
   const [mode, setMode] = useState<TouchSideMode>(prefs0.mode)
   const [cooldownSec, setCooldownSec] = useState(prefs0.cooldownSec)
   const [minConfidencePct, setMinConfidencePct] = useState(prefs0.minConfidencePct)
-  const [autoEnabled, setAutoEnabled] = useState(false)
+  // Keep Auto trade ON across refresh — never default to false if it was saved.
+  const [autoEnabled, setAutoEnabled] = useState(prefs0.autoEnabled)
   const [wantConnected, setWantConnected] = useState(prefs0.wantConnected)
   const [status, setStatus] = useState<ConnectionStatus>('DISCONNECTED')
   const [busy, setBusy] = useState(false)
@@ -157,6 +158,7 @@ export function useAutoTrade(symbol: string) {
   const cooldownUntilRef = useRef(prefs0.cooldownUntil)
   const restoreTried = useRef(false)
   const pendingAuto = useRef(prefs0.autoEnabled)
+  const readyToPersist = useRef(false)
   const settingsRef = useRef({
     stake, barrierAbs, duration, durationUnit, mode, cooldownSec, minConfidencePct, currency, symbol, autoEnabled,
   })
@@ -168,6 +170,11 @@ export function useAutoTrade(symbol: string) {
   }, [stake, barrierAbs, duration, durationUnit, mode, cooldownSec, minConfidencePct, currency, symbol, autoEnabled])
 
   useEffect(() => {
+    // Skip the first paint so we never overwrite saved Auto trade ON with a false default.
+    if (!readyToPersist.current) {
+      readyToPersist.current = true
+      return
+    }
     savePrefs({
       appId,
       token,
@@ -301,7 +308,7 @@ export function useAutoTrade(symbol: string) {
       client.close()
       clientRef.current = null
       setStatus('DISCONNECTED')
-      setAutoEnabled(false)
+      // Keep Auto trade ON preference after refresh/reconnect failure — only Disconnect clears it.
       setError(err instanceof Error ? err.message : String(err))
       return false
     } finally {
@@ -313,28 +320,31 @@ export function useAutoTrade(symbol: string) {
   useEffect(() => {
     if (restoreTried.current) return
     restoreTried.current = true
-    const prefs = loadPrefs()
-    if (!prefs.appId.trim() || !prefs.token.trim()) return
+    if (!prefs0.appId.trim() || !prefs0.token.trim()) return
 
     let cancelled = false
+    const wantAuto = prefs0.autoEnabled
+    const wantWs = prefs0.wantConnected
+    pendingAuto.current = wantAuto
+    if (wantAuto) setAutoEnabled(true)
+
     void (async () => {
       const rows = await loadAccounts({
-        token: prefs.token,
-        appId: prefs.appId,
-        accountId: prefs.accountId,
+        token: prefs0.token,
+        appId: prefs0.appId,
+        accountId: prefs0.accountId,
       })
       if (cancelled) return
       const id =
-        rows.find((r) => r.account_id === prefs.accountId)?.account_id
+        rows.find((r) => r.account_id === prefs0.accountId)?.account_id
         || rows[0]?.account_id
-        || prefs.accountId
-      if (!prefs.wantConnected || !id) return
-      pendingAuto.current = prefs.autoEnabled
+        || prefs0.accountId
+      if (!wantWs || !id) return
       await connect({
-        token: prefs.token,
-        appId: prefs.appId,
+        token: prefs0.token,
+        appId: prefs0.appId,
         accountId: id,
-        enableAuto: prefs.autoEnabled,
+        enableAuto: wantAuto,
       })
     })()
 
@@ -343,11 +353,17 @@ export function useAutoTrade(symbol: string) {
       clientRef.current?.close()
       clientRef.current = null
     }
-  }, [loadAccounts, connect])
+  }, [loadAccounts, connect, prefs0])
 
   const setAutoEnabledSafe = useCallback((on: boolean) => {
     pendingAuto.current = on
     setAutoEnabled(on)
+    // Persist immediately so refresh never loses Auto trade ON.
+    try {
+      const cur = loadPrefs()
+      savePrefs({ ...cur, autoEnabled: on, wantConnected: on ? true : cur.wantConnected })
+    } catch { /* ignore */ }
+    if (on) setWantConnected(true)
   }, [])
 
   const onTradeSignal = useCallback(async (sig: AutoTradeSignal) => {

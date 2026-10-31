@@ -195,10 +195,11 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
           <input
             type="checkbox"
             checked={trade.autoEnabled}
-            disabled={!connected}
+            disabled={!connected && !trade.autoEnabled}
             onChange={(e) => trade.setAutoEnabled(e.target.checked)}
           />
           Auto trade ON
+          {trade.autoEnabled && !connected ? ' (reconnecting…)' : ''}
         </label>
       </div>
 
