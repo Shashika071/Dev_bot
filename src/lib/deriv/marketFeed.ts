@@ -6,6 +6,8 @@ import { evaluateLatestClosed } from '../strategy/signalEngine'
 const SYMBOL = import.meta.env.VITE_DERIV_SYMBOL || 'R_100'
 const configuredHistory = Number(import.meta.env.VITE_HISTORY_COUNT || 5000)
 const HISTORY = Number.isFinite(configuredHistory) ? Math.max(120, Math.min(5000, Math.floor(configuredHistory))) : 5000
+/** Public Deriv API usually caps each ticks_history response around this size. */
+const HISTORY_BATCH = 1000
 export const SIGNAL_WINDOW_SECONDS = 5
 export const MAX_TICK_GAP_SECONDS = 10
 
@@ -42,6 +44,8 @@ export class MarketFeed {
   }
   private historyId: number | null = null
   private historyEnd = 0
+  private historyTargetEnd = 0
+  private historyPages = new Map<number, Candle>()
   private buffered: Tick[] = []
   private syncing = true
   private lastTick: Tick | null = null
@@ -55,6 +59,7 @@ export class MarketFeed {
     client.setStatusHandler((status) => {
       this.syncing = true
       this.historyId = null
+      this.historyPages.clear()
       this.buffered = []
       this.lastTick = null
       this.syncStarted = this.now()
@@ -101,7 +106,9 @@ export class MarketFeed {
       this.state = { ...this.state, ready: false, error: 'Feed stale — signals paused' }
     }
     this.emit()
-    if (age > 15000 || (this.syncing && this.now() - this.syncStarted > 15000)) {
+    // Allow longer while paginating history (several API batches).
+    const syncBudget = this.historyPages.size > 0 ? 45000 : 15000
+    if (age > 15000 || (this.syncing && this.now() - this.syncStarted > syncBudget)) {
       this.client.reconnect()
     }
   }
@@ -110,12 +117,56 @@ export class MarketFeed {
     this.syncing = true
     this.syncStarted = this.now()
     this.buffered = [tick]
-    this.historyEnd = tick.epoch - 1
+    this.historyPages.clear()
+    this.historyTargetEnd = tick.epoch - 1
+    this.historyEnd = this.historyTargetEnd
     this.state = { ...this.state, ready: false, error: 'Recovering candle history — signals paused' }
+    this.requestHistoryPage()
+    this.emit()
+  }
+
+  private requestHistoryPage() {
+    const remaining = HISTORY - this.historyPages.size
+    if (remaining <= 0) {
+      this.finishHistorySync()
+      return
+    }
+    const count = Math.min(HISTORY_BATCH, remaining)
     this.historyId = this.client.send({
       ticks_history: SYMBOL, style: 'candles', granularity: 60,
-      count: HISTORY, end: String(this.historyEnd),
+      count, end: String(this.historyEnd),
     })
+  }
+
+  private finishHistorySync() {
+    const firstTick = this.buffered[0]
+    if (!firstTick) return
+    const history = [...this.historyPages.values()].sort((a, b) => a.time - b.time)
+    if (history.length < 120 || history.some((c, i) =>
+      c.time > minuteBucket(this.historyTargetEnd) || (i > 0 && c.time !== history[i - 1].time + 60))) {
+      this.state = { ...this.state, ready: false, error: 'Invalid or incomplete history — waiting for recovery' }
+      this.historyId = null
+      this.emit()
+      return
+    }
+    let candles = finalizeByClock(history, firstTick.epoch)
+    for (const tick of this.buffered) candles = applyTick(candles, tick).candles
+    const latest = this.buffered.at(-1)!
+    const lastClosed = candles.filter((c) => c.isClosed).at(-1)
+    const ready = !!evaluateLatestClosed(candles)
+      && lastClosed?.time === minuteBucket(latest.epoch) - 60
+      && this.now() - this.lastReceipt <= MAX_TICK_GAP_SECONDS * 1000
+      && Math.abs(this.now() / 1000 - latest.epoch) <= MAX_TICK_GAP_SECONDS
+    this.state = {
+      ...this.state, candles: candles.slice(-HISTORY), ready,
+      lastPrice: latest.quote, lastTickEpoch: latest.epoch,
+      lastConfirmedCandleTime: lastClosed?.time ?? null,
+      error: ready ? null : 'Insufficient consecutive candles — signals paused',
+    }
+    this.syncing = !ready
+    this.historyId = null
+    this.historyPages.clear()
+    this.buffered = []
     this.emit()
   }
 
@@ -128,32 +179,29 @@ export class MarketFeed {
     }
     if (Array.isArray(msg.candles)) {
       if (!this.syncing || this.historyId == null || msg.req_id !== this.historyId || !this.buffered.length) return
-      const history = candlesFromHistory(msg.candles)
-      const firstTick = this.buffered[0]
-      if (history.length !== msg.candles.length || history.some((c, i) =>
-        c.time > minuteBucket(this.historyEnd) || (i > 0 && c.time !== history[i - 1].time + 60))) {
+      const batch = candlesFromHistory(msg.candles)
+      const requested = Math.min(HISTORY_BATCH, HISTORY - this.historyPages.size)
+      if (batch.length !== msg.candles.length || batch.some((c, i) =>
+        c.time > minuteBucket(this.historyTargetEnd) || (i > 0 && c.time !== batch[i - 1].time + 60))) {
         this.state = { ...this.state, ready: false, error: 'Invalid or incomplete history — waiting for recovery' }
         this.emit()
         return
       }
-      let candles = finalizeByClock(history, firstTick.epoch)
-      for (const tick of this.buffered) candles = applyTick(candles, tick).candles
-      const latest = this.buffered.at(-1)!
-      const lastClosed = candles.filter((c) => c.isClosed).at(-1)
-      const ready = !!evaluateLatestClosed(candles)
-        && lastClosed?.time === minuteBucket(latest.epoch) - 60
-        && this.now() - this.lastReceipt <= MAX_TICK_GAP_SECONDS * 1000
-        && Math.abs(this.now() / 1000 - latest.epoch) <= MAX_TICK_GAP_SECONDS
-      this.state = {
-        ...this.state, candles: candles.slice(-HISTORY), ready,
-        lastPrice: latest.quote, lastTickEpoch: latest.epoch,
-        lastConfirmedCandleTime: lastClosed?.time ?? null,
-        error: ready ? null : 'Insufficient consecutive candles — signals paused',
+      for (const c of batch) this.historyPages.set(c.time, c)
+      this.syncStarted = this.now()
+      const needMore = this.historyPages.size < HISTORY && batch.length >= Math.min(requested, HISTORY_BATCH)
+      if (needMore && batch.length > 0) {
+        const earliest = Math.min(...batch.map((c) => c.time))
+        this.historyEnd = earliest - 60
+        this.state = {
+          ...this.state,
+          error: `Loading history ${this.historyPages.size}/${HISTORY}…`,
+        }
+        this.requestHistoryPage()
+        this.emit()
+        return
       }
-      this.syncing = !ready
-      this.historyId = null
-      this.buffered = []
-      this.emit()
+      this.finishHistorySync()
       return
     }
     if (!msg.tick || this.state.status !== 'CONNECTED') return

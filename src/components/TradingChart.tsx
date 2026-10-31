@@ -30,6 +30,7 @@ function lineStyleFromSetting(style: 'Solid' | 'Dashed' | 'Dotted'): LineStyle {
 
 export function TradingChart({ candles, lastPrice, evaluations }: Props) {
   const mainRef = useRef<HTMLDivElement>(null)
+  const fittedLen = useRef(0)
   const charts = useRef<{
     main?: IChartApi
     candle?: ISeriesApi<'Candlestick'>
@@ -104,6 +105,11 @@ export function TradingChart({ candles, lastPrice, evaluations }: Props) {
         close: x.close,
       })),
     )
+    // Fit once when history grows a lot (e.g. after paginated sync).
+    if (candles.length >= fittedLen.current + 100 || fittedLen.current === 0) {
+      c.main?.timeScale().fitContent()
+      fittedLen.current = candles.length
+    }
 
     // Only fully qualified RISE / FALL markers (all 5 rules passed)
     const byTime = new Map(evaluations.map((e) => [e.time, e]))
