@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import type { useAutoTrade } from '../hooks/useAutoTrade'
+import { TradeHistory } from './TradeHistory'
 
 type AutoTrade = ReturnType<typeof useAutoTrade>
 
@@ -8,7 +9,7 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
   const selected = trade.accounts.find((a) => a.account_id === trade.accountId)
 
   return (
-    <section className="min-h-full bg-[#0c1118] px-4 py-4">
+    <section className="flex min-h-full flex-col bg-[#0c1118] px-4 py-4">
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <h2 className="text-sm font-semibold uppercase tracking-widest text-slate-200">Auto trade · Touch both sides</h2>
         <span
@@ -196,16 +197,7 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
 
       {trade.error && <p role="alert" className="mt-2 text-xs text-rose-300">{trade.error}</p>}
 
-      {trade.log.length > 0 && (
-        <ul className="mt-2 max-h-28 space-y-0.5 overflow-auto text-[11px] tabular-nums">
-          {trade.log.map((row) => (
-            <li key={row.id} className={row.ok ? 'text-emerald-400/90' : 'text-rose-300/90'}>
-              {new Date(row.at).toISOString().slice(11, 19)} · {row.signal} · {row.barrier} · {row.message}
-              {row.contractId != null ? ` · #${row.contractId}` : ''}
-            </li>
-          ))}
-        </ul>
-      )}
+      <TradeHistory rows={trade.log} onClear={trade.clearTradeHistory} />
 
       <style>{`
         .field {

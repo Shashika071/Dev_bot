@@ -5,6 +5,8 @@ import { placeTouchTrades, type TouchSideMode } from '../lib/deriv/touchTrade'
 import type { ConnectionStatus, FinalSignal } from '../lib/types'
 
 const STORAGE_KEY = 'v100_auto_trade_v1'
+const HISTORY_KEY = 'v100_trade_history_v1'
+const HISTORY_MAX = 500
 
 export type TradeLogRow = {
   id: string
@@ -14,6 +16,39 @@ export type TradeLogRow = {
   ok: boolean
   message: string
   contractId?: number | null
+}
+
+function loadTradeHistory(): TradeLogRow[] {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY)
+    if (!raw) return []
+    const rows = JSON.parse(raw) as unknown
+    if (!Array.isArray(rows)) return []
+    return rows.filter((r): r is TradeLogRow =>
+      !!r && typeof r === 'object'
+      && typeof (r as TradeLogRow).id === 'string'
+      && typeof (r as TradeLogRow).at === 'number'
+      && typeof (r as TradeLogRow).message === 'string',
+    ).slice(0, HISTORY_MAX)
+  } catch {
+    return []
+  }
+}
+
+function saveTradeHistory(rows: TradeLogRow[]) {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(rows.slice(0, HISTORY_MAX)))
+  } catch { /* ignore quota */ }
+}
+
+export function exportTradeHistoryCsv(rows: TradeLogRow[]): string {
+  const header = 'utc,signal,barrier,ok,contract_id,message'
+  const lines = rows.map((r) => {
+    const utc = new Date(r.at).toISOString()
+    const msg = `"${r.message.replaceAll('"', '""')}"`
+    return [utc, r.signal, r.barrier, r.ok ? '1' : '0', r.contractId ?? '', msg].join(',')
+  })
+  return [header, ...lines].join('\n')
 }
 
 type StoredPrefs = {
@@ -87,7 +122,7 @@ export function useAutoTrade(symbol: string) {
   const [error, setError] = useState<string | null>(null)
   const [balance, setBalance] = useState<number | null>(null)
   const [currency, setCurrency] = useState('USD')
-  const [log, setLog] = useState<TradeLogRow[]>([])
+  const [log, setLog] = useState<TradeLogRow[]>(() => loadTradeHistory())
   const [cooldownUntil, setCooldownUntil] = useState(0)
   const [cooldownLeft, setCooldownLeft] = useState(0)
   const clientRef = useRef<DerivTradingClient | null>(null)
@@ -128,7 +163,16 @@ export function useAutoTrade(symbol: string) {
   }, [])
 
   const pushLog = useCallback((row: Omit<TradeLogRow, 'id' | 'at'>) => {
-    setLog((prev) => [{ id: `${Date.now()}:${Math.random()}`, at: Date.now(), ...row }, ...prev].slice(0, 50))
+    setLog((prev) => {
+      const next = [{ id: `${Date.now()}:${Math.random()}`, at: Date.now(), ...row }, ...prev].slice(0, HISTORY_MAX)
+      saveTradeHistory(next)
+      return next
+    })
+  }, [])
+
+  const clearTradeHistory = useCallback(() => {
+    setLog([])
+    saveTradeHistory([])
   }, [])
 
   const disconnect = useCallback(() => {
@@ -286,6 +330,7 @@ export function useAutoTrade(symbol: string) {
     cooldownLeft, cooldownUntil,
     autoEnabled, setAutoEnabled,
     status, busy, error, balance, currency, log,
+    clearTradeHistory,
     loadAccounts, connect, disconnect, onTradeSignal,
   }
 }
