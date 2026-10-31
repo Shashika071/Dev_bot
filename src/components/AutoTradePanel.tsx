@@ -8,9 +8,9 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
   const selected = trade.accounts.find((a) => a.account_id === trade.accountId)
 
   return (
-    <section className="shrink-0 border-t border-slate-800 bg-[#0c1118] px-3 py-3">
-      <div className="mb-2 flex flex-wrap items-center gap-2">
-        <h2 className="text-xs font-semibold uppercase tracking-widest text-slate-300">Auto trade · Touch both sides</h2>
+    <section className="min-h-full bg-[#0c1118] px-4 py-4">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <h2 className="text-sm font-semibold uppercase tracking-widest text-slate-200">Auto trade · Touch both sides</h2>
         <span
           className={
             connected
