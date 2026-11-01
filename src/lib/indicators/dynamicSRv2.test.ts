@@ -46,7 +46,14 @@ describe('Dynamic S/R v2', () => {
       expect(lvl.fromTime).toBeGreaterThan(0)
     }
     expect(swingRays.length).toBeGreaterThanOrEqual(0)
-    expect(swingRays.length).toBeLessThanOrEqual(2)
+    expect(swingRays.length).toBeLessThanOrEqual(3)
+    for (const ray of swingRays) {
+      if (ray.type === 'resistance') {
+        expect(ray.color).toBe(DYNAMIC_SR_V2_DEFAULTS.resistanceColor)
+      } else {
+        expect(ray.color).toBe(DYNAMIC_SR_V2_DEFAULTS.supportColor)
+      }
+    }
   })
 
   it('colors resistance above close and support below', () => {
@@ -64,6 +71,32 @@ describe('Dynamic S/R v2', () => {
     }
   })
 
+  it('labels swing high as R even after price closes above it', () => {
+    // Build a clear local high, then push close above that high
+    const candles = makeCandles(80)
+    const mid = 50
+    candles[mid] = {
+      ...candles[mid],
+      high: 200,
+      open: 190,
+      close: 195,
+      low: 185,
+    }
+    for (let i = mid + 1; i < candles.length; i++) {
+      candles[i] = {
+        ...candles[i],
+        open: 210,
+        close: 215,
+        high: 220,
+        low: 205,
+      }
+    }
+    const { swingRays } = computeDynamicSRv2(candles)
+    const rRays = swingRays.filter((r) => r.type === 'resistance')
+    expect(rRays.length).toBeGreaterThan(0)
+    expect(rRays.every((r) => r.color === DYNAMIC_SR_V2_DEFAULTS.resistanceColor)).toBe(true)
+  })
+
   it('does not look ahead: last prd bars cannot create a new confirmed pivot', () => {
     const candles = makeCandles(120)
     const prd = DYNAMIC_SR_V2_DEFAULTS.pivotPeriod
@@ -72,10 +105,27 @@ describe('Dynamic S/R v2', () => {
       i === candles.length - 1 ? { ...c, high: 1e9, low: c.low } : c,
     )
     const next = computeDynamicSRv2(spiked)
-    // Unconfirmed spike on last bar must not invent a brand-new resistance at 1e9
+    // Unconfirmed spike on last bar must not invent a brand-new channel level at 1e9
     expect(next.levels.some((l) => Math.abs(l.price - 1e9) < 1)).toBe(false)
     expect(next.pivots.some((p) => p.time === spiked.at(-1)!.time)).toBe(false)
+    // Tip ray may show the visible high (that is intentional for chart R)
     void base
     void prd
+  })
+
+  it('shows tip resistance for a clear recent high above last close', () => {
+    const candles = makeCandles(100)
+    const i = candles.length - 2
+    candles[i] = { ...candles[i], high: 500, open: 100, close: 100, low: 99 }
+    candles[candles.length - 1] = {
+      ...candles[candles.length - 1],
+      open: 100,
+      close: 101,
+      high: 102,
+      low: 99,
+    }
+    const { swingRays, levels } = computeDynamicSRv2(candles)
+    expect(levels.some((l) => Math.abs(l.price - 500) < 1)).toBe(false)
+    expect(swingRays.some((r) => r.type === 'resistance' && Math.abs(r.price - 500) < 1)).toBe(true)
   })
 })

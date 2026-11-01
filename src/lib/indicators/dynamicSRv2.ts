@@ -232,24 +232,55 @@ export function computeDynamicSRv2(
     })
   }
 
-  // TV-style active swing rays: newest confirmed pivot high + pivot low
+  // Swing rays: pivot high = R, pivot low = S (by structure, not vs last close).
+  // Use a shorter period so a clear recent high shows before the full pivotPeriod confirms.
   const swingRays: SwingRay[] = []
-  const lastHigh = pivots.find((p) => p.kind === 'H')
-  const lastLow = pivots.find((p) => p.kind === 'L')
-  if (lastHigh) {
+  const fastPrd = Math.max(2, Math.min(3, prd))
+  let fastHigh: { price: number; time: number } | null = null
+  let fastLow: { price: number; time: number } | null = null
+  for (let i = n - 1 - fastPrd; i >= fastPrd; i--) {
+    if (!fastHigh && isPivotHigh(src1, i, fastPrd)) {
+      fastHigh = { price: src1[i], time: closed[i].time }
+    }
+    if (!fastLow && isPivotLow(src2, i, fastPrd)) {
+      fastLow = { price: src2[i], time: closed[i].time }
+    }
+    if (fastHigh && fastLow) break
+  }
+
+  if (fastHigh) {
     swingRays.push({
-      price: lastHigh.price,
-      fromTime: lastHigh.time,
-      type: lastHigh.price >= lastClose ? 'resistance' : 'support',
-      color: lastHigh.price >= lastClose ? resistanceColor : supportColor,
+      price: fastHigh.price,
+      fromTime: fastHigh.time,
+      type: 'resistance',
+      color: resistanceColor,
     })
   }
-  if (lastLow) {
+  if (fastLow) {
     swingRays.push({
-      price: lastLow.price,
-      fromTime: lastLow.time,
-      type: lastLow.price >= lastClose ? 'resistance' : 'support',
-      color: lastLow.price >= lastClose ? resistanceColor : supportColor,
+      price: fastLow.price,
+      fromTime: fastLow.time,
+      type: 'support',
+      color: supportColor,
+    })
+  }
+
+  // Right-edge tip: highest high in the unconfirmed window (what you see as clear R
+  // on the last few candles before a pivot can lock in).
+  const tipStart = Math.max(0, n - fastPrd)
+  let tipHighI = tipStart
+  for (let i = tipStart; i < n; i++) {
+    if (closed[i].high >= closed[tipHighI].high) tipHighI = i
+  }
+  const tipHigh = closed[tipHighI].high
+  const nearDup =
+    fastHigh != null && Math.abs(tipHigh - fastHigh.price) <= Math.max(cwidth * 0.35, 1e-9)
+  if (tipHigh > lastClose && !nearDup) {
+    swingRays.push({
+      price: tipHigh,
+      fromTime: closed[tipHighI].time,
+      type: 'resistance',
+      color: resistanceColor,
     })
   }
 
