@@ -403,67 +403,71 @@ export function useAutoTrade(symbol: string) {
     if (on) setWantConnected(true)
   }, [])
 
-  const onTradeSignal = useCallback(async (sig: AutoTradeSignal) => {
+  const executeTrade = useCallback(async (
+    side: 'RISE' | 'FALL',
+    opts: { source: 'auto' | 'manual'; confPct?: number; dedupeKey?: string },
+  ) => {
     const s = settingsRef.current
-    if (!s.autoEnabled) return
-    if (sig.side !== 'RISE' && sig.side !== 'FALL') return
-    const confPct = Math.round(100 * sig.confidence)
-    if (confPct < s.minConfidencePct) return
-    const key = `${sig.time}:${sig.side}`
-    if (tradedSignals.current.has(key)) return
-    if (tradeLockRef.current) return
+    if (tradeLockRef.current) {
+      if (opts.source === 'manual') {
+        pushLog({ signal: side, barrier: '—', ok: false, message: 'Manual skipped · trade already in progress' })
+      }
+      return
+    }
 
-    // Sync cooldown from storage (survives refresh / HMR / other tab).
+    const client = clientRef.current
+    if (!client || client.connectionStatus !== 'CONNECTED') {
+      pushLog({
+        signal: side,
+        barrier: '—',
+        ok: false,
+        message: opts.source === 'manual'
+          ? 'Manual skipped · connect trade WS first (Trade settings)'
+          : 'Skipped · trading socket not connected',
+      })
+      return
+    }
+
+    // Cooldown blocks both auto and manual until the wait interval ends.
     const storedUntil = readStoredCooldownUntil()
     if (storedUntil > cooldownUntilRef.current) {
       cooldownUntilRef.current = storedUntil
       setCooldownUntil(storedUntil)
     }
-
     const waitLeft = Math.max(0, Math.ceil((cooldownUntilRef.current - Date.now()) / 1000))
     if (waitLeft > 0) {
-      const cdKey = `cd:${key}`
+      const cdKey = `cd:${opts.source}:${opts.dedupeKey ?? side}`
       if (!tradedSignals.current.has(cdKey)) {
         tradedSignals.current.add(cdKey)
         pushLog({
-          signal: sig.side,
+          signal: side,
           barrier: '—',
           ok: false,
-          message: `Skipped · cooldown ${waitLeft}s left · conf ${confPct}%`,
-        })
-      }
-      return
-    }
-    const client = clientRef.current
-    if (!client || client.connectionStatus !== 'CONNECTED') {
-      const ncKey = `nc:${key}`
-      if (!tradedSignals.current.has(ncKey)) {
-        tradedSignals.current.add(ncKey)
-        pushLog({
-          signal: sig.side,
-          barrier: '—',
-          ok: false,
-          message: `Skipped · conf ${confPct}% but trading socket not connected`,
+          message: `${opts.source === 'manual' ? 'Manual' : 'Auto'} skipped · cooldown ${waitLeft}s left${
+            opts.confPct != null ? ` · conf ${opts.confPct}%` : ''
+          }`,
         })
       }
       return
     }
 
-    // Lock + start cooldown BEFORE buy so another tick cannot open a second trade.
-    tradedSignals.current.add(key)
+    if (opts.dedupeKey) tradedSignals.current.add(opts.dedupeKey)
     tradeLockRef.current = true
+
+    // Start wait interval before buy so buttons stay locked for the full interval.
     if (s.cooldownSec > 0) {
       const until = Date.now() + s.cooldownSec * 1000
       cooldownUntilRef.current = until
       setCooldownUntil(until)
       persistCooldownUntil(until)
       pushLog({
-        signal: sig.side,
+        signal: side,
         barrier: '—',
         ok: true,
         message: `Cooldown started · next trade after ${s.cooldownSec}s`,
       })
     }
+
     setBusy(true)
     try {
       let tradeStake = s.stake
@@ -480,12 +484,13 @@ export function useAutoTrade(symbol: string) {
         }
         setStake(tradeStake)
         pushLog({
-          signal: sig.side,
+          signal: side,
           barrier: '—',
           ok: true,
           message: `Full stake · using ${tradeStake} ${s.currency} (balance ${bal.toFixed(2)})`,
         })
       }
+
       const results = await placeTouchTrades(client, {
         symbol: s.symbol,
         currency: s.currency,
@@ -493,19 +498,24 @@ export function useAutoTrade(symbol: string) {
         barrierAbs: s.barrierAbs,
         duration: s.duration,
         durationUnit: s.durationUnit,
-        mode: s.mode,
-      }, sig.side)
+        // Manual buttons always map RISE→+ / FALL→− (one contract).
+        mode: opts.source === 'manual' ? 'signal' : s.mode,
+      }, side)
+
+      const confLabel = opts.confPct != null ? ` · conf ${opts.confPct}%` : ''
+      const srcLabel = opts.source === 'manual' ? 'MANUAL · ' : ''
       for (const r of results) {
         pushLog({
-          signal: sig.side,
+          signal: side,
           barrier: r.barrier,
           ok: true,
-          message: `Bought ONETOUCH · conf ${confPct}% · stake≈${r.buyPrice ?? tradeStake}`,
+          message: `${srcLabel}Bought ONETOUCH${confLabel} · stake≈${r.buyPrice ?? tradeStake}`,
           contractId: r.contractId,
         })
       }
+
       if (!results.length && s.cooldownSec > 0) {
-        // No fill — release cooldown so a real opportunity is not blocked.
+        // No fill — release cooldown so buttons unlock.
         cooldownUntilRef.current = 0
         setCooldownUntil(0)
         persistCooldownUntil(0)
@@ -517,16 +527,31 @@ export function useAutoTrade(symbol: string) {
         persistCooldownUntil(0)
       }
       pushLog({
-        signal: sig.side,
+        signal: side,
         barrier: '—',
         ok: false,
-        message: err instanceof Error ? err.message : String(err),
+        message: `${opts.source === 'manual' ? 'Manual · ' : ''}${err instanceof Error ? err.message : String(err)}`,
       })
     } finally {
       tradeLockRef.current = false
       setBusy(false)
     }
   }, [pushLog])
+
+  const onTradeSignal = useCallback(async (sig: AutoTradeSignal) => {
+    const s = settingsRef.current
+    if (!s.autoEnabled) return
+    if (sig.side !== 'RISE' && sig.side !== 'FALL') return
+    const confPct = Math.round(100 * sig.confidence)
+    if (confPct < s.minConfidencePct) return
+    const key = `${sig.time}:${sig.side}`
+    if (tradedSignals.current.has(key)) return
+    await executeTrade(sig.side, { source: 'auto', confPct, dedupeKey: key })
+  }, [executeTrade])
+
+  const placeManualTrade = useCallback(async (side: 'RISE' | 'FALL') => {
+    await executeTrade(side, { source: 'manual' })
+  }, [executeTrade])
 
   return {
     appId, setAppId,
@@ -549,5 +574,6 @@ export function useAutoTrade(symbol: string) {
     connect: () => void connect(),
     disconnect,
     onTradeSignal,
+    placeManualTrade,
   }
 }

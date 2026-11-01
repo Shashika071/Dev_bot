@@ -3,10 +3,18 @@ import { MarketFeed, SIGNAL_WINDOW_SECONDS, type MarketState } from '../lib/deri
 import { getStorageError, loadHistory, saveHistory } from '../lib/history/signalStore'
 import { advancePaper, startPaper } from '../lib/history/paperTracker'
 import { evaluateAll } from '../lib/strategy/signalEngine'
-import { computeLiveSetupConfidence } from '../lib/strategy/liveConfidence'
+import { computeLiveSetupConfidence, READY_ALERT_PCT } from '../lib/strategy/liveConfidence'
 import { summarize } from '../lib/research/statistics'
 import type { Candle, SignalEvaluation, SignalHistoryRow } from '../lib/types'
 import type { AutoTradeSignal } from './useAutoTrade'
+
+export type ReadyAlert = {
+  side: 'RISE' | 'FALL'
+  pct: number
+  passed: number
+  total: number
+  near: string[]
+}
 
 /** Soft beep for full 5/5 qualified alerts. */
 function playBeep() {
@@ -21,6 +29,30 @@ function playBeep() {
     oscillator.onended = () => { void ctx.close() }
     oscillator.start()
     oscillator.stop(ctx.currentTime + 0.15)
+  } catch { /* Sound may require a browser interaction. */ }
+}
+
+/** “GET READY” warning at ~60% — two mid tones. */
+function playReadyAlert() {
+  try {
+    const ctx = new AudioContext()
+    const now = ctx.currentTime
+    const tones = [740, 880]
+    for (let i = 0; i < tones.length; i++) {
+      const osc = ctx.createOscillator()
+      const gain = ctx.createGain()
+      osc.type = 'triangle'
+      osc.frequency.value = tones[i]!
+      osc.connect(gain)
+      gain.connect(ctx.destination)
+      const t0 = now + i * 0.22
+      gain.gain.setValueAtTime(0.0001, t0)
+      gain.gain.exponentialRampToValueAtTime(0.18, t0 + 0.04)
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.2)
+      osc.start(t0)
+      osc.stop(t0 + 0.21)
+    }
+    window.setTimeout(() => { void ctx.close() }, 700)
   } catch { /* Sound may require a browser interaction. */ }
 }
 
@@ -58,6 +90,7 @@ export function useMarketAndSignals(
   const [evaluations, setEvaluations] = useState<SignalEvaluation[]>([])
   const [closedCandles, setClosedCandles] = useState<Candle[]>([])
   const [liveSignal, setLiveSignal] = useState<SignalEvaluation | null>(null)
+  const [readyAlert, setReadyAlert] = useState<ReadyAlert | null>(null)
   const [sound, setSound] = useState(() => (import.meta.env.VITE_SOUND_ALERTS ?? 'true') !== 'false')
   const soundRef = useRef(sound)
   const onTradeRef = useRef(onTradeSignal)
@@ -77,6 +110,7 @@ export function useMarketAndSignals(
     // Keep deduplication for this session even if the visible history is cleared.
     const notified = new Set(rowsRef.current.map((row) => row.id))
     const sounded80 = new Set<string>()
+    const sounded60 = new Set<string>()
     saveHistory(rowsRef.current)
     const unsubscribe = feed.subscribe((state, event) => {
       setMarket({ ...state })
@@ -146,6 +180,37 @@ export function useMarketAndSignals(
           if (side) {
             const confPct = Math.round(100 * confidence)
             const soundKey = `${setup.candleTime}:${side}`
+            const setupSide = side === 'RISE' ? setup.rise : setup.fall
+            const nearTexts = setupSide.nearRemaining.map((n) => n.text)
+            const hasNear = nearTexts.length > 0
+
+            // GET READY: ≥60% and still below trade threshold, especially if remaining are near.
+            if (
+              confPct >= READY_ALERT_PCT
+              && confPct < minConfRef.current
+            ) {
+              setReadyAlert({
+                side,
+                pct: confPct,
+                passed: setupSide.passed,
+                total: setupSide.total,
+                near: nearTexts,
+              })
+              if (
+                soundRef.current
+                && !sounded60.has(soundKey)
+                && (hasNear || confPct >= READY_ALERT_PCT)
+              ) {
+                sounded60.add(soundKey)
+                playReadyAlert()
+              }
+            } else if (confPct < READY_ALERT_PCT) {
+              setReadyAlert(null)
+            } else {
+              // At/above trade threshold — clear ready banner (partial/full takes over).
+              setReadyAlert(null)
+            }
+
             if (
               soundRef.current
               && confPct >= minConfRef.current
@@ -160,8 +225,12 @@ export function useMarketAndSignals(
               time: setup.candleTime,
               isQualified: confidence >= 1,
             })
+          } else {
+            setReadyAlert(null)
           }
         }
+      } else if (!state.ready) {
+        setReadyAlert(null)
       }
 
       if (rows !== rowsRef.current) {
@@ -210,6 +279,7 @@ export function useMarketAndSignals(
 
   return {
     market, evaluations, latestEval: evaluations.at(-1) ?? null, liveSignal,
+    readyAlert,
     history, clearHistory, sound, setSound, research, storageWarning, netWinReturn, setNetWinReturn,
     liveSetup,
   }

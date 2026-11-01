@@ -3,9 +3,9 @@ import { TradingChart } from './components/TradingChart'
 import { SignalPanel } from './components/SignalPanel'
 import { useMarketAndSignals } from './hooks/useMarketAndSignals'
 import { useAutoTrade } from './hooks/useAutoTrade'
-import { ResearchPanel } from './components/ResearchPanel'
 import { SignalHistory } from './components/SignalHistory'
 import { AutoTradePanel } from './components/AutoTradePanel'
+import { ManualTradeBar } from './components/ManualTradeBar'
 
 const SYMBOL = import.meta.env.VITE_DERIV_SYMBOL || 'R_100'
 const TAB_KEY = 'v100_ui_tab_v1'
@@ -31,8 +31,8 @@ export default function App() {
     } catch { /* ignore */ }
   }
   const {
-    market, evaluations, latestEval, liveSignal, sound, setSound, history, clearHistory,
-    research, storageWarning, netWinReturn, setNetWinReturn, liveSetup,
+    market, evaluations, latestEval, liveSignal, readyAlert, sound, setSound, history, clearHistory,
+    storageWarning, liveSetup,
   } = useMarketAndSignals(trade.onTradeSignal, trade.minConfidencePct)
 
   const tradeConnected = trade.status === 'CONNECTED'
@@ -103,19 +103,31 @@ export default function App() {
         const fallPct = Math.round(100 * liveSetup.fall.confidence)
         const side = risePct >= fallPct ? 'RISE' as const : 'FALL' as const
         const pct = Math.max(risePct, fallPct)
-        if (pct < trade.minConfidencePct) return null
-        return (
-          <div
-            className={`shrink-0 px-3 py-1 text-center text-xs font-semibold ${
-              side === 'FALL'
-                ? 'bg-amber-500/20 text-amber-200'
-                : 'bg-cyan-500/20 text-cyan-200'
-            }`}
-          >
-            PARTIAL {side} {pct}% · {pct >= 100 ? '5/5' : `${Math.round(pct / 20)}/5`} (not full signal)
-            {trade.autoEnabled ? ' · auto may fire' : ''}
-          </div>
-        )
+        if (pct >= trade.minConfidencePct) {
+          return (
+            <div
+              className={`shrink-0 px-3 py-1 text-center text-xs font-semibold ${
+                side === 'FALL'
+                  ? 'bg-amber-500/20 text-amber-200'
+                  : 'bg-cyan-500/20 text-cyan-200'
+              }`}
+            >
+              PARTIAL {side} {pct}% · {pct >= 100 ? '5/5' : `${Math.round(pct / 20)}/5`} (trade level)
+              {trade.autoEnabled ? ' · auto may fire' : ''}
+            </div>
+          )
+        }
+        if (readyAlert) {
+          const near = readyAlert.near.slice(0, 2).join(' · ')
+          return (
+            <div className="shrink-0 bg-orange-600 px-3 py-1.5 text-center text-xs font-bold text-white">
+              GET READY · {readyAlert.side} {readyAlert.pct}% ({readyAlert.passed}/{readyAlert.total})
+              {' · '}alert coming — be ready
+              {near ? ` · near: ${near}` : ''}
+            </div>
+          )
+        }
+        return null
       })()}
 
       {storageWarning && <p role="alert" className="px-3 py-1 text-xs text-amber-300">{storageWarning}</p>}
@@ -140,7 +152,7 @@ export default function App() {
               onToggleSound={() => setSound((v) => !v)}
             />
           </div>
-          <ResearchPanel research={research} netWinReturn={netWinReturn} onReturnChange={setNetWinReturn} />
+          <ManualTradeBar trade={trade} />
           <details className="shrink-0 border-t border-slate-800">
             <summary className="cursor-pointer px-3 py-2 text-xs text-slate-300">
               Signal history and CSV export ({history.length})

@@ -14,7 +14,12 @@ export interface SideSetup {
   total: number
   flags: ConfirmationFlags
   labels: { key: keyof ConfirmationFlags; ok: boolean; text: string }[]
+  /** Failed conditions that are close to flipping true (for GET READY alerts). */
+  nearRemaining: { key: keyof ConfirmationFlags; text: string }[]
 }
+
+/** Pre-trade warning level (3/5). Trade still uses min confidence (default 80%). */
+export const READY_ALERT_PCT = 60
 
 export interface LiveSetupConfidence {
   ready: boolean
@@ -43,6 +48,62 @@ const FALL_LABELS: Record<keyof ConfirmationFlags, string> = {
   rsi: '30 < RSI < 48',
 }
 
+function nearRise(
+  flags: ConfirmationFlags,
+  close: number,
+  sma: number | null,
+  smaRising: boolean,
+  ao: number | null,
+  aoPrev: number | null,
+  rsi: number | null,
+  stDir: number,
+): SideSetup['nearRemaining'] {
+  const near: SideSetup['nearRemaining'] = []
+  if (!flags.supertrend && stDir === 0) near.push({ key: 'supertrend', text: 'Supertrend flat → bullish near' })
+  if (!flags.sma && sma != null) {
+    const dist = Math.abs(close - sma) / Math.max(Math.abs(sma), 1e-9)
+    if (close > sma && !smaRising) near.push({ key: 'sma', text: 'Close above SMA, slope nearly rising' })
+    else if (dist <= 0.0015) near.push({ key: 'sma', text: 'Price near SMA20' })
+  }
+  if (!flags.ao && ao != null && aoPrev != null) {
+    if (ao > 0 && !(ao > aoPrev)) near.push({ key: 'ao', text: 'AO above 0, almost rising' })
+    else if (ao <= 0 && ao > -Math.abs(aoPrev || 0.01) * 0.5) near.push({ key: 'ao', text: 'AO near zero (bullish)' })
+  }
+  if (!flags.rsi && rsi != null) {
+    if (rsi >= 49 && rsi <= 52) near.push({ key: 'rsi', text: `RSI ${rsi.toFixed(1)} near >52` })
+    else if (rsi >= 70 && rsi <= 73) near.push({ key: 'rsi', text: `RSI ${rsi.toFixed(1)} near <70` })
+  }
+  return near
+}
+
+function nearFall(
+  flags: ConfirmationFlags,
+  close: number,
+  sma: number | null,
+  smaFalling: boolean,
+  ao: number | null,
+  aoPrev: number | null,
+  rsi: number | null,
+  stDir: number,
+): SideSetup['nearRemaining'] {
+  const near: SideSetup['nearRemaining'] = []
+  if (!flags.supertrend && stDir === 0) near.push({ key: 'supertrend', text: 'Supertrend flat → bearish near' })
+  if (!flags.sma && sma != null) {
+    const dist = Math.abs(close - sma) / Math.max(Math.abs(sma), 1e-9)
+    if (close < sma && !smaFalling) near.push({ key: 'sma', text: 'Close below SMA, slope nearly falling' })
+    else if (dist <= 0.0015) near.push({ key: 'sma', text: 'Price near SMA20' })
+  }
+  if (!flags.ao && ao != null && aoPrev != null) {
+    if (ao < 0 && !(ao < aoPrev)) near.push({ key: 'ao', text: 'AO below 0, almost falling' })
+    else if (ao >= 0 && ao < Math.abs(aoPrev || 0.01) * 0.5) near.push({ key: 'ao', text: 'AO near zero (bearish)' })
+  }
+  if (!flags.rsi && rsi != null) {
+    if (rsi >= 48 && rsi <= 51) near.push({ key: 'rsi', text: `RSI ${rsi.toFixed(1)} near <48` })
+    else if (rsi >= 27 && rsi <= 30) near.push({ key: 'rsi', text: `RSI ${rsi.toFixed(1)} near >30` })
+  }
+  return near
+}
+
 function scoreRise(series: EnrichedSeries, i: number): SideSetup {
   const close = series.candles[i].close
   const sma = series.sma20[i]
@@ -65,6 +126,7 @@ function scoreRise(series: EnrichedSeries, i: number): SideSetup {
     total: keys.length,
     flags,
     labels: keys.map((key) => ({ key, ok: flags[key], text: RISE_LABELS[key] })),
+    nearRemaining: nearRise(flags, close, sma, series.smaRising[i], ao, aoPrev, rsi, series.stDir[i]),
   }
 }
 
@@ -90,6 +152,7 @@ function scoreFall(series: EnrichedSeries, i: number): SideSetup {
     total: keys.length,
     flags,
     labels: keys.map((key) => ({ key, ok: flags[key], text: FALL_LABELS[key] })),
+    nearRemaining: nearFall(flags, close, sma, series.smaFalling[i], ao, aoPrev, rsi, series.stDir[i]),
   }
 }
 
@@ -108,6 +171,7 @@ export function computeLiveSetupConfidence(candles: Candle[]): LiveSetupConfiden
       labels: (Object.keys(RISE_LABELS) as (keyof ConfirmationFlags)[]).map((key) => ({
         key, ok: false, text: RISE_LABELS[key],
       })),
+      nearRemaining: [],
     },
     fall: {
       side: 'FALL', confidence: 0, passed: 0, total: 5,
@@ -115,6 +179,7 @@ export function computeLiveSetupConfidence(candles: Candle[]): LiveSetupConfiden
       labels: (Object.keys(FALL_LABELS) as (keyof ConfirmationFlags)[]).map((key) => ({
         key, ok: false, text: FALL_LABELS[key],
       })),
+      nearRemaining: [],
     },
     lean: 'NONE',
   }
