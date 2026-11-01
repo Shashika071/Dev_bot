@@ -3,47 +3,71 @@ import { INSUFFICIENT_SAMPLE } from '../lib/research/signalAnalysis'
 import { getObservationRetentionLimit } from '../lib/history/observationStore'
 
 function pct(n: number | null) {
-  return n == null ? '—' : `${(100 * n).toFixed(1)}%`
+  return n == null ? '—' : `${(100 * n).toFixed(0)}%`
 }
 
-function num(n: number | null, digits = 4) {
+function num(n: number | null, digits = 2) {
   return n == null || !Number.isFinite(n) ? '—' : n.toFixed(digits)
 }
 
-function HorizonRow({ h }: { h: HorizonStats }) {
+function SampleNote({ n }: { n: number }) {
+  if (n <= 0) return <span className="text-slate-500">no results yet</span>
+  if (n < INSUFFICIENT_SAMPLE) {
+    return (
+      <span className="text-amber-300" title={`Need about ${INSUFFICIENT_SAMPLE}+ finished moves for a stable read`}>
+        only {n} samples — keep collecting
+      </span>
+    )
+  }
+  return <span className="text-slate-500">{n} samples</span>
+}
+
+function HorizonCard({ h }: { h: HorizonStats }) {
   const c = h.counts
+  const waiting = c.pending
+  const finished = c.continuation + c.reversal + c.unchanged
   return (
-    <tr className="border-t border-slate-900/80 text-slate-300">
-      <td className="px-2 py-1 font-medium text-slate-200">{h.minutes}m</td>
-      <td className="px-2 py-1">{c.total}</td>
-      <td className="px-2 py-1">{c.completed}</td>
-      <td className="px-2 py-1">{c.pending}</td>
-      <td className="px-2 py-1">{c.unknown}</td>
-      <td className="px-2 py-1">{c.unchanged}</td>
-      <td className="px-2 py-1 text-emerald-400">{c.continuation}</td>
-      <td className="px-2 py-1 text-rose-400">{c.reversal}</td>
-      <td className="px-2 py-1" title="Among continuation + reversal only">
-        {h.insufficient ? (
-          <span className="text-amber-300">n&lt;{INSUFFICIENT_SAMPLE}</span>
-        ) : (
-          <>
-            {pct(h.continuationAmongDirectional)} / {pct(h.reversalAmongDirectional)}
-            <span className="text-slate-500"> (n={h.sampleSizeDirectional})</span>
-          </>
+    <div className="min-w-[160px] flex-1 rounded border border-slate-800 bg-[#121820] px-3 py-2">
+      <div className="text-sm font-semibold text-slate-100">After {h.minutes} minute{h.minutes === 1 ? '' : 's'}</div>
+      <p className="mt-1 text-[11px] text-slate-500">
+        {c.total} setups · {waiting} still waiting · {c.unknown} unknown
+      </p>
+
+      <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+        <span className="text-emerald-400">Went with signal</span>
+        <span className="tabular-nums text-emerald-300">{c.continuation}</span>
+        <span className="text-rose-400">Went against</span>
+        <span className="tabular-nums text-rose-300">{c.reversal}</span>
+        <span className="text-slate-400">No move</span>
+        <span className="tabular-nums text-slate-300">{c.unchanged}</span>
+      </div>
+
+      <div className="mt-2 border-t border-slate-800 pt-2">
+        <div className="text-[11px] text-slate-400">With-signal rate</div>
+        <div className="text-lg font-semibold tabular-nums text-slate-100">
+          {pct(h.continuationAmongDirectional)}
+        </div>
+        <div className="text-[11px]">
+          <SampleNote n={h.sampleSizeDirectional} />
+        </div>
+        {h.sampleSizeDirectional > 0 && (
+          <p className="mt-1 text-[11px] text-slate-500">
+            Against-signal {pct(h.reversalAmongDirectional)} · avg move {num(h.avgSignedMove)} ({num(h.avgSignedMoveInAtr, 2)} ATR)
+          </p>
         )}
-      </td>
-      <td className="px-2 py-1">{num(h.avgSignedMove)} / {num(h.avgSignedMoveInAtr, 3)} ATR</td>
-      <td className="px-2 py-1 text-slate-400">
-        {h.descriptiveWilson
-          ? `${pct(h.descriptiveWilson[0])}–${pct(h.descriptiveWilson[1])}`
-          : '—'}
-      </td>
-      <td className="px-2 py-1 text-slate-400" title="Matched 50/50 random direction">
-        {h.randomSampleSizeDirectional < INSUFFICIENT_SAMPLE
-          ? `n&lt;${INSUFFICIENT_SAMPLE}`
-          : `${pct(h.randomContinuationAmongDirectional)} (n=${h.randomSampleSizeDirectional})`}
-      </td>
-    </tr>
+        {finished === 0 && waiting > 0 && (
+          <p className="mt-1 text-[11px] text-amber-200/80">
+            Waiting up to {h.minutes}m after each setup — leave the page open.
+          </p>
+        )}
+      </div>
+
+      {h.randomSampleSizeDirectional > 0 && (
+        <p className="mt-2 text-[10px] text-slate-500" title="Same times, coin-flip direction">
+          Coin-flip reference: {pct(h.randomContinuationAmongDirectional)} with-signal
+        </p>
+      )}
+    </div>
   )
 }
 
@@ -57,11 +81,11 @@ function BreakdownTable({ title, rows }: { title: string; rows: BreakdownRow[] }
           <thead className="text-slate-500">
             <tr>
               <th className="px-2 py-1">Group</th>
-              <th className="px-2 py-1">n</th>
-              <th className="px-2 py-1">1m cont%</th>
-              <th className="px-2 py-1">3m cont%</th>
-              <th className="px-2 py-1">5m cont%</th>
-              <th className="px-2 py-1">7m cont%</th>
+              <th className="px-2 py-1">Setups</th>
+              <th className="px-2 py-1">1m</th>
+              <th className="px-2 py-1">3m</th>
+              <th className="px-2 py-1">5m</th>
+              <th className="px-2 py-1">7m</th>
             </tr>
           </thead>
           <tbody>
@@ -70,14 +94,22 @@ function BreakdownTable({ title, rows }: { title: string; rows: BreakdownRow[] }
                 <td className="px-2 py-1">{row.label}</td>
                 <td className="px-2 py-1">{row.n}</td>
                 {row.horizons.map((h) => (
-                  <td key={h.minutes} className="px-2 py-1">
-                    {h.insufficient ? `n&lt;${INSUFFICIENT_SAMPLE}` : pct(h.continuationAmongDirectional)}
+                  <td key={h.minutes} className="px-2 py-1 tabular-nums">
+                    {h.sampleSizeDirectional <= 0
+                      ? '—'
+                      : (
+                        <span title={h.insufficient ? `Only ${h.sampleSizeDirectional} samples` : undefined}>
+                          {pct(h.continuationAmongDirectional)}
+                          {h.insufficient ? '*' : ''}
+                        </span>
+                      )}
                   </td>
                 ))}
               </tr>
             ))}
           </tbody>
         </table>
+        <p className="px-2 pt-1 text-[10px] text-slate-500">* = fewer than {INSUFFICIENT_SAMPLE} finished moves — treat as early look only.</p>
       </div>
     </details>
   )
@@ -101,7 +133,7 @@ export function SignalAnalysisPanel({
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <strong className="text-slate-200">Signal analysis</strong>
           <span>
-            {report.totalObservations} observations · {report.pendingObservations} pending · cap {limit}
+            {report.totalObservations} setups recorded · {report.pendingObservations} still timing · saved up to {limit}
           </span>
         </div>
         <div className="flex gap-2">
@@ -110,14 +142,14 @@ export function SignalAnalysisPanel({
             onClick={onExport}
             className="rounded bg-slate-800 px-2 py-1 text-xs text-slate-200 hover:bg-slate-700"
           >
-            Export analysis CSV
+            Export CSV
           </button>
           <button
             type="button"
             onClick={onClearCompleted}
             className="rounded bg-slate-800 px-2 py-1 text-xs text-slate-200 hover:bg-slate-700"
           >
-            Clear completed
+            Clear finished
           </button>
         </div>
       </div>
@@ -126,59 +158,39 @@ export function SignalAnalysisPanel({
         <p role="alert" className="mt-1 text-amber-300">{storageWarning}</p>
       )}
 
-      <p className="mt-1 text-amber-200/80">
-        Public-tick research when live confidence first hits the trade threshold (default 80% = 4/5 conditions).
-        Not a broker fill and not an automatic trading rule change.
+      <p className="mt-1 max-w-3xl text-[11px] leading-relaxed text-slate-400">
+        Simple idea: when the bot reaches trade-level confidence (usually 80% = 4 of 5 conditions),
+        we watch the public price 1, 3, 5 and 7 minutes later.
+        <span className="text-emerald-400/90"> “Went with signal”</span> means price moved the same way as RISE/FALL.
+        <span className="text-rose-400/90"> “Went against”</span> means the opposite.
+        This is research only — not a trade result and not a win-rate promise.
       </p>
 
       {report.totalObservations === 0 ? (
         <p className="mt-2 text-slate-500">
-          No observations yet. Leave the chart open on READY; each new ≥threshold setup is recorded once per candle and direction.
+          Nothing recorded yet. Keep the chart open on READY. Each new high-confidence setup is saved once per minute candle.
         </p>
       ) : (
         <>
-          <div className="mt-2 overflow-auto">
-            <table className="w-full min-w-[960px] text-left text-[11px]">
-              <thead className="sticky top-0 bg-[#121820] text-slate-500">
-                <tr>
-                  <th className="px-2 py-1">Horizon</th>
-                  <th className="px-2 py-1">Total</th>
-                  <th className="px-2 py-1">Done</th>
-                  <th className="px-2 py-1">Pending</th>
-                  <th className="px-2 py-1">Unknown</th>
-                  <th className="px-2 py-1">Flat</th>
-                  <th className="px-2 py-1">Cont.</th>
-                  <th className="px-2 py-1">Rev.</th>
-                  <th className="px-2 py-1">Cont% / Rev%</th>
-                  <th className="px-2 py-1">Avg move / ATR</th>
-                  <th className="px-2 py-1">Desc. Wilson</th>
-                  <th className="px-2 py-1">Random 50/50 cont%</th>
-                </tr>
-              </thead>
-              <tbody>
-                {report.byHorizon.map((h) => (
-                  <HorizonRow key={h.minutes} h={h} />
-                ))}
-              </tbody>
-            </table>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {report.byHorizon.map((h) => (
+              <HorizonCard key={h.minutes} h={h} />
+            ))}
           </div>
 
-          <BreakdownTable title="By direction (RISE vs FALL)" rows={report.byDirection} />
-          <BreakdownTable title="By missing condition combination" rows={report.byConditionKey} />
-          <BreakdownTable title="Four-of-five vs five-of-five" rows={report.byScoreBand} />
-          <BreakdownTable title="By last completed candle size vs ATR" rows={report.byCandleSize} />
+          <BreakdownTable title="RISE vs FALL" rows={report.byDirection} />
+          <BreakdownTable title="Which condition was missing" rows={report.byConditionKey} />
+          <BreakdownTable title="4/5 vs 5/5 setups" rows={report.byScoreBand} />
+          <BreakdownTable title="Candle size vs ATR (research groups only)" rows={report.byCandleSize} />
 
           <details className="mt-2">
-            <summary className="cursor-pointer text-slate-300">How to read this</summary>
-            <ul className="mt-1 list-disc space-y-1 pl-4">
-              {report.notes.map((n) => (
-                <li key={n}>{n}</li>
-              ))}
-              <li>
-                Horizons use the first valid tick at or after 1/3/5/7 minutes, at most 5s late.
-                Gaps, disconnects, and reloads become unknown — they are not counted as losses.
-              </li>
-              <li>No “best setup” is recommended automatically. Small percentage gaps are not significance claims.</li>
+            <summary className="cursor-pointer text-slate-300">More detail</summary>
+            <ul className="mt-1 list-disc space-y-1 pl-4 text-[11px]">
+              <li>80% means 4 of 5 conditions passed — not “80% chance to win”.</li>
+              <li>With-signal % uses only “with” + “against” (flat / waiting / unknown are left out).</li>
+              <li>Unknown = feed gap, disconnect, or page reload — not counted as a loss.</li>
+              <li>Coin-flip reference uses the same times with a random direction; near 50% is expected.</li>
+              <li>Do not pick a “best” group from a tiny sample. Wait for more finished moves.</li>
             </ul>
           </details>
         </>
