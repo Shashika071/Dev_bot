@@ -1,25 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { MarketFeed, SIGNAL_WINDOW_SECONDS, type MarketState } from '../lib/deriv/marketFeed'
-import { getStorageError, loadHistory, saveHistory } from '../lib/history/signalStore'
-import {
-  exportObservationsCsv,
-  getObservationStorageError,
-  getObservationRetentionLimit,
-  loadObservations,
-  saveObservations,
-} from '../lib/history/observationStore'
-import { advancePaper, startPaper } from '../lib/history/paperTracker'
 import { evaluateAll } from '../lib/strategy/signalEngine'
 import { computeLiveSetupConfidence, READY_ALERT_PCT } from '../lib/strategy/liveConfidence'
-import { summarize } from '../lib/research/statistics'
-import { analyzeSignalObservations } from '../lib/research/signalAnalysis'
-import {
-  advanceObservations,
-  clearCompletedObservations,
-  collectThresholdObservations,
-  type SignalObservation,
-} from '../lib/research/signalObservation'
-import type { Candle, SignalEvaluation, SignalHistoryRow } from '../lib/types'
+import type { SignalEvaluation } from '../lib/types'
 import type { AutoTradeSignal } from './useAutoTrade'
 
 export type ReadyAlert = {
@@ -99,23 +82,13 @@ export function useMarketAndSignals(
   minConfidencePct = 80,
 ) {
   const [market, setMarket] = useState<MarketState | null>(null)
-  const [history, setHistory] = useState(() => advancePaper(loadHistory(), null, false))
-  const rowsRef = useRef(history)
-  const [observations, setObservations] = useState<SignalObservation[]>(() =>
-    advanceObservations(loadObservations(), null, false),
-  )
-  const observationsRef = useRef(observations)
   const [evaluations, setEvaluations] = useState<SignalEvaluation[]>([])
-  const [closedCandles, setClosedCandles] = useState<Candle[]>([])
   const [liveSignal, setLiveSignal] = useState<SignalEvaluation | null>(null)
   const [readyAlert, setReadyAlert] = useState<ReadyAlert | null>(null)
   const [sound, setSound] = useState(() => (import.meta.env.VITE_SOUND_ALERTS ?? 'true') !== 'false')
   const soundRef = useRef(sound)
   const onTradeRef = useRef(onTradeSignal)
   const minConfRef = useRef(minConfidencePct)
-  const [storageWarning, setStorageWarning] = useState<string | null>(null)
-  const [observationStorageWarning, setObservationStorageWarning] = useState<string | null>(null)
-  const [netWinReturn, setNetWinReturn] = useState(0.8)
 
   useEffect(() => { soundRef.current = sound }, [sound])
   useEffect(() => { onTradeRef.current = onTradeSignal }, [onTradeSignal])
@@ -126,20 +99,11 @@ export function useMarketAndSignals(
     let evaluationKey = ''
     let currentEvals: SignalEvaluation[] = []
     let expiresAt = 0
-    // Keep deduplication for this session even if the visible history is cleared.
-    const notified = new Set(rowsRef.current.map((row) => row.id))
-    const observedIds = new Set(observationsRef.current.map((row) => row.id))
+    const notified = new Set<string>()
     const sounded80 = new Set<string>()
     const sounded60 = new Set<string>()
-    saveHistory(rowsRef.current)
-    saveObservations(observationsRef.current)
     const unsubscribe = feed.subscribe((state, event) => {
       setMarket({ ...state })
-      const tick = state.lastTickEpoch != null && state.lastPrice != null
-        ? { epoch: state.lastTickEpoch, quote: state.lastPrice, symbol: state.symbol } : null
-      const feedHealthy = state.ready && state.status === 'CONNECTED'
-      let rows = advancePaper(rowsRef.current, tick, feedHealthy)
-      let obs = advanceObservations(observationsRef.current, tick, feedHealthy)
       if (!state.ready || Date.now() / 1000 > expiresAt) setLiveSignal(null)
 
       const key = `${state.ready}:${state.lastConfirmedCandleTime}:${state.candles[0]?.time}`
@@ -147,25 +111,14 @@ export function useMarketAndSignals(
         const closed = state.candles.filter((c) => c.isClosed)
         currentEvals = evaluateAll(closed)
         setEvaluations(currentEvals)
-        setClosedCandles(closed)
       }
       evaluationKey = key
-      if (state.ready && tick && event?.type === 'candle_close') {
+      if (state.ready && event?.type === 'candle_close') {
         const ev = currentEvals.at(-1)
         if (ev && ev.time === event.candle.time && ev.rawUt !== 'NONE') {
           const id = `${ev.time}:${ev.rawUt}:${ev.final}`
           if (!notified.has(id)) {
             notified.add(id)
-            const row: SignalHistoryRow = {
-              id, timestamp: ev.time, notifyEpoch: tick.epoch,
-              signal: ev.isQualified ? ev.final : ev.rawUt === 'BUY' ? 'UT_BUY_REJECTED' : 'UT_SELL_REJECTED',
-              candleClose: ev.close, notifyPrice: tick.quote, stDir: ev.stDir,
-              smaDir: ev.smaRising ? 'BULLISH' : ev.smaFalling ? 'BEARISH' : 'FLAT',
-              ao: ev.ao, rsi: ev.rsi, connection: state.status, failures: ev.failures,
-              isQualified: ev.isQualified,
-              paper: ev.isQualified ? startPaper(tick.epoch, tick.quote) : undefined,
-            }
-            rows = [...rows, row].slice(-2000)
             if (ev.isQualified) {
               expiresAt = ev.time + 60 + SIGNAL_WINDOW_SECONDS
               setLiveSignal(ev)
@@ -177,26 +130,9 @@ export function useMarketAndSignals(
 
       // Auto-trade: confidence ≥ min (default 80%) — no UT required.
       // Uses live setup on the current minute; once per candle side.
-      // Signal analysis records the same threshold setups for research only.
       if (state.ready) {
         const setup = computeLiveSetupConfidence(state.candles)
         if (setup.ready && setup.candleTime != null) {
-          if (tick) {
-            const before = obs
-            obs = collectThresholdObservations(obs, {
-              setup,
-              minConfidence: minConfRef.current / 100,
-              tick,
-              receiptEpoch: Date.now() / 1000,
-              symbol: state.symbol,
-              candles: state.candles,
-              seenIds: observedIds,
-            })
-            if (obs !== before) {
-              for (const row of obs) observedIds.add(row.id)
-            }
-          }
-
           const rise = setup.rise.confidence
           const fall = setup.fall.confidence
           let side: 'RISE' | 'FALL' | null = null
@@ -272,41 +208,10 @@ export function useMarketAndSignals(
       } else if (!state.ready) {
         setReadyAlert(null)
       }
-
-      if (rows !== rowsRef.current) {
-        rowsRef.current = rows
-        setHistory(rows)
-        saveHistory(rows)
-      }
-      if (obs !== observationsRef.current) {
-        observationsRef.current = obs
-        setObservations(obs)
-        saveObservations(obs)
-      }
-      setStorageWarning(getStorageError())
-      setObservationStorageWarning(getObservationStorageError())
     })
     feed.start()
     return () => { unsubscribe(); feed.stop() }
   }, [])
-
-  const research = useMemo(() => {
-    const byTime = new Map(closedCandles.map((c) => [c.time, c]))
-    const outcomes: boolean[] = []
-    for (const ev of evaluations) {
-      const next = byTime.get(ev.time + 60)
-      if (!ev.isQualified || !next) continue
-      outcomes.push(ev.final === 'RISE' ? next.close > ev.close : next.close < ev.close)
-    }
-    const observed = history.filter((r) => r.paper?.status === 'WIN' || r.paper?.status === 'LOSS')
-    return {
-      bars: closedCandles.length,
-      historical: summarize(outcomes, netWinReturn),
-      paper: summarize(observed.map((r) => r.paper?.status === 'WIN'), netWinReturn),
-      pending: history.filter((r) => r.paper?.status === 'PENDING').length,
-      invalid: history.filter((r) => r.paper?.status === 'INVALID').length,
-    }
-  }, [closedCandles, evaluations, history, netWinReturn])
 
   // Recompute every tick so forming-candle conditions stay live.
   const liveSetup = useMemo(
@@ -314,38 +219,10 @@ export function useMarketAndSignals(
     [market?.candles, market?.lastPrice, market?.lastTickEpoch],
   )
 
-  function clearHistory() {
-    // Preserve in-flight observations so clearing the table cannot erase losing positions.
-    const pending = rowsRef.current.filter((row) => row.paper?.status === 'PENDING')
-    rowsRef.current = pending
-    setHistory(pending)
-    saveHistory(pending)
-    setStorageWarning(getStorageError())
-  }
-
-  const signalAnalysis = useMemo(
-    () => analyzeSignalObservations(observations, getObservationRetentionLimit()),
-    [observations],
-  )
-
-  function clearCompletedAnalysis() {
-    const pending = clearCompletedObservations(observationsRef.current)
-    observationsRef.current = pending
-    setObservations(pending)
-    saveObservations(pending)
-    setObservationStorageWarning(getObservationStorageError())
-  }
-
-  function exportAnalysisCsv() {
-    return exportObservationsCsv(observationsRef.current)
-  }
-
   return {
     market, evaluations, latestEval: evaluations.at(-1) ?? null, liveSignal,
     readyAlert,
-    history, clearHistory, sound, setSound, research, storageWarning, netWinReturn, setNetWinReturn,
+    sound, setSound,
     liveSetup,
-    observations, signalAnalysis, observationStorageWarning,
-    clearCompletedAnalysis, exportAnalysisCsv,
   }
 }

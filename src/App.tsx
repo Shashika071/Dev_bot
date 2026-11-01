@@ -3,10 +3,8 @@ import { TradingChart } from './components/TradingChart'
 import { SignalPanel } from './components/SignalPanel'
 import { useMarketAndSignals } from './hooks/useMarketAndSignals'
 import { useAutoTrade } from './hooks/useAutoTrade'
-import { SignalHistory } from './components/SignalHistory'
 import { AutoTradePanel } from './components/AutoTradePanel'
 import { ManualTradeBar } from './components/ManualTradeBar'
-import { SignalAnalysisPanel } from './components/SignalAnalysisPanel'
 
 const SYMBOL = import.meta.env.VITE_DERIV_SYMBOL || 'R_100'
 const TAB_KEY = 'v100_ui_tab_v1'
@@ -32,9 +30,8 @@ export default function App() {
     } catch { /* ignore */ }
   }
   const {
-    market, evaluations, latestEval, liveSignal, readyAlert, sound, setSound, history, clearHistory,
-    storageWarning, liveSetup,
-    signalAnalysis, observationStorageWarning, clearCompletedAnalysis, exportAnalysisCsv,
+    market, evaluations, latestEval, liveSignal, readyAlert, sound, setSound,
+    liveSetup,
   } = useMarketAndSignals(trade.onTradeSignal, trade.minConfidencePct)
 
   const tradeConnected = trade.status === 'CONNECTED'
@@ -132,8 +129,6 @@ export default function App() {
         return null
       })()}
 
-      {storageWarning && <p role="alert" className="px-3 py-1 text-xs text-amber-300">{storageWarning}</p>}
-
       {tab === 'chart' ? (
         <>
           <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_300px]">
@@ -155,31 +150,6 @@ export default function App() {
             />
           </div>
           <ManualTradeBar trade={trade} />
-          <details className="shrink-0 border-t border-slate-800" open>
-            <summary className="cursor-pointer px-3 py-2 text-xs text-slate-300">
-              Signal analysis ({signalAnalysis.totalObservations})
-            </summary>
-            <SignalAnalysisPanel
-              report={signalAnalysis}
-              storageWarning={observationStorageWarning}
-              onExport={() => {
-                const blob = new Blob([exportAnalysisCsv()], { type: 'text/csv' })
-                const url = URL.createObjectURL(blob)
-                const a = document.createElement('a')
-                a.href = url
-                a.download = 'v100_signal_analysis.csv'
-                a.click()
-                URL.revokeObjectURL(url)
-              }}
-              onClearCompleted={clearCompletedAnalysis}
-            />
-          </details>
-          <details className="shrink-0 border-t border-slate-800">
-            <summary className="cursor-pointer px-3 py-2 text-xs text-slate-300">
-              Signal history and CSV export ({history.length})
-            </summary>
-            <div className="h-48"><SignalHistory rows={history} onClear={clearHistory} /></div>
-          </details>
         </>
       ) : (
         <div className="min-h-0 flex-1 overflow-auto">
