@@ -54,6 +54,7 @@ export function useBrowserResearch(market: MarketState | null) {
     stateRef.current = next
     setState(next)
     saveBrowserResearch(next)
+    return next
   }
 
   function resume() {
@@ -61,6 +62,7 @@ export function useBrowserResearch(market: MarketState | null) {
     stateRef.current = next
     setState(next)
     saveBrowserResearch(next)
+    return next
   }
 
   function stopEntries() {
@@ -68,6 +70,7 @@ export function useBrowserResearch(market: MarketState | null) {
     stateRef.current = next
     setState(next)
     saveBrowserResearch(next)
+    return next
   }
 
   function startConfirmation(ids?: StrategyId[]) {
@@ -77,6 +80,15 @@ export function useBrowserResearch(market: MarketState | null) {
     stateRef.current = next
     setState(next)
     saveBrowserResearch(next)
+    return next
+  }
+
+  function resetLocal() {
+    const next = createInitialState()
+    stateRef.current = next
+    setState(next)
+    saveBrowserResearch(next)
+    return next
   }
 
   function downloadCsv() {
@@ -118,6 +130,7 @@ export function useBrowserResearch(market: MarketState | null) {
     resume,
     stopEntries,
     startConfirmation,
+    resetLocal,
     downloadCsv,
     downloadReport,
     downloadSummary,

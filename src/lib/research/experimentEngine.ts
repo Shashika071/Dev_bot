@@ -94,8 +94,8 @@ export function createInitialState(
   }
 }
 
+/** Start (or restart) a 72h discovery run. Always creates a fresh collecting state. */
 export function startDiscovery(state: ExperimentState, nowMs: number): ExperimentState {
-  if (state.stage !== 'not_started' && state.stage !== 'completed') return state
   const startedAt = Math.floor(nowMs / 1000)
   return {
     ...createInitialState('discovery', state.enabledStrategyIds, state.contract),

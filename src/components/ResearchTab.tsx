@@ -27,6 +27,15 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
   const [busy, setBusy] = useState(false)
   const [expanded, setExpanded] = useState<string | null>(null)
   const [generatedAt, setGeneratedAt] = useState<number | null>(null)
+  const [flash, setFlash] = useState<string | null>(null)
+
+  function note(msg: string) {
+    setFlash(msg)
+    window.setTimeout(() => setFlash(null), 4000)
+  }
+
+  const btn =
+    'cursor-pointer rounded px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40'
 
   useEffect(() => {
     let cancelled = false
@@ -56,7 +65,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
     }
   }, [])
 
-  async function runRemote(path: string, body?: unknown) {
+  async function runRemote(path: string, body?: unknown, okMsg?: string) {
     setBusy(true)
     try {
       await postResearchControl(path, body)
@@ -64,6 +73,9 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
       setRemote(status)
       setRemoteLive(true)
       setMode('server')
+      note(okMsg ?? `OK — stage: ${status?.state?.stage ?? 'updated'}`)
+    } catch (e) {
+      note(e instanceof Error ? e.message : 'Control request failed')
     } finally {
       setBusy(false)
     }
@@ -77,6 +89,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
   const registryCount = usingServer
     ? (remote?.registryCount ?? 0)
     : browser.registry.length
+  const contract = (st as { contract?: { contractType: string; barrierAbs: number; duration: number; durationUnit: string; paperStake: number; currency: string } } | undefined)?.contract
 
   return (
     <div className="mx-auto max-w-6xl space-y-4 p-4 text-xs text-slate-300">
@@ -112,10 +125,13 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
         </p>
       )}
 
-      <section className="rounded border border-slate-800 bg-[#0c1118] p-3">
+      <section className="relative z-10 rounded border border-slate-800 bg-[#0c1118] p-3">
         <div className="font-medium text-slate-200">Experiment status</div>
         <div className="mt-2 grid gap-1 sm:grid-cols-2 lg:grid-cols-3">
-          <div>Stage: <span className="text-slate-100">{st?.stage ?? '—'}</span></div>
+          <div>
+            Stage:{' '}
+            <span className="font-semibold text-emerald-300">{st?.stage ?? '—'}</span>
+          </div>
           <div>Mode: <span className="text-slate-100">{(st as { mode?: string } | undefined)?.mode ?? '—'}</span></div>
           <div>Registry: <span className="text-slate-100">{registryCount}/22</span></div>
           <div>Start: {ago((st as { startedAt?: number | null } | undefined)?.startedAt)}</div>
@@ -134,27 +150,111 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
           </div>
         </div>
 
-        <div className="mt-3 flex flex-wrap gap-2">
+        {contract && (
+          <p className="mt-2 text-[11px] text-slate-500">
+            Frozen paper contract: {contract.contractType} barrier±{contract.barrierAbs}{' '}
+            {contract.duration}{contract.durationUnit} stake={contract.paperStake} {contract.currency}
+          </p>
+        )}
+
+        <div className="relative z-10 mt-3 flex flex-wrap gap-2">
           {usingServer ? (
             <>
-              <button type="button" disabled={busy} onClick={() => void runRemote('/control/start-discovery')} className="rounded bg-emerald-800 px-2 py-1 text-emerald-100 disabled:opacity-40">Start 72h discovery</button>
-              <button type="button" disabled={busy} onClick={() => void runRemote('/control/resume')} className="rounded bg-slate-700 px-2 py-1 disabled:opacity-40">Resume</button>
-              <button type="button" disabled={busy} onClick={() => void runRemote('/control/stop-entries')} className="rounded bg-slate-700 px-2 py-1 disabled:opacity-40">Stop new entries</button>
-              <button type="button" disabled={busy} onClick={() => void runRemote('/control/start-confirmation', { strategyIds: remote?.state?.enabledStrategyIds })} className="rounded bg-slate-700 px-2 py-1 disabled:opacity-40">Start confirmation</button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void runRemote('/control/start-discovery', undefined, 'Discovery started (server)')}
+                className={`${btn} bg-emerald-600 text-white hover:bg-emerald-500`}
+              >
+                {busy ? 'Working…' : 'Start 72h discovery'}
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void runRemote('/control/resume', undefined, 'Resumed collecting')}
+                className={`${btn} bg-slate-600 text-slate-100 hover:bg-slate-500`}
+              >
+                Resume
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void runRemote('/control/stop-entries', undefined, 'Stopped new entries')}
+                className={`${btn} bg-slate-600 text-slate-100 hover:bg-slate-500`}
+              >
+                Stop new entries
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() =>
+                  void runRemote(
+                    '/control/start-confirmation',
+                    { strategyIds: remote?.state?.enabledStrategyIds },
+                    'Confirmation started',
+                  )
+                }
+                className={`${btn} bg-slate-600 text-slate-100 hover:bg-slate-500`}
+              >
+                Start confirmation (same IDs)
+              </button>
             </>
           ) : (
             <>
-              <button type="button" onClick={() => browser.start()} className="rounded bg-emerald-800 px-2 py-1 text-emerald-100">Start 72h discovery</button>
-              <button type="button" onClick={() => browser.resume()} className="rounded bg-slate-700 px-2 py-1">Resume</button>
-              <button type="button" onClick={() => browser.stopEntries()} className="rounded bg-slate-700 px-2 py-1">Stop new entries</button>
-              <button type="button" onClick={() => browser.startConfirmation()} className="rounded bg-slate-700 px-2 py-1">Start confirmation</button>
+              <button
+                type="button"
+                onClick={() => {
+                  const next = browser.start()
+                  note(`Discovery started — stage: ${next.stage}`)
+                }}
+                className={`${btn} bg-emerald-600 text-white hover:bg-emerald-500`}
+              >
+                Start 72h discovery
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const next = browser.resume()
+                  note(`Resumed — stage: ${next.stage}`)
+                }}
+                className={`${btn} bg-slate-600 text-slate-100 hover:bg-slate-500`}
+              >
+                Resume
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const next = browser.stopEntries()
+                  note(`Stopped new entries — stage: ${next.stage}`)
+                }}
+                className={`${btn} bg-slate-600 text-slate-100 hover:bg-slate-500`}
+              >
+                Stop new entries
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const next = browser.startConfirmation()
+                  note(`Confirmation started — stage: ${next.stage}`)
+                }}
+                className={`${btn} bg-slate-600 text-slate-100 hover:bg-slate-500`}
+              >
+                Start confirmation (same IDs)
+              </button>
             </>
           )}
         </div>
+
+        {flash && (
+          <p className="mt-2 rounded border border-emerald-700/60 bg-emerald-950/50 px-2 py-1.5 text-[11px] text-emerald-200">
+            {flash}
+          </p>
+        )}
+
         <p className="mt-2 text-[11px] text-slate-500">
           {usingServer
             ? 'Server collector is running on the VPS. You can close this tab; research continues.'
-            : 'Browser fallback: keep this tab open, or redeploy with the research container for always-on.'}
+            : 'For a full 72h on the deployed site: leave this browser open (or reopen and click Resume). Data is stored in this browser only. Auto trade can stay OFF.'}
         </p>
       </section>
 

@@ -28,6 +28,16 @@ describe('experiment engine', () => {
     expect(state.endsAt).toBe(endsAt)
   })
 
+  it('Start always begins a fresh discovery even if already collecting', () => {
+    const t0 = 1_700_000_000_000
+    let state = startDiscovery(createInitialState(), t0)
+    state = { ...state, observations: [{ id: 'x' } as never], stage: 'collecting' }
+    const next = startDiscovery(state, t0 + 60_000)
+    expect(next.stage).toBe('collecting')
+    expect(next.observations).toEqual([])
+    expect(next.endsAt).toBe(Math.floor((t0 + 60_000) / 1000) + DISCOVERY_HOURS * 3600)
+  })
+
   it('lists candidates for closed strategies without throwing', () => {
     const state = createInitialState()
     const candles = closedFixtures(300)

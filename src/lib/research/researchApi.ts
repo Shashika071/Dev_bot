@@ -25,13 +25,25 @@ export async function fetchResearchHealth(signal?: AbortSignal) {
 }
 
 export async function postResearchControl(path: string, body?: unknown) {
-  const res = await fetch(`${RESEARCH_API_BASE}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined,
-  })
-  if (!res.ok) throw new Error(`Research control failed ${res.status}`)
-  return res.json()
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), 12_000)
+  try {
+    const res = await fetch(`${RESEARCH_API_BASE}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: ctrl.signal,
+    })
+    if (!res.ok) throw new Error(`Research control failed ${res.status}`)
+    return res.json()
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      throw new Error('Research control timed out — collector unreachable')
+    }
+    throw e
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 export function researchExportUrl(kind: 'csv' | 'report' | 'summary') {
