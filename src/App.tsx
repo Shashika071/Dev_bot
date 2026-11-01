@@ -5,15 +5,18 @@ import { useMarketAndSignals } from './hooks/useMarketAndSignals'
 import { useAutoTrade } from './hooks/useAutoTrade'
 import { AutoTradePanel } from './components/AutoTradePanel'
 import { ManualTradeBar } from './components/ManualTradeBar'
+import { ResearchTab } from './components/ResearchTab'
 
 const SYMBOL = import.meta.env.VITE_DERIV_SYMBOL || 'R_100'
 const TAB_KEY = 'v100_ui_tab_v1'
 
-type TabId = 'chart' | 'trade'
+type TabId = 'chart' | 'trade' | 'research'
 
 function loadTab(): TabId {
   try {
-    return localStorage.getItem(TAB_KEY) === 'trade' ? 'trade' : 'chart'
+    const v = localStorage.getItem(TAB_KEY)
+    if (v === 'trade' || v === 'research') return v
+    return 'chart'
   } catch {
     return 'chart'
   }
@@ -50,6 +53,7 @@ export default function App() {
               <span className="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-emerald-400" title="Auto trade ON" />
             )}
           </TabButton>
+          <TabButton active={tab === 'research'} onClick={() => selectTab('research')}>Research</TabButton>
         </nav>
 
         <div className="ml-auto flex items-center gap-3 text-xs tabular-nums">
@@ -151,9 +155,13 @@ export default function App() {
           </div>
           <ManualTradeBar trade={trade} />
         </>
-      ) : (
+      ) : tab === 'trade' ? (
         <div className="min-h-0 flex-1 overflow-auto">
           <AutoTradePanel trade={trade} />
+        </div>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-auto">
+          <ResearchTab />
         </div>
       )}
     </div>

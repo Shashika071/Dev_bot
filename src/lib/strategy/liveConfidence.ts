@@ -5,6 +5,7 @@
 import type { Candle, ConfirmationFlags } from '../types'
 import { closedSegments } from '../deriv/candles'
 import { enrich, WARMUP_BARS, type EnrichedSeries } from './signalEngine'
+import { countPassed, fallFlagsAt, riseFlagsAt } from './conditionFlags'
 
 export interface SideSetup {
   side: 'RISE' | 'FALL'
@@ -110,15 +111,9 @@ function scoreRise(series: EnrichedSeries, i: number): SideSetup {
   const ao = series.ao[i]
   const aoPrev = i > 0 ? series.ao[i - 1] : null
   const rsi = series.rsi[i]
-  const flags: ConfirmationFlags = {
-    ut: series.utBuy[i] && !series.utSell[i],
-    supertrend: series.stDir[i] === 1,
-    sma: sma != null && close > sma && series.smaRising[i],
-    ao: ao != null && aoPrev != null && ao > 0 && ao > aoPrev,
-    rsi: rsi != null && rsi > 52 && rsi < 70,
-  }
+  const flags = riseFlagsAt(series, i)
   const keys = Object.keys(flags) as (keyof ConfirmationFlags)[]
-  const passed = keys.filter((k) => flags[k]).length
+  const passed = countPassed(flags)
   return {
     side: 'RISE',
     confidence: passed / keys.length,
@@ -136,15 +131,9 @@ function scoreFall(series: EnrichedSeries, i: number): SideSetup {
   const ao = series.ao[i]
   const aoPrev = i > 0 ? series.ao[i - 1] : null
   const rsi = series.rsi[i]
-  const flags: ConfirmationFlags = {
-    ut: series.utSell[i] && !series.utBuy[i],
-    supertrend: series.stDir[i] === -1,
-    sma: sma != null && close < sma && series.smaFalling[i],
-    ao: ao != null && aoPrev != null && ao < 0 && ao < aoPrev,
-    rsi: rsi != null && rsi < 48 && rsi > 30,
-  }
+  const flags = fallFlagsAt(series, i)
   const keys = Object.keys(flags) as (keyof ConfirmationFlags)[]
-  const passed = keys.filter((k) => flags[k]).length
+  const passed = countPassed(flags)
   return {
     side: 'FALL',
     confidence: passed / keys.length,

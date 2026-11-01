@@ -73,6 +73,25 @@ No parameters are optimized. Once you inspect the holdout to choose a strategy, 
 
 Data endpoint: `wss://api.derivws.com/trading/v1/options/ws/public`. [Deriv candle history API](https://developers.deriv.com/docs/data/ticks-history/). [Deriv contract descriptions](https://dsmarttrader.deriv.com/explanation).
 
+## In-app Research tab (22 strategies, paper-only)
+
+The **Research** tab compares 22 locked paper strategies (B0 live forming baseline, B1/C1–C6 closed confirmations, S1–S7 patterns, T1–T3 stats, O1–O2 stochastic, N1–N2 CCI/DMI) on public R_100 data. It does **not** place trades, use your API token, or change Chart/Trade settings.
+
+```powershell
+# Terminal 1 — keep running for up to 72 hours (deadline persists across collector restarts):
+npm run research:collector
+# App — open Research tab → Start 72h discovery
+# Optional exports:
+npm run research:report
+npm run research:replay
+```
+
+Collector API is localhost-only (`http://127.0.0.1:8787`). Data lands in `research-data/`. Reports can be written under `research-output/`.
+
+**How to read results:** 80% means 4/5 conditions, not win probability. 7 minutes is the primary direction horizon. Compare completed-candle strategies to **B1**; **B0** uses forming-candle timing. Touch “quote P&L” appears only when a public proposal quote was available; otherwise it is UNAVAILABLE (tick-path hit/miss still shown). Rankings are descriptive — not statistical proof — and never auto-enable in production.
+
+Note: older `compare-filters.mjs` / `runTouchBacktest(..., filterConfig)` reports echoed filter settings but **did not apply** optional filters inside the backtest loop.
+
 ## Directional ±0.03 touch research
 
 This separate measurement asks whether the next completed minute reaches signal close +0.03 for RISE, or signal close −0.03 for FALL. It does not change the live signal rules or paper settlement metric.

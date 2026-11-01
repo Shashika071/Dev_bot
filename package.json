@@ -10,7 +10,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "oxlint",
-    "backtest": "node scripts/backtest.mjs"
+    "backtest": "node scripts/backtest.mjs",
+    "research:collector": "node scripts/research-collector.mjs",
+    "research:report": "node scripts/research-report.mjs",
+    "research:replay": "node scripts/research-replay.mjs"
   },
   "dependencies": {
     "lightweight-charts": "^5.2.1",
