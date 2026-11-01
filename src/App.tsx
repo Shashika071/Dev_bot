@@ -161,7 +161,7 @@ export default function App() {
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-auto">
-          <ResearchTab />
+          <ResearchTab market={market} />
         </div>
       )}
     </div>

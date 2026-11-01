@@ -1,6 +1,11 @@
-/** Browser client for the localhost research collector API. */
-
-export const RESEARCH_API_BASE = 'http://127.0.0.1:8787'
+/**
+ * Optional remote collector client.
+ * Deployed UI uses in-browser research by default (see useBrowserResearch).
+ * Set VITE_RESEARCH_API_URL only if you run a separate collector on a reachable host.
+ */
+export const RESEARCH_API_BASE =
+  (import.meta.env.VITE_RESEARCH_API_URL as string | undefined)?.replace(/\/$/, '')
+  || 'http://127.0.0.1:8787'
 
 export async function fetchResearchStatus(signal?: AbortSignal) {
   const res = await fetch(`${RESEARCH_API_BASE}/status`, { signal })
