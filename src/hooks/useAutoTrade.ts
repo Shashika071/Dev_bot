@@ -56,6 +56,8 @@ type StoredPrefs = {
   token: string
   accountId: string
   stake: number
+  /** When true, each trade uses the full account balance (floored to cents). */
+  useFullStake: boolean
   barrierAbs: number
   duration: number
   durationUnit: 's' | 'm' | 'h' | 'd'
@@ -72,6 +74,12 @@ type StoredPrefs = {
   currency: string
 }
 
+const MIN_STAKE = 0.35
+
+function floorStake(amount: number): number {
+  return Math.floor(amount * 100) / 100
+}
+
 export type AutoTradeSignal = {
   side: 'RISE' | 'FALL'
   confidence: number
@@ -84,6 +92,7 @@ const DEFAULT_PREFS: StoredPrefs = {
   token: '',
   accountId: '',
   stake: 1,
+  useFullStake: true,
   barrierAbs: 0.05,
   duration: 7,
   durationUnit: 'm',
@@ -107,6 +116,8 @@ function loadPrefs(): StoredPrefs {
       token: typeof p.token === 'string' ? p.token : '',
       accountId: typeof p.accountId === 'string' ? p.accountId : '',
       stake: typeof p.stake === 'number' && p.stake > 0 ? p.stake : 1,
+      // Default ON: use full balance every trade unless user explicitly turned it off.
+      useFullStake: p.useFullStake !== false,
       barrierAbs: typeof p.barrierAbs === 'number' && p.barrierAbs > 0 ? p.barrierAbs : 0.05,
       duration: typeof p.duration === 'number' && p.duration > 0 ? p.duration : 7,
       durationUnit: p.durationUnit === 's' || p.durationUnit === 'h' || p.durationUnit === 'd' ? p.durationUnit : 'm',
@@ -158,6 +169,7 @@ export function useAutoTrade(symbol: string) {
   const [accountId, setAccountId] = useState(prefs0.accountId)
   const [accounts, setAccounts] = useState<DerivAccount[]>([])
   const [stake, setStake] = useState(prefs0.stake)
+  const [useFullStake, setUseFullStake] = useState(prefs0.useFullStake)
   const [barrierAbs, setBarrierAbs] = useState(prefs0.barrierAbs)
   const [duration, setDuration] = useState(prefs0.duration)
   const [durationUnit, setDurationUnit] = useState(prefs0.durationUnit)
@@ -183,14 +195,14 @@ export function useAutoTrade(symbol: string) {
   const pendingAuto = useRef(prefs0.autoEnabled)
   const readyToPersist = useRef(false)
   const settingsRef = useRef({
-    stake, barrierAbs, duration, durationUnit, mode, cooldownSec, minConfidencePct, currency, symbol, autoEnabled,
+    stake, useFullStake, barrierAbs, duration, durationUnit, mode, cooldownSec, minConfidencePct, currency, symbol, autoEnabled,
   })
 
   useEffect(() => {
     settingsRef.current = {
-      stake, barrierAbs, duration, durationUnit, mode, cooldownSec, minConfidencePct, currency, symbol, autoEnabled,
+      stake, useFullStake, barrierAbs, duration, durationUnit, mode, cooldownSec, minConfidencePct, currency, symbol, autoEnabled,
     }
-  }, [stake, barrierAbs, duration, durationUnit, mode, cooldownSec, minConfidencePct, currency, symbol, autoEnabled])
+  }, [stake, useFullStake, barrierAbs, duration, durationUnit, mode, cooldownSec, minConfidencePct, currency, symbol, autoEnabled])
 
   useEffect(() => {
     // Skip the first paint so we never overwrite saved Auto trade ON with a false default.
@@ -203,6 +215,7 @@ export function useAutoTrade(symbol: string) {
       token,
       accountId,
       stake,
+      useFullStake,
       barrierAbs,
       duration,
       durationUnit,
@@ -216,7 +229,7 @@ export function useAutoTrade(symbol: string) {
       currency,
     })
   }, [
-    appId, token, accountId, stake, barrierAbs, duration, durationUnit, mode,
+    appId, token, accountId, stake, useFullStake, barrierAbs, duration, durationUnit, mode,
     cooldownSec, minConfidencePct, autoEnabled, wantConnected, cooldownUntil, currency,
   ])
 
@@ -453,10 +466,30 @@ export function useAutoTrade(symbol: string) {
     }
     setBusy(true)
     try {
+      let tradeStake = s.stake
+      if (s.useFullStake) {
+        const balMsg = await client.request({ balance: 1 })
+        const balObj = balMsg.balance as { balance?: number; currency?: string } | undefined
+        const bal = typeof balObj?.balance === 'number' ? balObj.balance : null
+        if (typeof balObj?.currency === 'string') setCurrency(balObj.currency)
+        if (bal == null || !(bal > 0)) throw new Error('Full stake: no account balance')
+        tradeStake = floorStake(bal)
+        setBalance(bal)
+        if (tradeStake < MIN_STAKE) {
+          throw new Error(`Full stake: balance ${tradeStake} below minimum ${MIN_STAKE}`)
+        }
+        setStake(tradeStake)
+        pushLog({
+          signal: sig.side,
+          barrier: '—',
+          ok: true,
+          message: `Full stake · using ${tradeStake} ${s.currency} (balance ${bal.toFixed(2)})`,
+        })
+      }
       const results = await placeTouchTrades(client, {
         symbol: s.symbol,
         currency: s.currency,
-        stake: s.stake,
+        stake: tradeStake,
         barrierAbs: s.barrierAbs,
         duration: s.duration,
         durationUnit: s.durationUnit,
@@ -467,7 +500,7 @@ export function useAutoTrade(symbol: string) {
           signal: sig.side,
           barrier: r.barrier,
           ok: true,
-          message: `Bought ONETOUCH · conf ${confPct}% · stake≈${r.buyPrice ?? s.stake}`,
+          message: `Bought ONETOUCH · conf ${confPct}% · stake≈${r.buyPrice ?? tradeStake}`,
           contractId: r.contractId,
         })
       }
@@ -501,6 +534,7 @@ export function useAutoTrade(symbol: string) {
     accountId, setAccountId,
     accounts,
     stake, setStake,
+    useFullStake, setUseFullStake,
     barrierAbs, setBarrierAbs,
     duration, setDuration,
     durationUnit, setDurationUnit,

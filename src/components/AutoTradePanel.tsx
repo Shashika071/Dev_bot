@@ -90,14 +90,16 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
       </div>
 
       <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-        <Field label="Stake">
+        <Field label={trade.useFullStake ? 'Stake (full balance)' : 'Stake'}>
           <input
             className="field"
             type="number"
             min={0.35}
             step={0.01}
-            value={trade.stake}
+            value={trade.useFullStake ? (trade.balance ?? trade.stake) : trade.stake}
+            disabled={trade.useFullStake}
             onChange={(e) => trade.setStake(Number(e.target.value) || 1)}
+            title={trade.useFullStake ? 'Uses full account balance on every trade' : 'Fixed stake amount'}
           />
         </Field>
         <Field label="Barrier ±">
@@ -164,6 +166,14 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
       </div>
 
       <div className="mt-2 flex flex-wrap items-center gap-2">
+        <label className="flex cursor-pointer items-center gap-1.5 rounded border border-slate-700 px-2 py-1 text-xs text-slate-300">
+          <input
+            type="checkbox"
+            checked={trade.useFullStake}
+            onChange={(e) => trade.setUseFullStake(e.target.checked)}
+          />
+          Use full balance every trade
+        </label>
         <label className="flex items-center gap-1.5 text-xs text-slate-300">
           <span>Barrier</span>
           <select
