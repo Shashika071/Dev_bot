@@ -4,7 +4,8 @@ import { computeLiveSetupConfidence } from './liveConfidence'
 
 function candles(n: number, close = 100): Candle[] {
   const out: Candle[] = []
-  let t = 1_700_000_000
+  // Must be minute-aligned (time % 60 === 0) for closedSegments validation.
+  let t = 1_700_000_040
   let c = close
   for (let i = 0; i < n; i++) {
     const open = c
