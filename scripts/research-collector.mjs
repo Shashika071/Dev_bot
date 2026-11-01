@@ -1,15 +1,16 @@
 /**
- * Localhost-only research collector for the 22-strategy paper experiment.
+ * Research collector for the 22-strategy paper experiment.
  * Public market data only. Never authenticates a trading account or sends buy.
  *
  * Usage:
  *   npm run research:collector
- *   npm run research:collector -- --id discovery-...
+ *   RESEARCH_API_HOST=0.0.0.0 npm run research:collector   # server / Docker
  */
 import { createServer as createHttpServer } from 'node:http'
 import { createServer as createViteServer } from 'vite'
 import WebSocket from 'ws'
 const PORT = Number(process.env.RESEARCH_API_PORT || 8787)
+const HOST = process.env.RESEARCH_API_HOST || '127.0.0.1'
 const SYMBOL = process.env.VITE_DERIV_SYMBOL || 'R_100'
 const PUBLIC_WS = process.env.VITE_DERIV_PUBLIC_WS || 'wss://api.derivws.com/trading/v1/options/ws/public'
 const args = process.argv.slice(2)
@@ -195,8 +196,8 @@ const api = createHttpServer(async (req, res) => {
   }
 })
 
-api.listen(PORT, '127.0.0.1', () => {
-  console.log(`[research] API http://127.0.0.1:${PORT} experiment=${experimentId} stage=${state.stage}`)
+api.listen(PORT, HOST, () => {
+  console.log(`[research] API http://${HOST}:${PORT} experiment=${experimentId} stage=${state.stage}`)
   console.log('[research] Public ticks only — no account auth, no buy orders')
 })
 

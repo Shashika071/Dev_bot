@@ -16,6 +16,7 @@ services:
     restart: unless-stopped
     depends_on:
       - frontend
+      - research
     ports:
       - "${DERIV_HTTPS_PORT:-8443}:8443"
     volumes:

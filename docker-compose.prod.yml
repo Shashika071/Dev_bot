@@ -5,10 +5,11 @@
 #     -f docker-compose.prod.yml \
 #     -f docker-compose.ssl-ports.yml \
 #     --env-file .env.prod \
-#     up -d --build --force-recreate frontend edge
+#     up -d --build --force-recreate frontend research edge
 #
 # URL: https://devbot.crexline.com:8443
 # Needs: ./certs/origin.pem + ./certs/origin.key (Cloudflare Origin Cert)
+# Research container keeps collecting after the browser tab closes.
 
 name: deriv
 
@@ -22,10 +23,31 @@ services:
         VITE_DERIV_SYMBOL: ${VITE_DERIV_SYMBOL:-R_100}
         VITE_HISTORY_COUNT: ${VITE_HISTORY_COUNT:-5000}
         VITE_SOUND_ALERTS: ${VITE_SOUND_ALERTS:-true}
+        VITE_RESEARCH_API_URL: ${VITE_RESEARCH_API_URL:-/research-api}
     restart: unless-stopped
     mem_limit: 128m
     networks:
       - deriv_net
+
+  # Keeps Research running after you close the browser tab
+  research:
+    build:
+      context: .
+      dockerfile: Dockerfile.research
+    restart: unless-stopped
+    mem_limit: 512m
+    environment:
+      RESEARCH_API_HOST: 0.0.0.0
+      RESEARCH_API_PORT: "8787"
+      VITE_DERIV_SYMBOL: ${VITE_DERIV_SYMBOL:-R_100}
+      VITE_DERIV_PUBLIC_WS: ${VITE_DERIV_PUBLIC_WS:-wss://api.derivws.com/trading/v1/options/ws/public}
+    volumes:
+      - research_data:/app/research-data
+    networks:
+      - deriv_net
+
+volumes:
+  research_data:
 
 networks:
   deriv_net:

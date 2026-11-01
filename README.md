@@ -77,17 +77,21 @@ Data endpoint: `wss://api.derivws.com/trading/v1/options/ws/public`. [Deriv cand
 
 The **Research** tab compares 22 locked paper strategies (B0 live forming baseline, B1/C1–C6 closed confirmations, S1–S7 patterns, T1–T3 stats, O1–O2 stochastic, N1–N2 CCI/DMI) on public R_100 data. It does **not** place trades, use your API token, or change Chart/Trade settings.
 
-**Deployed site (recommended):** open Research on the live site → wait for READY → **Start 72h discovery**. It uses the same public feed as Chart and saves results in **this browser** (no `127.0.0.1` collector). Keep the tab/browser available for long runs; use Resume after reopen. Auto trade can stay OFF.
+**Always-on after deploy (close tab OK):** redeploy with the `research` container. Edge proxies `/research-api/` to it. Then open Research → **Start 72h discovery**. You can close the browser; collection continues on the VPS.
 
-**Optional separate collector** (local machine / VPS, for disk JSONL + replay):
+```powershell
+docker compose -p deriv -f docker-compose.prod.yml -f docker-compose.ssl-ports.yml --env-file .env.prod up -d --build --force-recreate frontend research edge
+```
+
+**Browser fallback:** if the research container is down, Research still works in the open tab only (stops when the tab closes).
+
+**Optional local collector / reports:**
 
 ```powershell
 npm run research:collector
 npm run research:report
 npm run research:replay
 ```
-
-Collector API defaults to localhost (`http://127.0.0.1:8787`). Data lands in `research-data/`.
 
 **How to read results:** 80% means 4/5 conditions, not win probability. 7 minutes is the primary direction horizon. Compare completed-candle strategies to **B1**; **B0** uses forming-candle timing. Touch “quote P&L” appears only when a public proposal quote was available; otherwise it is UNAVAILABLE (tick-path hit/miss still shown). Rankings are descriptive — not statistical proof — and never auto-enable in production.
 

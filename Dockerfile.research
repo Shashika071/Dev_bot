@@ -1,0 +1,11 @@
+# Always-on research collector (public market data only — never buys)
+FROM node:22-alpine
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+ENV RESEARCH_API_HOST=0.0.0.0
+ENV RESEARCH_API_PORT=8787
+VOLUME ["/app/research-data"]
+EXPOSE 8787
+CMD ["npm", "run", "research:collector"]

@@ -1,11 +1,16 @@
 /**
- * Optional remote collector client.
- * Deployed UI uses in-browser research by default (see useBrowserResearch).
- * Set VITE_RESEARCH_API_URL only if you run a separate collector on a reachable host.
+ * Research collector HTTP client.
+ * On deploy, VITE_RESEARCH_API_URL=/research-api (same-origin nginx proxy).
+ * Optional absolute URL for a custom host.
  */
-export const RESEARCH_API_BASE =
-  (import.meta.env.VITE_RESEARCH_API_URL as string | undefined)?.replace(/\/$/, '')
-  || 'http://127.0.0.1:8787'
+function normalizeBase(raw: string | undefined): string {
+  const v = (raw ?? '/research-api').trim().replace(/\/$/, '')
+  return v || '/research-api'
+}
+
+export const RESEARCH_API_BASE = normalizeBase(
+  import.meta.env.VITE_RESEARCH_API_URL as string | undefined,
+)
 
 export async function fetchResearchStatus(signal?: AbortSignal) {
   const res = await fetch(`${RESEARCH_API_BASE}/status`, { signal })
