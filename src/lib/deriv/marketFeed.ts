@@ -8,10 +8,7 @@ const configuredHistory = Number(import.meta.env.VITE_HISTORY_COUNT || 5000)
 const HISTORY = Number.isFinite(configuredHistory) ? Math.max(120, Math.min(5000, Math.floor(configuredHistory))) : 5000
 /** Public Deriv API usually caps each ticks_history response around this size. */
 const HISTORY_BATCH = 1000
-/**
- * Enough closed bars for signal warmup. Was 120 and rejected good 109-bar live
- * streaks from Deriv pages that contain a recent gap.
- */
+/** Live trailing streak needed for signals (warmup is 60). */
 const MIN_HISTORY = WARMUP_BARS + 5
 export const SIGNAL_WINDOW_SECONDS = 5
 export const MAX_TICK_GAP_SECONDS = 10
@@ -56,20 +53,14 @@ export function consecutiveRuns(batch: Candle[], maxTime: number): Candle[][] {
   return runs
 }
 
-/**
- * Prefer the newest contiguous streak (must continue into live ticks).
- * Never return a long stale block that would jump the chart.
- */
+/** Newest contiguous streak (what live ticks / signals continue from). */
 export function bestHistorySegment(
   batch: Candle[],
   maxTime: number,
-  minLen = MIN_HISTORY,
+  _minLen = MIN_HISTORY,
 ): Candle[] {
   const runs = consecutiveRuns(batch, maxTime)
-  if (!runs.length) return []
-  const trailing = runs[runs.length - 1]!
-  if (trailing.length >= minLen) return trailing
-  return trailing
+  return runs[runs.length - 1] ?? []
 }
 
 /** @deprecated */
@@ -77,11 +68,10 @@ export function longestConsecutive(batch: Candle[], maxTime: number): Candle[] {
   return bestHistorySegment(batch, maxTime, 1)
 }
 
-function isConsecutive(history: Candle[]): boolean {
-  return history.length > 0 && history.every((c, i) => i === 0 || c.time === history[i - 1]!.time + 60)
-}
-
-/** History ends before the first buffered tick, so replay cannot overwrite newer prices. */
+/**
+ * Load up to HISTORY candles for the chart (gaps allowed).
+ * Signals only need the newest consecutive streak (closedSegments / evaluateLatestClosed).
+ */
 export class MarketFeed {
   private client: FeedClient
   private now: () => number
@@ -96,7 +86,6 @@ export class MarketFeed {
   private historyPages = new Map<number, Candle>()
   private buffered: Tick[] = []
   private syncing = true
-  private backfilling = false
   private lastTick: Tick | null = null
   private lastReceipt = 0
   private syncStarted = 0
@@ -109,7 +98,6 @@ export class MarketFeed {
     this.now = now
     client.setStatusHandler((status) => {
       this.syncing = true
-      this.backfilling = false
       this.historyId = null
       this.historyPages.clear()
       this.buffered = []
@@ -159,7 +147,7 @@ export class MarketFeed {
       this.state = { ...this.state, ready: false, error: 'Feed stale — signals paused' }
     }
     this.emit()
-    const syncBudget = this.historyPages.size > 0 || this.backfilling ? 120_000 : 20_000
+    const syncBudget = this.historyPages.size > 0 ? 120_000 : 20_000
     if (age > 15_000 || (this.syncing && this.now() - this.syncStarted > syncBudget)) {
       this.client.reconnect()
     }
@@ -167,7 +155,6 @@ export class MarketFeed {
 
   private beginSync(tick: Tick) {
     this.syncing = true
-    this.backfilling = false
     this.syncStarted = this.now()
     this.buffered = [tick]
     this.historyPages.clear()
@@ -179,9 +166,15 @@ export class MarketFeed {
   }
 
   private requestHistoryPage() {
+    const remaining = HISTORY - this.historyPages.size
+    if (remaining <= 0) {
+      this.finishHistorySync()
+      return
+    }
+    const count = Math.min(HISTORY_BATCH, remaining)
     const id = this.client.send({
       ticks_history: SYMBOL, style: 'candles', granularity: 60,
-      count: HISTORY_BATCH, end: String(this.historyEnd),
+      count, end: String(this.historyEnd),
     })
     this.historyId = id
     if (id == null) {
@@ -194,7 +187,6 @@ export class MarketFeed {
     const latest = this.buffered.at(-1) ?? this.lastTick
     this.historyId = null
     this.historyPages.clear()
-    this.backfilling = false
     this.syncing = true
     this.recoverAttempts += 1
     this.state = { ...this.state, ready: false, error: reason }
@@ -216,18 +208,26 @@ export class MarketFeed {
   private finishHistorySync() {
     const firstTick = this.buffered[0]
     if (!firstTick) return
-    const history = [...this.historyPages.values()].sort((a, b) => a.time - b.time)
-    if (history.length < MIN_HISTORY || !isConsecutive(history)) {
-      this.recoverHistory('Invalid or incomplete history — retrying recovery')
-      return
-    }
-    const histEnd = history[history.length - 1]!.time
+    const maxTime = minuteBucket(this.historyTargetEnd)
+    const all = [...this.historyPages.values()]
+      .filter((c) => c.time <= maxTime)
+      .sort((a, b) => a.time - b.time)
+    const trailing = bestHistorySegment(all, maxTime)
     const liveMinute = minuteBucket(firstTick.epoch)
-    if (liveMinute - histEnd > 60) {
-      this.recoverHistory('History ends too far from live price — retrying fresh page')
+    const trailEnd = trailing.at(-1)?.time
+    if (
+      trailing.length < MIN_HISTORY
+      || trailEnd == null
+      || liveMinute - trailEnd > 60
+    ) {
+      this.recoverHistory(
+        `Live history streak too short (${trailing.length}/${MIN_HISTORY}) — retrying`,
+      )
       return
     }
-    let candles = finalizeByClock(history, firstTick.epoch)
+
+    // Chart: full loaded history (gaps OK). Signals use newest segment via closedSegments.
+    let candles = finalizeByClock(all, firstTick.epoch)
     for (const tick of this.buffered) candles = applyTick(candles, tick).candles
     const latest = this.buffered.at(-1)!
     const lastClosed = candles.filter((c) => c.isClosed).at(-1)
@@ -242,38 +242,10 @@ export class MarketFeed {
       error: ready ? null : 'History loaded — waiting for signal warmup / fresh ticks',
     }
     this.syncing = false
-    this.backfilling = false
     this.recoverAttempts = 0
     this.historyId = null
     this.historyPages.clear()
     this.buffered = []
-    this.emit()
-  }
-
-  /**
-   * After a good live trailing streak exists, keep pulling older *connected*
-   * pages until HISTORY (up to 5000) or the next gap — same idea as before.
-   */
-  private maybeBackfillOrFinish() {
-    const times = [...this.historyPages.keys()].sort((a, b) => a - b)
-    const earliest = times[0]
-    if (earliest == null) {
-      this.recoverHistory('Empty history — retrying')
-      return
-    }
-    if (this.historyPages.size >= HISTORY) {
-      this.finishHistorySync()
-      return
-    }
-    // Always try to deepen toward 5000 while bars still connect (no chart jump).
-    this.backfilling = true
-    this.historyEnd = earliest - 60
-    this.state = {
-      ...this.state,
-      error: `Loading history ${this.historyPages.size}/${HISTORY}…`,
-    }
-    this.syncStarted = this.now()
-    this.requestHistoryPage()
     this.emit()
   }
 
@@ -287,12 +259,19 @@ export class MarketFeed {
     }
     if (Array.isArray(msg.candles)) {
       if (!this.syncing || this.historyId == null || msg.req_id !== this.historyId || !this.buffered.length) return
-      const batch = candlesFromHistory(msg.candles as Array<{ epoch: number; open: number; high: number; low: number; close: number }>)
+      const batch = candlesFromHistory(
+        msg.candles as Array<{ epoch: number; open: number; high: number; low: number; close: number }>,
+      )
       const maxTime = minuteBucket(this.historyTargetEnd)
+      const before = this.historyPages.size
+      for (const c of batch) {
+        if (c.time <= maxTime) this.historyPages.set(c.time, c)
+      }
+      this.syncStarted = this.now()
 
-      if (!this.backfilling) {
-        // First page: keep only the live trailing streak (avoids stale jump / stacked S/R).
-        const trailing = bestHistorySegment(batch, maxTime, 1)
+      // First page must include a usable live trailing streak.
+      if (before === 0) {
+        const trailing = bestHistorySegment([...this.historyPages.values()], maxTime)
         const liveMinute = minuteBucket(this.buffered[0]!.epoch)
         const trailEnd = trailing.at(-1)?.time
         if (
@@ -305,32 +284,22 @@ export class MarketFeed {
           )
           return
         }
-        this.historyPages.clear()
-        for (const c of trailing) this.historyPages.set(c.time, c)
-        this.syncStarted = this.now()
-        this.maybeBackfillOrFinish()
-        return
       }
 
-      // Backfill older pages: only prepend bars that connect to the current earliest.
-      const earliest = Math.min(...this.historyPages.keys())
-      const wantEnd = earliest - 60
-      const older = consecutiveRuns(batch, wantEnd)
-      const connect = older.find((run) => run[run.length - 1]?.time === wantEnd)
-      if (!connect || connect.length === 0) {
-        // Hit a gap — stop backfill with what we have (already >= MIN_HISTORY).
-        this.finishHistorySync()
+      const added = this.historyPages.size - before
+      const needMore = this.historyPages.size < HISTORY && added >= Math.min(HISTORY_BATCH, HISTORY - before) * 0.85
+      if (needMore) {
+        const earliest = Math.min(...this.historyPages.keys())
+        this.historyEnd = earliest - 60
+        this.state = {
+          ...this.state,
+          error: `Loading history ${this.historyPages.size}/${HISTORY}…`,
+        }
+        this.requestHistoryPage()
+        this.emit()
         return
       }
-      for (const c of connect) {
-        if (c.time < earliest) this.historyPages.set(c.time, c)
-      }
-      this.syncStarted = this.now()
-      if (connect.length < HISTORY_BATCH * 0.5 || this.historyPages.size >= HISTORY) {
-        this.finishHistorySync()
-        return
-      }
-      this.maybeBackfillOrFinish()
+      this.finishHistorySync()
       return
     }
     if (!msg.tick || this.state.status !== 'CONNECTED') return
@@ -352,7 +321,13 @@ export class MarketFeed {
       else this.buffered.push(tick)
       return
     }
-    if (gap || this.state.candles.length < MIN_HISTORY) {
+    // Resync only on real gaps — chart may have mid-history gaps from Deriv.
+    if (gap) {
+      this.beginSync(tick)
+      return
+    }
+    const trailingLen = consecutiveRuns(this.state.candles, minuteBucket(tick.epoch)).at(-1)?.length ?? 0
+    if (trailingLen < MIN_HISTORY) {
       this.beginSync(tick)
       return
     }
