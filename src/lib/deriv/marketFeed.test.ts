@@ -146,6 +146,16 @@ describe('history synchronization and signal timing', () => {
     expect(feed.getSnapshot().candles.length).toBeGreaterThan(0)
     expect(feed.getSnapshot().lastPrice).not.toBeNull()
   })
+  it('accepts a page with a mid-history gap by using the longest consecutive streak', () => {
+    feed.start()
+    tick(55)
+    const rows = fixtureCandles(200, minute - 199 * 60).map((c) => ({ ...c, epoch: c.time }))
+    // Punch a gap near the end so a trailing-only strategy would fail.
+    rows.splice(180, 1)
+    client.handler({ req_id: client.requests.length, candles: rows })
+    expect(feed.getSnapshot().candles.length).toBeGreaterThanOrEqual(120)
+    expect(feed.getSnapshot().lastPrice).not.toBeNull()
+  })
   it('detects silence and reconnects even if the socket stays open', () => {
     ready()
     vi.advanceTimersByTime(11000)

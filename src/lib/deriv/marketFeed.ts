@@ -35,14 +35,25 @@ export interface FeedClient {
 
 type Listener = (state: MarketState, event?: { type: 'candle_close'; candle: Candle }) => void
 
-/** Keep the newest contiguous minute chain that does not go past `maxTime`. */
-function longestTrailingConsecutive(batch: Candle[], maxTime: number): Candle[] {
+/**
+ * Deriv candle pages often contain one mid-page gap. Prefer the longest
+ * contiguous streak at or before maxTime (tie-break: newest streak).
+ */
+export function longestConsecutive(batch: Candle[], maxTime: number): Candle[] {
   const sorted = [...batch].filter((c) => c.time <= maxTime).sort((a, b) => a.time - b.time)
   if (!sorted.length) return []
-  let end = sorted.length - 1
-  let start = end
-  while (start > 0 && sorted[start]!.time === sorted[start - 1]!.time + 60) start -= 1
-  return sorted.slice(start, end + 1)
+  let best: Candle[] = []
+  let cur: Candle[] = []
+  for (const c of sorted) {
+    if (!cur.length || c.time === cur[cur.length - 1]!.time + 60) {
+      cur.push(c)
+      continue
+    }
+    if (cur.length >= best.length) best = cur
+    cur = [c]
+  }
+  if (cur.length >= best.length) best = cur
+  return best
 }
 
 function isConsecutive(history: Candle[]): boolean {
@@ -68,6 +79,7 @@ export class MarketFeed {
   private lastReceipt = 0
   private syncStarted = 0
   private lastRecoverAt = 0
+  private recoverAttempts = 0
   private watchdog: ReturnType<typeof setInterval> | null = null
 
   constructor(client: FeedClient = new DerivPublicClient(), now = Date.now) {
@@ -81,6 +93,7 @@ export class MarketFeed {
       this.lastTick = null
       this.syncStarted = this.now()
       this.lastReceipt = this.now()
+      this.recoverAttempts = 0
       this.state = { ...this.state, status, ready: false, error: 'Waiting for synchronized history and fresh ticks' }
       if (status === 'CONNECTED') client.send({ ticks: SYMBOL, subscribe: 1 })
       this.emit()
@@ -123,7 +136,6 @@ export class MarketFeed {
       this.state = { ...this.state, ready: false, error: 'Feed stale — signals paused' }
     }
     this.emit()
-    // Allow longer while paginating history (several API batches).
     const syncBudget = this.historyPages.size > 0 ? 90_000 : 20_000
     if (age > 15_000 || (this.syncing && this.now() - this.syncStarted > syncBudget)) {
       this.client.reconnect()
@@ -143,7 +155,6 @@ export class MarketFeed {
   }
 
   private requestHistoryPage() {
-    // Go live after the first solid page; waiting for 5×1000 bars kept the UI stuck on "Recovering".
     const syncTarget = Math.min(HISTORY, HISTORY_BATCH)
     const remaining = syncTarget - this.historyPages.size
     if (remaining <= 0) {
@@ -162,17 +173,17 @@ export class MarketFeed {
     }
   }
 
-  /** Drop a failed history pull and restart from the newest buffered tick. */
   private recoverHistory(reason: string) {
     const latest = this.buffered.at(-1) ?? this.lastTick
     this.historyId = null
     this.historyPages.clear()
     this.syncing = true
+    this.recoverAttempts += 1
     this.state = { ...this.state, ready: false, error: reason }
     this.emit()
     const now = this.now()
-    // Avoid tight retry loops on persistent bad pages; watchdog will reconnect.
-    if (!latest || now - this.lastRecoverAt < 2500) return
+    // Back off; watchdog reconnect handles persistent failures.
+    if (!latest || now - this.lastRecoverAt < 2500 || this.recoverAttempts > 8) return
     this.lastRecoverAt = now
     this.beginSync(latest)
   }
@@ -188,9 +199,9 @@ export class MarketFeed {
   private finishHistorySync() {
     const firstTick = this.buffered[0]
     if (!firstTick) return
-    const history = [...this.historyPages.values()].sort((a, b) => a.time - b.time)
-    if (history.length < MIN_HISTORY || !isConsecutive(history)
-      || history.some((c) => c.time > minuteBucket(this.historyTargetEnd))) {
+    const maxTime = minuteBucket(this.historyTargetEnd)
+    const history = longestConsecutive([...this.historyPages.values()], maxTime)
+    if (history.length < MIN_HISTORY || !isConsecutive(history)) {
       this.recoverHistory('Invalid or incomplete history — retrying recovery')
       return
     }
@@ -199,8 +210,6 @@ export class MarketFeed {
     const latest = this.buffered.at(-1)!
     const lastClosed = candles.filter((c) => c.isClosed).at(-1)
     const ready = this.signalReady(candles, latest)
-    // History is good enough to stop looping even when signal "ready" is still false
-    // (warmup / clock skew). Chart must show; only gap/disconnect should re-sync.
     this.state = {
       ...this.state,
       candles: candles.slice(-HISTORY),
@@ -211,6 +220,7 @@ export class MarketFeed {
       error: ready ? null : 'History loaded — waiting for signal warmup / fresh ticks',
     }
     this.syncing = false
+    this.recoverAttempts = 0
     this.historyId = null
     this.historyPages.clear()
     this.buffered = []
@@ -222,39 +232,22 @@ export class MarketFeed {
       const err = msg.error as { message?: string }
       this.state = { ...this.state, ready: false, error: err.message || 'Market data request failed' }
       this.emit()
+      // Deriv rejected the history call — force a clean reconnect instead of spinning.
+      if (this.syncing) this.client.reconnect()
       return
     }
     if (Array.isArray(msg.candles)) {
       if (!this.syncing || this.historyId == null || msg.req_id !== this.historyId || !this.buffered.length) return
-      const batch = candlesFromHistory(msg.candles)
-      const requested = Math.min(HISTORY_BATCH, HISTORY - this.historyPages.size)
-      const usable = longestTrailingConsecutive(batch, minuteBucket(this.historyTargetEnd))
-      if (
-        usable.length < 1
-        || (usable.length < Math.min(MIN_HISTORY, Math.max(1, batch.length)) && usable.length < requested * 0.9)
-        || !isConsecutive(usable)
-        || usable.some((c) => c.time > minuteBucket(this.historyTargetEnd))
-      ) {
-        this.recoverHistory('Invalid or incomplete history — retrying recovery')
+      const batch = candlesFromHistory(msg.candles as Array<{ epoch: number; open: number; high: number; low: number; close: number }>)
+      const maxTime = minuteBucket(this.historyTargetEnd)
+      const usable = longestConsecutive(batch, maxTime)
+      if (usable.length < MIN_HISTORY) {
+        this.recoverHistory(`History page too short (${usable.length}/${MIN_HISTORY}) — retrying`)
         return
       }
       for (const c of usable) this.historyPages.set(c.time, c)
       this.syncStarted = this.now()
-      // One good page (>=120 bars) is enough to leave SYNCING; do not wait for 5000 bars.
-      const syncTarget = Math.min(HISTORY, HISTORY_BATCH)
-      const needMore = this.historyPages.size < Math.min(syncTarget, MIN_HISTORY)
-        && usable.length >= Math.min(requested, HISTORY_BATCH)
-      if (needMore) {
-        const earliest = Math.min(...usable.map((c) => c.time))
-        this.historyEnd = earliest - 60
-        this.state = {
-          ...this.state,
-          error: `Loading history ${this.historyPages.size}/${syncTarget}…`,
-        }
-        this.requestHistoryPage()
-        this.emit()
-        return
-      }
+      // One solid consecutive streak is enough to leave SYNCING.
       this.finishHistorySync()
       return
     }
@@ -277,7 +270,6 @@ export class MarketFeed {
       else this.buffered.push(tick)
       return
     }
-    // Only full history re-sync on a real gap — never because signals are not ready yet.
     if (gap || this.state.candles.length < MIN_HISTORY) {
       this.beginSync(tick)
       return

@@ -34,14 +34,22 @@ export function candlesFromHistory(
   rows: Array<{ epoch: number; open: number; high: number; low: number; close: number }>,
 ): Candle[] {
   return rows
-    .map((r) => ({
-      time: Number(r.epoch),
-      open: Number(r.open),
-      high: Number(r.high),
-      low: Number(r.low),
-      close: Number(r.close),
-      isClosed: true,
-    }))
+    .map((r) => {
+      const open = Number(r.open)
+      const close = Number(r.close)
+      const high = Number(r.high)
+      const low = Number(r.low)
+      // Snap epoch to minute and repair tiny OHLC float inversions from the feed.
+      const time = Math.floor(Number(r.epoch) / 60) * 60
+      return {
+        time,
+        open,
+        high: Math.max(open, close, high),
+        low: Math.min(open, close, low),
+        close,
+        isClosed: true,
+      }
+    })
     .filter(isValidCandle)
     .sort((a, b) => a.time - b.time)
 }
