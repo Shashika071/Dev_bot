@@ -146,15 +146,30 @@ describe('history synchronization and signal timing', () => {
     expect(feed.getSnapshot().candles.length).toBeGreaterThan(0)
     expect(feed.getSnapshot().lastPrice).not.toBeNull()
   })
-  it('accepts a page with a mid-history gap by using the longest consecutive streak', () => {
+  it('uses the trailing streak when a mid-history gap exists (avoids stale price jump)', () => {
     feed.start()
     tick(55)
-    const rows = fixtureCandles(200, minute - 199 * 60).map((c) => ({ ...c, epoch: c.time }))
-    // Punch a gap near the end so a trailing-only strategy would fail.
-    rows.splice(180, 1)
+    const rows = fixtureCandles(250, minute - 249 * 60).map((c) => ({ ...c, epoch: c.time }))
+    // Gap early — trailing streak stays long and near live time.
+    rows.splice(40, 1)
     client.handler({ req_id: client.requests.length, candles: rows })
     expect(feed.getSnapshot().candles.length).toBeGreaterThanOrEqual(120)
     expect(feed.getSnapshot().lastPrice).not.toBeNull()
+    const lastClosed = feed.getSnapshot().candles.filter((c) => c.isClosed).at(-1)
+    expect(lastClosed?.time).toBeGreaterThanOrEqual(minute - 120)
+  })
+  it('retries when only a stale older streak is long enough', () => {
+    feed.start()
+    tick(55)
+    const rows = fixtureCandles(200, minute - 199 * 60).map((c) => ({ ...c, epoch: c.time }))
+    // Gap near the end → trailing streak too short; must not chart the old block.
+    rows.splice(185, 1)
+    const before = client.requests.length
+    client.handler({ req_id: before, candles: rows })
+    // Must not go live on the stale older block (would jump the chart).
+    expect(feed.getSnapshot().ready).toBe(false)
+    expect(feed.getSnapshot().candles.length).toBe(0)
+    expect(client.requests.length).toBeGreaterThan(before)
   })
   it('detects silence and reconnects even if the socket stays open', () => {
     ready()

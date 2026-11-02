@@ -36,24 +36,51 @@ export interface FeedClient {
 type Listener = (state: MarketState, event?: { type: 'candle_close'; candle: Candle }) => void
 
 /**
- * Deriv candle pages often contain one mid-page gap. Prefer the longest
- * contiguous streak at or before maxTime (tie-break: newest streak).
+ * Deriv candle pages often contain one mid-page gap.
+ * Prefer the newest contiguous streak (closest to live time) with enough bars.
+ * Using an older long streak caused huge chart jumps + stacked S/R levels.
  */
-export function longestConsecutive(batch: Candle[], maxTime: number): Candle[] {
+export function bestHistorySegment(
+  batch: Candle[],
+  maxTime: number,
+  minLen = MIN_HISTORY,
+): Candle[] {
   const sorted = [...batch].filter((c) => c.time <= maxTime).sort((a, b) => a.time - b.time)
   if (!sorted.length) return []
-  let best: Candle[] = []
+
+  const runs: Candle[][] = []
   let cur: Candle[] = []
   for (const c of sorted) {
     if (!cur.length || c.time === cur[cur.length - 1]!.time + 60) {
       cur.push(c)
       continue
     }
-    if (cur.length >= best.length) best = cur
+    runs.push(cur)
     cur = [c]
   }
-  if (cur.length >= best.length) best = cur
-  return best
+  if (cur.length) runs.push(cur)
+
+  // Trailing streak first — this is what the live chart must continue from.
+  const trailing = runs[runs.length - 1] ?? []
+  if (trailing.length >= minLen) return trailing
+
+  const longEnough = runs.filter((r) => r.length >= minLen)
+  if (longEnough.length) {
+    // Newest end time wins; only accept if it still ends near live maxTime.
+    const newest = [...longEnough].sort(
+      (a, b) => b[b.length - 1]!.time - a[a.length - 1]!.time,
+    )[0]!
+    const end = newest[newest.length - 1]!.time
+    if (maxTime - end <= 60 * 2) return newest
+  }
+
+  // Not safe to chart — return trailing (may be short) so caller can retry.
+  return trailing
+}
+
+/** @deprecated use bestHistorySegment */
+export function longestConsecutive(batch: Candle[], maxTime: number): Candle[] {
+  return bestHistorySegment(batch, maxTime, 1)
 }
 
 function isConsecutive(history: Candle[]): boolean {
@@ -200,9 +227,16 @@ export class MarketFeed {
     const firstTick = this.buffered[0]
     if (!firstTick) return
     const maxTime = minuteBucket(this.historyTargetEnd)
-    const history = longestConsecutive([...this.historyPages.values()], maxTime)
+    const history = bestHistorySegment([...this.historyPages.values()], maxTime, MIN_HISTORY)
     if (history.length < MIN_HISTORY || !isConsecutive(history)) {
       this.recoverHistory('Invalid or incomplete history — retrying recovery')
+      return
+    }
+    const histEnd = history[history.length - 1]!.time
+    const liveMinute = minuteBucket(firstTick.epoch)
+    // Reject stale blocks that would paint a jump from old prices to live ticks.
+    if (liveMinute - histEnd > 60) {
+      this.recoverHistory('History ends too far from live price — retrying fresh page')
       return
     }
     let candles = finalizeByClock(history, firstTick.epoch)
@@ -240,14 +274,14 @@ export class MarketFeed {
       if (!this.syncing || this.historyId == null || msg.req_id !== this.historyId || !this.buffered.length) return
       const batch = candlesFromHistory(msg.candles as Array<{ epoch: number; open: number; high: number; low: number; close: number }>)
       const maxTime = minuteBucket(this.historyTargetEnd)
-      const usable = longestConsecutive(batch, maxTime)
+      const usable = bestHistorySegment(batch, maxTime, MIN_HISTORY)
       if (usable.length < MIN_HISTORY) {
-        this.recoverHistory(`History page too short (${usable.length}/${MIN_HISTORY}) — retrying`)
+        this.recoverHistory(`Live history streak too short (${usable.length}/${MIN_HISTORY}) — retrying`)
         return
       }
+      this.historyPages.clear()
       for (const c of usable) this.historyPages.set(c.time, c)
       this.syncStarted = this.now()
-      // One solid consecutive streak is enough to leave SYNCING.
       this.finishHistorySync()
       return
     }
