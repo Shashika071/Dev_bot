@@ -36,12 +36,18 @@ export interface StrategySummary {
   touchMisses: number
   touchUnknown: number
   touchPending: number
+  touchWinRate: number | null
   quotesAvailable: number
   quotedSettled: number
   quotedHits: number
   quotedMisses: number
   quotedUnknown: number
   quotedPending: number
+  quotedWinRate: number | null
+  /** Settled results plus unknown quoted outcomes, excluding still-pending contracts. */
+  maturedQuotedCost: number | null
+  paperPnlLower: number | null
+  paperPnlUpper: number | null
   paperCost: number | null
   paperPnl: number | null
   paperReturn: number | null
@@ -95,6 +101,8 @@ export function summarizeExperiment(state: ExperimentState): {
   generatedAt: number
   codeVersion: string
   legacy: boolean
+  primaryOutcome: 'touch_within_contract_window'
+  touchWindowMinutes: number
   stage: ExperimentState['stage']
   mode: ExperimentState['mode']
   startedAt: number | null
@@ -128,25 +136,38 @@ export function summarizeExperiment(state: ExperimentState): {
       const cost = settled.reduce((s, r) => s + r.touch!.proposalAsk!, 0)
       const pnlVals = settled.map((r) => r.touch!.paperPnl!)
       const pnl = pnlVals.length ? pnlVals.reduce((a, b) => a + b, 0) : null
+      const unknownPriced = state.codeVersion === RESEARCH_CODE_VERSION ? quoted.filter((r) =>
+        r.touch?.quotedPath?.status === 'unknown'
+        && r.touch.proposalAsk != null && Number.isFinite(r.touch.proposalAsk) && r.touch.proposalAsk > 0
+        && r.touch.proposalPayout != null && Number.isFinite(r.touch.proposalPayout)
+        && r.touch.proposalPayout >= r.touch.proposalAsk) : []
+      const unknownCost = unknownPriced.reduce((s, r) => s + r.touch!.proposalAsk!, 0)
+      const unknownProfit = unknownPriced.reduce((s, r) => s + r.touch!.proposalPayout! - r.touch!.proposalAsk!, 0)
+      const hasMatured = settled.length + unknownPriced.length > 0
       return {
         id: d.id,
         name: d.name,
         family: d.family,
         rules: d.rules,
         candidatesAccepted: rows.length,
-        pending: rows.filter((r) => r.pendingHorizons).length,
-        known: rows.filter((r) => !r.pendingHorizons).length,
+        pending: rows.filter((r) => r.touch?.status === 'pending').length,
+        known: touchHits + touchMisses,
         horizons: HORIZON_MINUTES.map((m) => horizonSummary(rows, m)),
         touchHits,
         touchMisses,
         touchUnknown,
         touchPending: rows.filter((r) => r.touch?.status === 'pending').length,
+        touchWinRate: touchHits + touchMisses > 0 ? touchHits / (touchHits + touchMisses) : null,
         quotesAvailable: quoted.length,
         quotedSettled: settled.length,
         quotedHits: settled.filter((r) => r.touch?.quotedPath?.status === 'hit').length,
         quotedMisses: settled.filter((r) => r.touch?.quotedPath?.status === 'miss').length,
         quotedUnknown: quoted.filter((r) => r.touch?.quotedPath?.status === 'unknown').length,
         quotedPending: quoted.filter((r) => !r.touch?.quotedPath || r.touch.quotedPath.status === 'pending').length,
+        quotedWinRate: settled.length ? settled.filter((r) => r.touch?.quotedPath?.status === 'hit').length / settled.length : null,
+        maturedQuotedCost: hasMatured ? cost + unknownCost : null,
+        paperPnlLower: hasMatured ? (pnl ?? 0) - unknownCost : null,
+        paperPnlUpper: hasMatured ? (pnl ?? 0) + unknownProfit : null,
         paperCost: settled.length ? cost : null,
         paperPnl: pnl,
         paperReturn: pnl != null && cost > 0 ? pnl / cost : null,
@@ -158,6 +179,8 @@ export function summarizeExperiment(state: ExperimentState): {
     generatedAt: Math.floor(Date.now() / 1000),
     codeVersion: state.codeVersion,
     legacy: state.codeVersion !== RESEARCH_CODE_VERSION,
+    primaryOutcome: 'touch_within_contract_window',
+    touchWindowMinutes: state.contract.duration,
     stage: state.stage,
     mode: state.mode,
     startedAt: state.startedAt,
@@ -173,12 +196,16 @@ export function summarizeExperiment(state: ExperimentState): {
       'Rankings are descriptive/exploratory; observations can overlap and correlate.',
       '80% baseline score means 4/5 conditions — not an 80% win probability.',
       'B0 uses forming-candle timing; compare completed strategies primarily to B1.',
-      '7-minute horizon is the predeclared primary direction horizon.',
+      `Primary result: Touch within ${state.contract.duration} minutes of entry. A hit wins immediately when observed, including at expiry. It remains a win if price reverses or the feed disconnects later.`,
+      'A miss requires no touch during a fully observed contract window. Missing coverage without an observed hit is UNKNOWN, not a loss.',
+      'Endpoint direction is an optional diagnostic. Its pending/unknown status never delays or cancels a confirmed Touch win.',
       'Touch paper P&L is quote-based only when proposals were available; otherwise unavailable.',
       'Reference Touch counts start at the signal tick. Quoted Touch counts start at a fresh tick after quote receipt; earlier touches never earn quoted P&L.',
       'P&L and purchase cost include the SAME settled quoted cohort only; pending, unknown and unquoted outcomes are excluded and counted separately.',
-      'The random reference is the exact equally weighted RISE/FALL expectation. Directional percentages exclude unchanged, pending and unknown endpoints.',
-      'The <20 marker only flags a very small sample; removing it does not establish statistical significance.',
+      'Unknown outcomes can bias settled-only returns. The matured quoted P&L range treats every unknown as a loss at the lower bound and a win at the upper bound. It is a sensitivity range, not a confidence interval; pending and unquoted signals are excluded.',
+      'Touch win rates use hits / (hits + misses). Unknown and pending Touch outcomes are displayed separately and excluded from that rate.',
+      'The 50/50 reference applies only to endpoint direction, not to the probability of touching a barrier.',
+      'The <20 marker only flags a very small settled sample; removing it does not establish statistical significance.',
       'Never auto-enables a top strategy in production.',
       'Prior filter-comparison reports that passed filterConfig into runTouchBacktest did not apply filters.',
     ],
@@ -191,6 +218,8 @@ export function exportObservationsCsv(state: ExperimentState): string {
     'atr14', 'h1', 'h3', 'h5', 'h7', 'referenceTouchStatus', 'quotePnl', 'quoteAvailable',
     'quoteStatus', 'quoteReason', 'quoteRequestEpoch', 'quoteResponseEpoch', 'quoteEntryEpoch',
     'quoteEntryPrice', 'quoteBarrier', 'quoteTouchStatus', 'quoteFirstTouchEpoch', 'ask', 'payout', 'codeVersion',
+    'h1Reason', 'h3Reason', 'h5Reason', 'h7Reason', 'h7TargetEpoch', 'h7ObservedEpoch',
+    'referenceTouchReason', 'quoteTouchReason', 'quoteCoverageLost',
   ]
   const lines = [header.join(',')]
   for (const o of state.observations) {
@@ -206,6 +235,10 @@ export function exportObservationsCsv(state: ExperimentState): string {
       o.touch?.quotedPath?.paperEntryPrice ?? '', o.touch?.quotedPath?.absoluteBarrier ?? '',
       o.touch?.quotedPath?.status ?? '', o.touch?.quotedPath?.firstTouchEpoch ?? '',
       o.touch?.proposalAsk ?? '', o.touch?.proposalPayout ?? '', state.codeVersion,
+      ...([1, 3, 5, 7] as const).map((m) => o.horizons.find((h) => h.minutes === m)?.reason ?? ''),
+      o.horizons.find((h) => h.minutes === 7)?.targetEpoch ?? '',
+      o.horizons.find((h) => h.minutes === 7)?.observedEpoch ?? '',
+      o.touch?.reason ?? '', o.touch?.quotedPath?.reason ?? '', o.touch?.quotedPath?.coverageLost ?? '',
     ].map((v) => `"${String(v).replaceAll('"', '""')}"`).join(','))
   }
   return lines.join('\n')
@@ -218,21 +251,30 @@ export function exportReportMarkdown(summary: ReturnType<typeof summarizeExperim
     `Generated: ${new Date(summary.generatedAt * 1000).toISOString()}`,
     `Stage: ${summary.stage} · Mode: ${summary.mode}`,
     `Observations: ${summary.observationCount} · Rejected: ${summary.rejectedCount}`,
+    `Primary result: target touched within ${summary.touchWindowMinutes} minutes. A hit wins immediately; no wait for the endpoint.`,
     '',
     '## Strategies (descriptive)',
     '',
     `Code version: ${summary.codeVersion}${summary.legacy ? ' (pre-fix, read-only)' : ''}`,
     '',
-    '| ID | Name | n | 7m cont% | Reference H/M/U/P | Quotes/n | Quoted H/M/U/P | Settled cost | Quote P&L | Return |',
-    '|----|------|---|----------|-------------------|----------|----------------|--------------|-----------|--------|',
+    '| ID | Name | n | Signal Touch win% | Signal H/M/U/P | Quotes/n | Quoted Touch win% | Quoted H/M/U/P | Settled cost | Settled P&L | Settled return | Matured quoted P&L range |',
+    '|----|------|---|-------------------|----------------|----------|-------------------|----------------|--------------|-------------|----------------|--------------------------|',
   ]
   for (const s of summary.strategies) {
-    const h7 = s.horizons.find((h) => h.minutes === 7)
-    const cont = h7?.contRate == null ? '—' : `${(100 * h7.contRate).toFixed(1)}%`
+    const touchRate = s.touchWinRate == null ? '—' : `${(100 * s.touchWinRate).toFixed(1)}%`
+    const quotedRate = s.quotedWinRate == null ? '—' : `${(100 * s.quotedWinRate).toFixed(1)}%`
     const pnl = s.pnlUnavailable ? 'UNAVAILABLE' : (s.paperPnl?.toFixed(4) ?? '—')
     lines.push(
-      `| ${s.id} | ${s.name} | ${s.candidatesAccepted} | ${cont} | ${s.touchHits}/${s.touchMisses}/${s.touchUnknown}/${s.touchPending} | ${s.quotesAvailable}/${s.candidatesAccepted} | ${s.quotedHits}/${s.quotedMisses}/${s.quotedUnknown}/${s.quotedPending} | ${s.paperCost?.toFixed(4) ?? '—'} | ${pnl} | ${s.paperReturn == null ? '—' : (s.paperReturn * 100).toFixed(2) + '%'} |`,
+      `| ${s.id} | ${s.name} | ${s.candidatesAccepted} | ${touchRate} | ${s.touchHits}/${s.touchMisses}/${s.touchUnknown}/${s.touchPending} | ${s.quotesAvailable}/${s.candidatesAccepted} | ${quotedRate} | ${s.quotedHits}/${s.quotedMisses}/${s.quotedUnknown}/${s.quotedPending} | ${s.paperCost?.toFixed(4) ?? '—'} | ${pnl} | ${s.paperReturn == null ? '—' : (s.paperReturn * 100).toFixed(2) + '%'} | ${s.paperPnlLower?.toFixed(4) ?? '—'} to ${s.paperPnlUpper?.toFixed(4) ?? '—'} |`,
     )
+  }
+  lines.push('', '## Optional endpoint diagnostics', '',
+    'These measure direction at minute 7, not whether the target was touched earlier. They never change a Touch result.', '',
+    '| ID | 7m continuation | Reversal | Unchanged | Unknown | Pending |',
+    '|----|-----------------|----------|-----------|---------|---------|')
+  for (const s of summary.strategies) {
+    const h7 = s.horizons.find((h) => h.minutes === 7)
+    lines.push(`| ${s.id} | ${h7?.continuation ?? 0} | ${h7?.reversal ?? 0} | ${h7?.unchanged ?? 0} | ${h7?.unknown ?? 0} | ${h7?.pending ?? 0} |`)
   }
   lines.push('', '## Notes', '')
   for (const n of summary.notes) lines.push(`- ${n}`)

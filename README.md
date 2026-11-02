@@ -93,7 +93,15 @@ npm run research:report
 npm run research:replay
 ```
 
-**How to read results:** 80% means 4/5 conditions, not win probability. 7 minutes is the primary direction horizon. Compare completed-candle strategies to **B1**; **B0** uses forming-candle timing. Touch “quote P&L” appears only when a public proposal quote was available; otherwise it is UNAVAILABLE (tick-path hit/miss still shown). Rankings are descriptive — not statistical proof — and never auto-enable in production.
+**How to read results:** the primary result is **Touch within the seven-minute contract window**. A target hit wins immediately and stays a win even if price reverses or the feed disconnects later. A miss requires no touch through expiry with complete coverage; without that coverage and without a confirmed hit, the result is unknown. Endpoint direction at minute 7 is an optional diagnostic and never delays or cancels a Touch win. 80% means 4/5 conditions, not win probability. Compare completed-candle strategies to **B1**; **B0** uses forming-candle timing. Quoted paper P&L uses a separate entry after quote receipt. Rankings remain descriptive and never auto-enable in production.
+
+**Missing outcomes:** check Signal and Quoted H/M/U/P (hit/miss/unknown/pending). Touch win% means hits / (hits + misses). Unknown and pending Touch outcomes are shown separately. Settled P&L and cost exclude unknown and pending outcomes. A high settled win rate can be biased because quick hits survive a connection interruption while possible misses require full coverage through expiry. The matured quoted P&L range shows all unknown quoted outcomes as losses at its lower bound and wins at its upper bound. This is a sensitivity range, not a confidence interval, and excludes pending and unquoted signals. The optional 50/50 endpoint reference is not a Touch win-rate benchmark.
+
+The collector sends a public ping every 30 seconds, checks the acknowledgement, reconnects failed feeds and logs connection/tick-gap diagnostics to `events.jsonl`. The status panel displays disconnects since the collector process started. CSV exports include horizon and touch unknown reasons. These diagnostics do not recover missing historical ticks or turn unknowns into losses.
+
+Start/Archive and restart preserves the prior experiment in its own directory. `research-data/active.json` records the selected run so restarting the collector resumes that run rather than whichever older run has the most observations. The Docker named data volume must be retained when redeploying. `RESEARCH_DATA_ROOT` can override the directory for isolated tests or offline copied data.
+
+`npm run research:replay -- --id <experiment-id>` reads `journal.jsonl` and verifies the full `session.json` checkpoint: observations, quotes, candle history, settings, cooldowns and lifecycle state. A count match alone is insufficient. Replay fails explicitly for legacy tick-only data, missing initial settings/history or incomplete checkpoint journals. Keep the journal and checkpoint together when copying a run for diagnosis.
 
 Note: older `compare-filters.mjs` / `runTouchBacktest(..., filterConfig)` reports echoed filter settings but **did not apply** optional filters inside the backtest loop.
 

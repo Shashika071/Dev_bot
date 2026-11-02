@@ -16,6 +16,10 @@ function pct(n: number | null | undefined) {
   return n == null ? '—' : `${(100 * n).toFixed(1)}%`
 }
 
+function touchRate(hits: number, misses: number) {
+  return hits + misses > 0 ? `${pct(hits / (hits + misses))}${hits + misses < 20 ? '*' : ''}` : '—'
+}
+
 function ago(epoch: number | null | undefined) {
   if (epoch == null) return '—'
   return new Date(epoch * 1000).toISOString().replace('.000Z', 'Z')
@@ -70,7 +74,6 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
         const status = await fetchResearchStatus(ctrl.signal)
         if (cancelled) return
         const prevCount = (readServerCache()?.state?.observationCount
-          ?? cached?.state?.observationCount
           ?? 0) as number
         const nextCount = status?.state?.observationCount ?? 0
         if (prevCount > 0 && nextCount === 0 && status?.experimentId !== readServerCache()?.experimentId) {
@@ -127,6 +130,19 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
     ? (remote?.registryCount ?? 0)
     : browser.registry.length
   const summary = usingServer ? remote?.summary : browser.summary
+  const quality = (strategies as StrategySummary[]).reduce((totals, s) => {
+    totals.hits += s.touchHits ?? 0
+    totals.misses += s.touchMisses ?? 0
+    totals.unknown += s.touchUnknown ?? 0
+    totals.pending += s.touchPending ?? 0
+    totals.quoteHits += s.quotedHits ?? 0
+    totals.quoteMisses += s.quotedMisses ?? 0
+    totals.quoteUnknown += s.quotedUnknown ?? 0
+    totals.quotePending += s.quotedPending ?? 0
+    totals.unquoted += s.candidatesAccepted - (s.quotesAvailable ?? 0)
+    return totals
+  }, { hits: 0, misses: 0, unknown: 0, pending: 0, quoteHits: 0, quoteMisses: 0, quoteUnknown: 0, quotePending: 0, unquoted: 0 })
+  const feedDiagnostics = usingServer ? remote?.feedDiagnostics : null
   const legacy = (summary?.codeVersion ?? st?.codeVersion) !== RESEARCH_CODE_VERSION
   const controlsDisabled = busy || probing || (usingServer && !remoteLive)
   const contract = (st as { contract?: { contractType: string; barrierAbs: number; duration: number; durationUnit: string; paperStake: number; currency: string } } | undefined)?.contract
@@ -144,7 +160,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
   function confirmWipe(action: string): boolean {
     if (observationCount <= 0) return true
     return window.confirm(
-      `${action} will clear ${observationCount} observations and start from zero. Export first if you need this run.`,
+      `${action} will archive this run (${observationCount} observations) and start a new run from zero.`,
     )
   }
 
@@ -227,12 +243,17 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
             {(st as { feedHealthy?: boolean } | undefined)?.feedHealthy ? 'healthy' : 'unhealthy/offline'}
           </div>
           <div>Last tick: {ago((st as { lastTickEpoch?: number | null } | undefined)?.lastTickEpoch)}</div>
+          {feedDiagnostics && <div>Feed disconnects since collector restart: {feedDiagnostics.disconnects}</div>}
           <div>
             Observations:{' '}
             <span className="font-semibold text-slate-100">{observationCount}</span>
             {usingServer && !remoteLive ? ' (cached)' : ''}
           </div>
         </div>
+
+        {feedDiagnostics?.lastDisconnectReason && (
+          <p className="mt-2 text-amber-200">Last feed diagnostic: {feedDiagnostics.lastDisconnectReason}</p>
+        )}
 
         {contract && (
           <p className="mt-2 text-[11px] text-slate-500">
@@ -291,11 +312,11 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
                 disabled={controlsDisabled}
                 onClick={() => {
                   if (!confirmWipe('Reset')) return
-                  void runRemote('/control/reset', undefined, 'Reset — all records cleared, discovery restarted from 0')
+                  void runRemote('/control/reset', undefined, 'Previous run archived; new discovery started from 0')
                 }}
                 className={`${btn} bg-rose-800 text-rose-100 hover:bg-rose-700`}
               >
-                Reset (clear all)
+                Archive and restart
               </button>
             </>
           ) : (
@@ -357,7 +378,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
                 }}
                 className={`${btn} bg-rose-800 text-rose-100 hover:bg-rose-700`}
               >
-                Reset (clear all)
+                Archive and restart
               </button>
             </>
           )}
@@ -413,7 +434,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
 
       <section className="rounded border border-slate-800 bg-[#0c1118] p-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="font-medium text-slate-200">Comparison (descriptive)</div>
+          <div className="font-medium text-slate-200">Touch results — target reached within {contract?.duration ?? 7} minutes</div>
           <div className="flex gap-2">
             {usingServer ? (
               <>
@@ -431,10 +452,28 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
           </div>
         </div>
         <p className="mt-2 text-[11px] text-slate-400">
-          H/M/U/P = hit / miss / unknown / pending. Reference touches and post-quote touches have different entries.
-          P&amp;L and cost use the same settled quoted observations only. Direction percentages exclude unchanged and unavailable endpoints.
-          * Fewer than 20 directional outcomes; larger samples are still exploratory, not proof of an advantage.
+          HIT = win immediately when the target is touched. A later reversal or disconnection does not cancel that win.
+          MISS = no touch by expiry with full tick coverage. UNKNOWN = no confirmed hit and incomplete coverage.
+          PENDING = the target has not been touched and the window is still being observed.
         </p>
+        <p className="mt-2 text-[11px] text-slate-400">
+          H/M/U/P = hit / miss / unknown / pending. Signal Touch starts at the signal tick; quoted Touch starts after quote receipt.
+          Win% = hits / (hits + misses); unknown and pending results are excluded. P&amp;L uses settled quoted results only.
+          * Fewer than 20 settled results; all comparisons remain exploratory.
+        </p>
+        {observationCount > 0 && (
+          <div role={quality.unknown > 0 || quality.quoteUnknown > 0 ? 'alert' : 'status'}
+            className="mt-3 rounded border border-amber-800/60 bg-amber-950/30 p-3 text-amber-100">
+            <p>Signal Touch: {quality.hits} hits, {quality.misses} misses, {quality.unknown} unknown, {quality.pending} pending.</p>
+            {!legacy && <p>Quoted Touch: {quality.quoteHits} hits, {quality.quoteMisses} misses, {quality.quoteUnknown} unknown, {quality.quotePending} pending.</p>}
+            <p>Signals without usable quotes: {quality.unquoted}.</p>
+            {(quality.unknown > 0 || quality.quoteUnknown > 0) && <p className="mt-1">
+              Missing Touch outcomes can affect the overall win rate and profit. Confirmed hits remain wins.
+            </p>}
+            <p className="mt-1">The P&amp;L range below includes matured quoted unknowns: all losses to all wins.
+              It excludes pending and unquoted signals and is not a confidence interval.</p>
+          </div>
+        )}
         <div className="mt-2 overflow-auto">
           <table className="w-full min-w-[1400px] text-left text-[11px]">
             <thead className="text-slate-500">
@@ -442,10 +481,15 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
                 <th className="px-2 py-1">ID</th>
                 <th className="px-2 py-1">Name</th>
                 <th className="px-2 py-1">n</th>
-                <th className="px-2 py-1">7m cont%</th>
-                <th className="px-2 py-1">50/50 reference</th>
-                <th className="px-2 py-1">Reference H/M/U/P</th>
-                <th className="px-2 py-1">Quote P&L</th>
+                <th className="px-2 py-1">Signal Touch win%</th>
+                <th className="px-2 py-1">Signal H/M/U/P</th>
+                <th className="px-2 py-1">Quotes/n</th>
+                <th className="px-2 py-1">Quoted Touch win%</th>
+                <th className="px-2 py-1">Quoted H/M/U/P</th>
+                <th className="px-2 py-1">Settled n / cost</th>
+                <th className="px-2 py-1">Settled P&amp;L</th>
+                <th className="px-2 py-1">Settled return</th>
+                <th className="px-2 py-1">Matured quoted P&amp;L range</th>
               </tr>
             </thead>
             <tbody>
@@ -460,20 +504,25 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
                       <td className="px-2 py-1 font-mono text-slate-200">{s.id}</td>
                       <td className="px-2 py-1">{s.name}</td>
                       <td className="px-2 py-1 tabular-nums">{s.candidatesAccepted}</td>
-                      <td className="px-2 py-1 tabular-nums">{h7?.insufficient ? `${pct(h7.contRate)}*` : pct(h7?.contRate)}</td>
-                      <td className="px-2 py-1 tabular-nums">{pct(h7?.randomContRate)}</td>
+                      <td className="px-2 py-1 tabular-nums">{touchRate(s.touchHits, s.touchMisses)}</td>
                       <td className="px-2 py-1 tabular-nums">{s.touchHits}/{s.touchMisses}/{s.touchUnknown}/{s.touchPending ?? 0}</td>
                       <td className="px-2 py-1">{s.quotesAvailable}/{s.candidatesAccepted}</td>
+                      <td className="px-2 py-1 tabular-nums">{legacy ? '—' : touchRate(s.quotedHits, s.quotedMisses)}</td>
                       <td className="px-2 py-1">{legacy ? "—" : `${s.quotedHits}/${s.quotedMisses}/${s.quotedUnknown}/${s.quotedPending}`}</td>
                       <td className="px-2 py-1">{legacy ? "—" : `${s.quotedSettled} / ${s.paperCost?.toFixed(2) ?? "—"}`}</td>
                       <td className="px-2 py-1">{legacy || s.pnlUnavailable ? 'UNAVAILABLE' : (s.paperPnl?.toFixed(4) ?? '—')}</td>
                       <td className="px-2 py-1">{legacy ? '—' : pct(s.paperReturn)}</td>
+                      <td className="px-2 py-1">{legacy || s.paperPnlLower == null ? '—' : `${s.paperPnlLower.toFixed(2)} to ${s.paperPnlUpper?.toFixed(2)}`}</td>
                     </tr>
                     {expanded === s.id && (
                       <tr className="border-t border-slate-900/50 bg-[#121820]">
-                        <td colSpan={11} className="px-3 py-2 text-[11px] text-slate-400 whitespace-pre-wrap">{s.rules}{'\n\n'}
-                          7m: {h7?.continuation ?? 0} continuation / {h7?.reversal ?? 0} reversal / {h7?.unchanged ?? 0} unchanged / {h7?.unknown ?? 0} unknown / {h7?.pending ?? 0} pending.
-                          {'\n'}Quoted results include only simulations entered after quote receipt. Unquoted observations do not contribute to P&amp;L.
+                        <td colSpan={12} className="px-3 py-2 text-[11px] text-slate-400 whitespace-pre-wrap">{s.rules}{'\n\n'}
+                          Quoted results include only simulations entered after quote receipt. Unquoted observations do not contribute to P&amp;L.
+                          <details className="mt-2">
+                            <summary className="cursor-pointer">Optional endpoint diagnostics (not Touch wins)</summary>
+                            <p className="mt-1">Direction at minute 7: {h7?.continuation ?? 0} continuation / {h7?.reversal ?? 0} reversal / {h7?.unchanged ?? 0} unchanged / {h7?.unknown ?? 0} unknown / {h7?.pending ?? 0} pending.</p>
+                            <p>A confirmed Touch hit stays a win regardless of this diagnostic. The endpoint 50/50 reference is not a Touch win-rate benchmark.</p>
+                          </details>
                         </td>
                       </tr>
                     )}

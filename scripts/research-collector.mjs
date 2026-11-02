@@ -35,6 +35,8 @@ const {
   loadState,
   appendSessionSnapshot, loadSession, appendJournal, readJournal,
   appendTick,
+  appendEvent,
+  setActiveExperiment,
   listExperiments,
   listExperimentSummaries,
 } = await vite.ssrLoadModule('/src/lib/research/experimentStore.ts')
@@ -49,6 +51,7 @@ const { STRATEGY_REGISTRY } =
 
 const { applyResearchEvent, emptyResearchSession } = await vite.ssrLoadModule('/src/lib/research/researchSession.ts')
 const { ResearchQuoteScheduler } = await vite.ssrLoadModule('/src/lib/research/quoteScheduler.ts')
+const { startResearchHeartbeat } = await vite.ssrLoadModule('/src/lib/research/feedHeartbeat.ts')
 let experimentId = idArg || latestExperimentId() || newExperimentId('discovery')
 let session = loadSession(experimentId) || { ...emptyResearchSession(), state: loadState(experimentId) || createInitialState() }
 // Restore all journal events after the atomic checkpoint, including quote responses.
@@ -62,6 +65,14 @@ let lastPersist = 0
 let feedHealthy = false
 let lastReceipt = 0
 let quotes = null
+const feedDiagnostics = { since: Date.now() / 1000, disconnects: 0, connections: 0,
+  lastDisconnectEpoch: null, lastDisconnectReason: null, maxTickGapSec: 0 }
+
+function logFeedEvent(reason) {
+  feedDiagnostics.lastDisconnectReason = reason
+  appendEvent(experimentId, { type: 'feed_diagnostic', epoch: Date.now() / 1000, reason })
+  console.warn(`[research] ${reason}`)
+}
 
 function record(event) {
   if (state.codeVersion !== RESEARCH_CODE_VERSION) return
@@ -92,8 +103,13 @@ function loadExperiment(id) {
   }
   state = session.state
   candles = session.candles
+  // Historical candles from an older run must not seed new live signals.
+  record({ type: 'feed_unhealthy' })
+  feedHealthy = false
   resetQuotes()
   persist(true)
+  setActiveExperiment(experimentId)
+  reconnectFeed('Research run changed; resynchronizing history')
 }
 
 function request(payload) {
@@ -134,6 +150,7 @@ function startRun(mode, ids = state.enabledStrategyIds) {
   record({ type: 'start', state: started, candles: seed })
   resetQuotes()
   persist(true)
+  setActiveExperiment(experimentId)
 }
 
 
@@ -186,6 +203,7 @@ const api = createHttpServer(async (req, res) => {
         experiments: listExperiments(),
         experimentSummaries: listExperimentSummaries(),
         registryCount: STRATEGY_REGISTRY.length,
+        feedDiagnostics,
         registry: STRATEGY_REGISTRY.map((s) => ({
           id: s.id, name: s.name, family: s.family, rules: s.rules, version: s.version,
           usesFormingCandle: s.usesFormingCandle, pairedWith: s.pairedWith ?? null,
@@ -298,17 +316,31 @@ api.listen(PORT, HOST, () => {
 let ws
 let reqId = 1
 const pending = new Map()
+let stopHeartbeat = () => {}
+let reconnectTimer
+let stopping = false
+
+function reconnectFeed(reason) {
+  if (stopping || !ws || ws.readyState === WebSocket.CLOSED) return
+  logFeedEvent(reason)
+  feedHealthy = false
+  lastReceipt = 0
+  ws.terminate()
+}
 
 function connect() {
-  ws = new WebSocket(PUBLIC_WS)
-  ws.on('open', () => {
+  if (stopping) return
+  const socket = new WebSocket(PUBLIC_WS, { handshakeTimeout: 10000 })
+  ws = socket
+  socket.on('open', () => {
     console.log('[research] public WS connected')
+    feedDiagnostics.connections++
     feedHealthy = false
     lastReceipt = Date.now() // prevent stale watchdog from killing the socket before first tick
     // history then ticks
     const id = reqId++
     pending.set(id, 'history')
-    ws.send(JSON.stringify({
+    socket.send(JSON.stringify({
       ticks_history: SYMBOL,
       style: 'candles',
       granularity: 60,
@@ -316,8 +348,11 @@ function connect() {
       end: 'latest',
       req_id: id,
     }))
+    stopHeartbeat()
+    stopHeartbeat = startResearchHeartbeat(request, reconnectFeed)
   })
-  ws.on('message', async (raw) => {
+  socket.on('message', (raw) => {
+    if (socket !== ws || stopping) return
     let msg
     try { msg = JSON.parse(String(raw)) } catch { return }
     const reply = pending.get(msg.req_id)
@@ -329,6 +364,10 @@ function connect() {
     }
     if (msg.error) {
       console.warn('[research] WS error', msg.error.message)
+      if (reply === 'history' || reply === 'ticks') {
+        pending.delete(msg.req_id)
+        reconnectFeed(`${reply} request failed: ${msg.error.message}`)
+      }
       return
     }
     if (msg.candles && pending.get(msg.req_id) === 'history') {
@@ -350,16 +389,24 @@ function connect() {
       feedHealthy = candles.length >= 120
       persist(true)
       const subId = reqId++
-      ws.send(JSON.stringify({ ticks: SYMBOL, subscribe: 1, req_id: subId }))
+      pending.set(subId, 'ticks')
+      socket.send(JSON.stringify({ ticks: SYMBOL, subscribe: 1, req_id: subId }))
       return
     }
     if (msg.tick) {
+      if (reply === 'ticks') pending.delete(msg.req_id)
       const tick = {
         epoch: Number(msg.tick.epoch),
         quote: Number(msg.tick.quote),
         symbol: msg.tick.symbol || SYMBOL,
       }
       const receiptEpoch = Date.now() / 1000
+      if (!Number.isFinite(tick.epoch) || !Number.isFinite(tick.quote) || tick.quote <= 0 || tick.symbol !== SYMBOL) return
+      if (state.lastTickEpoch != null && tick.epoch > state.lastTickEpoch) {
+        const gap = tick.epoch - state.lastTickEpoch
+        feedDiagnostics.maxTickGapSec = Math.max(feedDiagnostics.maxTickGapSec, gap)
+        if (gap > 10) logFeedEvent(`Tick gap: ${gap}s`)
+      }
       lastReceipt = Date.now()
       const healthy = Math.abs(receiptEpoch - tick.epoch) <= 10 && candles.length >= 120
       feedHealthy = healthy
@@ -374,7 +421,12 @@ function connect() {
       }
     }
   })
-  ws.on('close', () => {
+  socket.on('close', (code, reason) => {
+    if (socket !== ws) return
+    stopHeartbeat()
+    feedDiagnostics.disconnects++
+    feedDiagnostics.lastDisconnectEpoch = Date.now() / 1000
+    logFeedEvent(`Socket closed (${code}): ${String(reason) || 'no close reason supplied'}`)
     feedHealthy = false
     record({ type: 'feed_unhealthy' })
     for (const [id, job] of pending) {
@@ -382,23 +434,23 @@ function connect() {
       pending.delete(id)
     }
     persist(true)
-    setTimeout(connect, 2000)
+    if (!stopping) reconnectTimer = setTimeout(connect, 2000)
   })
-  ws.on('error', () => { /* reconnect via close */ })
+  socket.on('error', (error) => { logFeedEvent(`Socket error: ${error.message}`) })
 }
 
 record({ type: 'feed_unhealthy' })
 resetQuotes()
 persist(true)
+setActiveExperiment(experimentId)
 connect()
 
-setInterval(() => {
+const clockTimer = setInterval(() => {
   // Only treat as stale after we have received at least one message (history or tick).
   if (lastReceipt > 0 && Date.now() - lastReceipt > 20000) {
     feedHealthy = false
     record({ type: 'feed_unhealthy' })
-    console.warn('[research] feed stale — reconnecting public WS')
-    try { ws?.terminate() } catch { /* */ }
+    reconnectFeed('No market data for 20s; reconnecting')
   }
   if (state.codeVersion === RESEARCH_CODE_VERSION) {
     record({ type: 'clock', now: Date.now() / 1000 })
@@ -406,8 +458,16 @@ setInterval(() => {
   }
 }, 1000)
 
-process.on('SIGINT', () => {
+function shutdown() {
+  if (stopping) return
+  stopping = true
+  stopHeartbeat()
+  clearInterval(clockTimer)
+  clearTimeout(reconnectTimer)
+  quotes?.cancel()
   persist(true)
   console.log('[research] stopped; experiment left at stage', state.stage)
   process.exit(0)
-})
+}
+process.on('SIGINT', shutdown)
+process.on('SIGTERM', shutdown)

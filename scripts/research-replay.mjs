@@ -1,11 +1,6 @@
-/**
- * Deterministic replay from ticks.jsonl + initial history is limited:
- * this replays recorded ticks through onTick starting from empty/warmup candles
- * rebuilt from tick stream when possible.
- */
+/** Replay the ordered history/tick/quote/control journal through the collector's reducer. */
 import { createServer } from 'vite'
-import { readFileSync, existsSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 
 const args = process.argv.slice(2)
 const idArg = args.includes('--id') ? args[args.indexOf('--id') + 1] : null
@@ -13,35 +8,42 @@ const vite = await createServer({
   root: process.cwd(), configFile: false, logLevel: 'error',
   server: { middlewareMode: true, hmr: false }, appType: 'custom',
 })
-const { latestExperimentId, loadState, experimentDir } = await vite.ssrLoadModule('/src/lib/research/experimentStore.ts')
-const { createInitialState, startDiscovery, onTick } = await vite.ssrLoadModule('/src/lib/research/experimentEngine.ts')
-const { applyTick } = await vite.ssrLoadModule('/src/lib/deriv/candles.ts')
 
-const id = idArg || latestExperimentId()
-if (!id) { console.error('No experiment'); process.exit(1) }
-const saved = loadState(id)
-const ticksPath = resolve(experimentDir(id), 'ticks.jsonl')
-if (!existsSync(ticksPath)) { console.error('No ticks.jsonl'); process.exit(1) }
-
-const lines = readFileSync(ticksPath, 'utf8').split('\n').filter(Boolean)
-let state = startDiscovery(createInitialState(saved?.mode ?? 'discovery', saved?.enabledStrategyIds), (saved?.startedAt ?? Math.floor(Date.now() / 1000)) * 1000)
-// Preserve original endsAt for deadline behaviour
-if (saved?.endsAt) state = { ...state, endsAt: saved.endsAt, startedAt: saved.startedAt }
-
-let candles = []
-for (const line of lines) {
-  const row = JSON.parse(line)
-  const tick = { epoch: row.epoch, quote: row.quote, symbol: row.symbol || 'R_100' }
-  const applied = applyTick(candles, tick)
-  candles = applied.candles
-  state = onTick(state, tick, candles, row.receiptMs ? row.receiptMs / 1000 : tick.epoch, true)
+try {
+  const { latestExperimentId, loadSession, readJournal } = await vite.ssrLoadModule('/src/lib/research/experimentStore.ts')
+  const { RESEARCH_CODE_VERSION } = await vite.ssrLoadModule('/src/lib/research/experimentEngine.ts')
+  const { emptyResearchSession, applyResearchEvent } = await vite.ssrLoadModule('/src/lib/research/researchSession.ts')
+  const id = idArg || latestExperimentId()
+  if (!id) throw new Error('No experiment found')
+  const saved = loadSession(id)
+  if (!saved || saved.state.codeVersion !== RESEARCH_CODE_VERSION) {
+    throw new Error('Exact replay requires a current-engine session checkpoint and its journal. Legacy tick-only exports cannot reproduce quotes or initial history.')
+  }
+  const events = readJournal(id)
+  if (!Number.isInteger(saved.sequence) || saved.sequence < 1 || events.length < saved.sequence) {
+    throw new Error('Journal is missing or shorter than the saved checkpoint; exact replay cannot be verified')
+  }
+  if (saved.state.startedAt != null && !events.slice(0, saved.sequence).some((e) => e.type === 'start')) {
+    throw new Error('Journal is missing the initial experiment settings and candle history')
+  }
+  let replay = emptyResearchSession()
+  for (const event of events.slice(0, saved.sequence)) replay = applyResearchEvent(replay, event)
+  // Normalize exactly as JSON checkpoints do (optional undefined fields are omitted).
+  const normalized = JSON.parse(JSON.stringify(replay))
+  const matches = isDeepStrictEqual(normalized, saved)
+  console.log(JSON.stringify({
+    experimentId: id, checkpointEvents: saved.sequence,
+    journalEventsAfterCheckpoint: events.length - saved.sequence,
+    replayObservations: replay.state.observations.length,
+    savedObservations: saved.state.observations.length,
+    fullCheckpointMatch: matches,
+    stateMatch: isDeepStrictEqual(normalized.state, saved.state),
+    candlesMatch: isDeepStrictEqual(normalized.candles, saved.candles),
+  }, null, 2))
+  if (!matches) process.exitCode = 1
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error))
+  process.exitCode = 1
+} finally {
+  await vite.close()
 }
-
-console.log(JSON.stringify({
-  experimentId: id,
-  replayObservations: state.observations.length,
-  savedObservations: saved?.observations?.length ?? null,
-  stage: state.stage,
-  matchCount: saved ? state.observations.length === saved.observations.length : null,
-}, null, 2))
-await vite.close()

@@ -7,7 +7,7 @@ import type { ExperimentState } from './experimentEngine'
 import { createInitialState } from './experimentEngine'
 import type { ResearchSession, ResearchEvent } from './researchSession'
 
-export const RESEARCH_DATA_ROOT = 'research-data'
+export const RESEARCH_DATA_ROOT = process.env.RESEARCH_DATA_ROOT || 'research-data'
 
 export function experimentDir(id: string): string {
   if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error('Invalid experiment ID')
@@ -163,13 +163,20 @@ export function listExperimentSummaries(): Array<{
 }
 
 export function latestExperimentId(): string | null {
-  const ranked = listExperimentSummaries()
-  // Prefer the run with the most observations so a fresh Start/Reset does not hide older data on reboot.
-  const richest = ranked.find((r) => r.observationCount > 0)
-  if (richest) return richest.id
+  const activePath = join(RESEARCH_DATA_ROOT, 'active.json')
+  if (existsSync(activePath)) {
+    const active = JSON.parse(readFileSync(activePath, 'utf8')) as { id: string }
+    if (existsSync(join(experimentDir(active.id), 'state.json'))) return active.id
+  }
+  // Without a pointer, choose the newest run, never silently return to an older, larger run.
   const ids = listExperiments()
   if (!ids.length) return null
   return ids.sort((a, b) => a.slice(a.indexOf('-')).localeCompare(b.slice(b.indexOf('-')))).at(-1) ?? null
+}
+
+export function setActiveExperiment(id: string): void {
+  ensureExperimentDir(id)
+  atomicJson(join(RESEARCH_DATA_ROOT, 'active.json'), { id })
 }
 
 export function newExperimentId(mode: 'discovery' | 'confirmation'): string {
