@@ -143,16 +143,23 @@ export class MarketFeed {
   }
 
   private requestHistoryPage() {
-    const remaining = HISTORY - this.historyPages.size
+    // Go live after the first solid page; waiting for 5×1000 bars kept the UI stuck on "Recovering".
+    const syncTarget = Math.min(HISTORY, HISTORY_BATCH)
+    const remaining = syncTarget - this.historyPages.size
     if (remaining <= 0) {
       this.finishHistorySync()
       return
     }
     const count = Math.min(HISTORY_BATCH, remaining)
-    this.historyId = this.client.send({
+    const id = this.client.send({
       ticks_history: SYMBOL, style: 'candles', granularity: 60,
       count, end: String(this.historyEnd),
     })
+    this.historyId = id
+    if (id == null) {
+      this.state = { ...this.state, ready: false, error: 'History request failed — retrying' }
+      this.emit()
+    }
   }
 
   /** Drop a failed history pull and restart from the newest buffered tick. */
@@ -233,13 +240,16 @@ export class MarketFeed {
       }
       for (const c of usable) this.historyPages.set(c.time, c)
       this.syncStarted = this.now()
-      const needMore = this.historyPages.size < HISTORY && usable.length >= Math.min(requested, HISTORY_BATCH)
+      // One good page (>=120 bars) is enough to leave SYNCING; do not wait for 5000 bars.
+      const syncTarget = Math.min(HISTORY, HISTORY_BATCH)
+      const needMore = this.historyPages.size < Math.min(syncTarget, MIN_HISTORY)
+        && usable.length >= Math.min(requested, HISTORY_BATCH)
       if (needMore) {
         const earliest = Math.min(...usable.map((c) => c.time))
         this.historyEnd = earliest - 60
         this.state = {
           ...this.state,
-          error: `Loading history ${this.historyPages.size}/${HISTORY}…`,
+          error: `Loading history ${this.historyPages.size}/${syncTarget}…`,
         }
         this.requestHistoryPage()
         this.emit()

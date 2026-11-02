@@ -304,6 +304,7 @@ function connect() {
   ws.on('open', () => {
     console.log('[research] public WS connected')
     feedHealthy = false
+    lastReceipt = Date.now() // prevent stale watchdog from killing the socket before first tick
     // history then ticks
     const id = reqId++
     pending.set(id, 'history')
@@ -332,6 +333,7 @@ function connect() {
     }
     if (msg.candles && pending.get(msg.req_id) === 'history') {
       pending.delete(msg.req_id)
+      lastReceipt = Date.now()
       const rows = msg.candles.map((c) => ({
         epoch: Number(c.epoch),
         open: Number(c.open),
@@ -342,7 +344,9 @@ function connect() {
       const history = finalizeByClock(candlesFromHistory(rows), Math.floor(Date.now() / 1000))
       // Keep the live warmup available even while an old run is read-only.
       candles = history
-      record({ type: 'history', candles: history })
+      if (state.codeVersion === RESEARCH_CODE_VERSION) {
+        record({ type: 'history', candles: history })
+      }
       feedHealthy = candles.length >= 120
       persist(true)
       const subId = reqId++
@@ -389,13 +393,17 @@ persist(true)
 connect()
 
 setInterval(() => {
-  if (Date.now() - lastReceipt > 15000) {
+  // Only treat as stale after we have received at least one message (history or tick).
+  if (lastReceipt > 0 && Date.now() - lastReceipt > 20000) {
     feedHealthy = false
     record({ type: 'feed_unhealthy' })
+    console.warn('[research] feed stale — reconnecting public WS')
     try { ws?.terminate() } catch { /* */ }
   }
-  record({ type: 'clock', now: Date.now() / 1000 })
-  persist()
+  if (state.codeVersion === RESEARCH_CODE_VERSION) {
+    record({ type: 'clock', now: Date.now() / 1000 })
+    persist()
+  }
 }, 1000)
 
 process.on('SIGINT', () => {
