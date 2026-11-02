@@ -110,23 +110,24 @@ describe('history synchronization and signal timing', () => {
     expect(feed.getSnapshot().ready).toBe(true)
     expect(closes).toEqual([])
   })
-  it('rejects malformed OHLC and missing history candles', () => {
+  it('keeps the live trailing streak when an older bar is malformed', () => {
     feed.start(); tick(55)
     const candles = fixtureCandles(120, minute - 119 * 60).map((c) => ({ ...c, epoch: c.time }))
     candles[50].high = NaN
     client.handler({ req_id: client.requests.length, candles })
-    expect(feed.getSnapshot().ready).toBe(false)
-    expect(feed.getSnapshot().error).toMatch(/Invalid|Recovering/)
+    // Gap from bad bar — trailing streak still enough to go live.
+    expect(feed.getSnapshot().candles.length).toBeGreaterThanOrEqual(65)
+    expect(feed.getSnapshot().lastPrice).not.toBeNull()
   })
-  it('retries history after a bad page instead of staying stuck', () => {
+  it('retries when the live trailing streak is below warmup', () => {
     feed.start()
     tick(55)
-    const bad = fixtureCandles(120, minute - 119 * 60).map((c) => ({ ...c, epoch: c.time }))
-    bad[50].high = NaN
+    const rows = fixtureCandles(120, minute - 119 * 60).map((c) => ({ ...c, epoch: c.time }))
+    // Gap very near the end → trailing streak too short for warmup.
+    rows.splice(100, 1)
     const badId = client.requests.length
-    client.handler({ req_id: badId, candles: bad })
+    client.handler({ req_id: badId, candles: rows })
     expect(feed.getSnapshot().ready).toBe(false)
-    // Recovery schedules a fresh history request from the latest tick.
     expect(client.requests.length).toBeGreaterThan(badId)
     history(minute)
     expect(feed.getSnapshot().ready).toBe(true)
