@@ -251,8 +251,8 @@ export class MarketFeed {
   }
 
   /**
-   * Go live as soon as the live trailing streak is warm enough, then optionally
-   * pull older connected pages (toward HISTORY) before finishing.
+   * After a good live trailing streak exists, keep pulling older *connected*
+   * pages until HISTORY (up to 5000) or the next gap — same idea as before.
    */
   private maybeBackfillOrFinish() {
     const times = [...this.historyPages.keys()].sort((a, b) => a - b)
@@ -261,20 +261,12 @@ export class MarketFeed {
       this.recoverHistory('Empty history — retrying')
       return
     }
-    // Already deep enough, or first page was short of a full API batch — go live.
-    if (this.historyPages.size >= HISTORY || (!this.backfilling && this.historyPages.size >= MIN_HISTORY
-      && this.historyPages.size < HISTORY_BATCH * 0.85)) {
+    if (this.historyPages.size >= HISTORY) {
       this.finishHistorySync()
       return
     }
-    if (!this.backfilling && this.historyPages.size >= MIN_HISTORY) {
-      // Full first page — try older connected pages for deeper chart (old 5k behavior).
-      this.backfilling = true
-    }
-    if (!this.backfilling) {
-      this.finishHistorySync()
-      return
-    }
+    // Always try to deepen toward 5000 while bars still connect (no chart jump).
+    this.backfilling = true
     this.historyEnd = earliest - 60
     this.state = {
       ...this.state,

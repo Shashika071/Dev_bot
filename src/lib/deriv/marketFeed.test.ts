@@ -25,9 +25,19 @@ function tick(seconds: number, price = 1000) {
   vi.setSystemTime((minute + seconds) * 1000)
   client.handler({ tick: { epoch: minute + seconds, quote: price, symbol: 'R_100' } })
 }
-function history(lastMinute = minute, reqId = client.requests.length) {
+function history(lastMinute = minute, reqId = client.requests.length, completeBackfill = true) {
   const candles = fixtureCandles(120, lastMinute - 119 * 60).map((c) => ({ ...c, epoch: c.time }))
   client.handler({ req_id: reqId, candles })
+  if (completeBackfill) finishBackfill(reqId)
+}
+/** Answer older-page requests so sync can leave Loading history… */
+function finishBackfill(afterReqId: number) {
+  let guard = 0
+  while (client.requests.length > afterReqId && guard++ < 10) {
+    const id = client.requests.length
+    afterReqId = id
+    client.handler({ req_id: id, candles: [] })
+  }
 }
 function ready() { feed.start(); tick(55); history() }
 
@@ -104,7 +114,7 @@ describe('history synchronization and signal timing', () => {
     const oldId = client.requests.length
     client.reconnect()
     expect(feed.getSnapshot().ready).toBe(false)
-    tick(58); history(minute, oldId)
+    tick(58); history(minute, oldId, false)
     expect(feed.getSnapshot().ready).toBe(false)
     history()
     expect(feed.getSnapshot().ready).toBe(true)
@@ -112,9 +122,11 @@ describe('history synchronization and signal timing', () => {
   })
   it('keeps the live trailing streak when an older bar is malformed', () => {
     feed.start(); tick(55)
+    const reqId = client.requests.length
     const candles = fixtureCandles(120, minute - 119 * 60).map((c) => ({ ...c, epoch: c.time }))
     candles[50].high = NaN
-    client.handler({ req_id: client.requests.length, candles })
+    client.handler({ req_id: reqId, candles })
+    finishBackfill(reqId)
     // Gap from bad bar — trailing streak still enough to go live.
     expect(feed.getSnapshot().candles.length).toBeGreaterThanOrEqual(65)
     expect(feed.getSnapshot().lastPrice).not.toBeNull()
@@ -150,10 +162,12 @@ describe('history synchronization and signal timing', () => {
   it('uses the trailing streak when a mid-history gap exists (avoids stale price jump)', () => {
     feed.start()
     tick(55)
+    const reqId = client.requests.length
     const rows = fixtureCandles(250, minute - 249 * 60).map((c) => ({ ...c, epoch: c.time }))
     // Gap early — trailing streak stays long and near live time.
     rows.splice(40, 1)
-    client.handler({ req_id: client.requests.length, candles: rows })
+    client.handler({ req_id: reqId, candles: rows })
+    finishBackfill(reqId)
     expect(feed.getSnapshot().candles.length).toBeGreaterThanOrEqual(120)
     expect(feed.getSnapshot().lastPrice).not.toBeNull()
     const lastClosed = feed.getSnapshot().candles.filter((c) => c.isClosed).at(-1)
