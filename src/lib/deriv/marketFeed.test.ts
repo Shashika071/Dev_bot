@@ -132,6 +132,20 @@ describe('history synchronization and signal timing', () => {
     expect(feed.getSnapshot().ready).toBe(true)
     expect(feed.getSnapshot().error).toBeNull()
   })
+  it('does not re-sync forever after history loads when signals are still warming up', () => {
+    feed.start()
+    tick(55)
+    history()
+    const afterSync = client.requests.length
+    expect(feed.getSnapshot().candles.length).toBeGreaterThanOrEqual(120)
+    tick(56)
+    tick(57)
+    tick(58)
+    // Live ticks must not spam new history requests once candles are loaded.
+    expect(client.requests.length).toBe(afterSync)
+    expect(feed.getSnapshot().candles.length).toBeGreaterThan(0)
+    expect(feed.getSnapshot().lastPrice).not.toBeNull()
+  })
   it('detects silence and reconnects even if the socket stays open', () => {
     ready()
     vi.advanceTimersByTime(11000)

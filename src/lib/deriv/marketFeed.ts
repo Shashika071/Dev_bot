@@ -8,6 +8,8 @@ const configuredHistory = Number(import.meta.env.VITE_HISTORY_COUNT || 5000)
 const HISTORY = Number.isFinite(configuredHistory) ? Math.max(120, Math.min(5000, Math.floor(configuredHistory))) : 5000
 /** Public Deriv API usually caps each ticks_history response around this size. */
 const HISTORY_BATCH = 1000
+/** Minimum consecutive closed bars required before we stop re-requesting history. */
+const MIN_HISTORY = 120
 export const SIGNAL_WINDOW_SECONDS = 5
 export const MAX_TICK_GAP_SECONDS = 10
 
@@ -41,6 +43,10 @@ function longestTrailingConsecutive(batch: Candle[], maxTime: number): Candle[] 
   let start = end
   while (start > 0 && sorted[start]!.time === sorted[start - 1]!.time + 60) start -= 1
   return sorted.slice(start, end + 1)
+}
+
+function isConsecutive(history: Candle[]): boolean {
+  return history.length > 0 && history.every((c, i) => i === 0 || c.time === history[i - 1]!.time + 60)
 }
 
 /** History ends before the first buffered tick, so replay cannot overwrite newer prices. */
@@ -118,8 +124,8 @@ export class MarketFeed {
     }
     this.emit()
     // Allow longer while paginating history (several API batches).
-    const syncBudget = this.historyPages.size > 0 ? 45000 : 15000
-    if (age > 15000 || (this.syncing && this.now() - this.syncStarted > syncBudget)) {
+    const syncBudget = this.historyPages.size > 0 ? 90_000 : 20_000
+    if (age > 15_000 || (this.syncing && this.now() - this.syncStarted > syncBudget)) {
       this.client.reconnect()
     }
   }
@@ -164,12 +170,20 @@ export class MarketFeed {
     this.beginSync(latest)
   }
 
+  private signalReady(candles: Candle[], latest: Tick): boolean {
+    const lastClosed = candles.filter((c) => c.isClosed).at(-1)
+    return !!evaluateLatestClosed(candles)
+      && lastClosed?.time === minuteBucket(latest.epoch) - 60
+      && this.now() - this.lastReceipt <= MAX_TICK_GAP_SECONDS * 1000
+      && Math.abs(this.now() / 1000 - latest.epoch) <= MAX_TICK_GAP_SECONDS
+  }
+
   private finishHistorySync() {
     const firstTick = this.buffered[0]
     if (!firstTick) return
     const history = [...this.historyPages.values()].sort((a, b) => a.time - b.time)
-    if (history.length < 120 || history.some((c, i) =>
-      c.time > minuteBucket(this.historyTargetEnd) || (i > 0 && c.time !== history[i - 1].time + 60))) {
+    if (history.length < MIN_HISTORY || !isConsecutive(history)
+      || history.some((c) => c.time > minuteBucket(this.historyTargetEnd))) {
       this.recoverHistory('Invalid or incomplete history — retrying recovery')
       return
     }
@@ -177,17 +191,19 @@ export class MarketFeed {
     for (const tick of this.buffered) candles = applyTick(candles, tick).candles
     const latest = this.buffered.at(-1)!
     const lastClosed = candles.filter((c) => c.isClosed).at(-1)
-    const ready = !!evaluateLatestClosed(candles)
-      && lastClosed?.time === minuteBucket(latest.epoch) - 60
-      && this.now() - this.lastReceipt <= MAX_TICK_GAP_SECONDS * 1000
-      && Math.abs(this.now() / 1000 - latest.epoch) <= MAX_TICK_GAP_SECONDS
+    const ready = this.signalReady(candles, latest)
+    // History is good enough to stop looping even when signal "ready" is still false
+    // (warmup / clock skew). Chart must show; only gap/disconnect should re-sync.
     this.state = {
-      ...this.state, candles: candles.slice(-HISTORY), ready,
-      lastPrice: latest.quote, lastTickEpoch: latest.epoch,
+      ...this.state,
+      candles: candles.slice(-HISTORY),
+      ready,
+      lastPrice: latest.quote,
+      lastTickEpoch: latest.epoch,
       lastConfirmedCandleTime: lastClosed?.time ?? null,
-      error: ready ? null : 'Insufficient consecutive candles — signals paused',
+      error: ready ? null : 'History loaded — waiting for signal warmup / fresh ticks',
     }
-    this.syncing = !ready
+    this.syncing = false
     this.historyId = null
     this.historyPages.clear()
     this.buffered = []
@@ -205,20 +221,18 @@ export class MarketFeed {
       if (!this.syncing || this.historyId == null || msg.req_id !== this.historyId || !this.buffered.length) return
       const batch = candlesFromHistory(msg.candles)
       const requested = Math.min(HISTORY_BATCH, HISTORY - this.historyPages.size)
-      // Prefer the longest trailing consecutive segment; Deriv occasionally drops a bar mid-page.
       const usable = longestTrailingConsecutive(batch, minuteBucket(this.historyTargetEnd))
       if (
         usable.length < 1
-        || (usable.length < Math.min(120, Math.max(1, batch.length)) && usable.length < requested * 0.9)
-        || usable.some((c, i) =>
-          c.time > minuteBucket(this.historyTargetEnd) || (i > 0 && c.time !== usable[i - 1]!.time + 60))
+        || (usable.length < Math.min(MIN_HISTORY, Math.max(1, batch.length)) && usable.length < requested * 0.9)
+        || !isConsecutive(usable)
+        || usable.some((c) => c.time > minuteBucket(this.historyTargetEnd))
       ) {
         this.recoverHistory('Invalid or incomplete history — retrying recovery')
         return
       }
       for (const c of usable) this.historyPages.set(c.time, c)
       this.syncStarted = this.now()
-      // Keep paging while the API still returns a full page worth of usable bars.
       const needMore = this.historyPages.size < HISTORY && usable.length >= Math.min(requested, HISTORY_BATCH)
       if (needMore) {
         const earliest = Math.min(...usable.map((c) => c.time))
@@ -245,7 +259,7 @@ export class MarketFeed {
       this.emit()
       return
     }
-    const gap = this.lastTick && tick.epoch - this.lastTick.epoch > MAX_TICK_GAP_SECONDS
+    const gap = this.lastTick != null && tick.epoch - this.lastTick.epoch > MAX_TICK_GAP_SECONDS
     this.lastTick = tick
     this.lastReceipt = this.now()
     if (this.syncing) {
@@ -253,14 +267,21 @@ export class MarketFeed {
       else this.buffered.push(tick)
       return
     }
-    if (gap || !this.state.ready) {
+    // Only full history re-sync on a real gap — never because signals are not ready yet.
+    if (gap || this.state.candles.length < MIN_HISTORY) {
       this.beginSync(tick)
       return
     }
     const { candles, closedCandle } = applyTick(this.state.candles, tick)
+    const ready = this.signalReady(candles, tick)
     this.state = {
-      ...this.state, candles: candles.slice(-HISTORY), lastPrice: tick.quote,
-      lastTickEpoch: tick.epoch, lastConfirmedCandleTime: closedCandle?.time ?? this.state.lastConfirmedCandleTime,
+      ...this.state,
+      candles: candles.slice(-HISTORY),
+      lastPrice: tick.quote,
+      lastTickEpoch: tick.epoch,
+      lastConfirmedCandleTime: closedCandle?.time ?? this.state.lastConfirmedCandleTime,
+      ready,
+      error: ready ? null : this.state.error,
     }
     if (closedCandle && tick.epoch - (closedCandle.time + 60) <= SIGNAL_WINDOW_SECONDS
       && this.now() / 1000 - (closedCandle.time + 60) <= SIGNAL_WINDOW_SECONDS) {

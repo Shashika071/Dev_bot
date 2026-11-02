@@ -118,7 +118,55 @@ export function listExperiments(): string[] {
     .map((d) => d.name)
 }
 
+export function listExperimentSummaries(): Array<{
+  id: string
+  stage: string | null
+  mode: string | null
+  startedAt: number | null
+  observationCount: number
+  codeVersion: string | null
+}> {
+  return listExperiments()
+    .map((id) => {
+      const manifestPath = join(experimentDir(id), 'manifest.json')
+      const statePath = join(experimentDir(id), 'state.json')
+      try {
+        if (existsSync(manifestPath)) {
+          const m = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+            stage?: string; mode?: string; startedAt?: number | null
+            observationCount?: number; codeVersion?: string
+          }
+          return {
+            id,
+            stage: m.stage ?? null,
+            mode: m.mode ?? null,
+            startedAt: m.startedAt ?? null,
+            observationCount: m.observationCount ?? 0,
+            codeVersion: m.codeVersion ?? null,
+          }
+        }
+        if (existsSync(statePath)) {
+          const s = JSON.parse(readFileSync(statePath, 'utf8')) as ExperimentState
+          return {
+            id,
+            stage: s.stage ?? null,
+            mode: s.mode ?? null,
+            startedAt: s.startedAt ?? null,
+            observationCount: s.observations?.length ?? 0,
+            codeVersion: s.codeVersion ?? null,
+          }
+        }
+      } catch { /* ignore corrupt run */ }
+      return { id, stage: null, mode: null, startedAt: null, observationCount: 0, codeVersion: null }
+    })
+    .sort((a, b) => b.observationCount - a.observationCount || String(b.startedAt).localeCompare(String(a.startedAt)))
+}
+
 export function latestExperimentId(): string | null {
+  const ranked = listExperimentSummaries()
+  // Prefer the run with the most observations so a fresh Start/Reset does not hide older data on reboot.
+  const richest = ranked.find((r) => r.observationCount > 0)
+  if (richest) return richest.id
   const ids = listExperiments()
   if (!ids.length) return null
   return ids.sort((a, b) => a.slice(a.indexOf('-')).localeCompare(b.slice(b.indexOf('-')))).at(-1) ?? null

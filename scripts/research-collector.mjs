@@ -36,6 +36,7 @@ const {
   appendSessionSnapshot, loadSession, appendJournal, readJournal,
   appendTick,
   listExperiments,
+  listExperimentSummaries,
 } = await vite.ssrLoadModule('/src/lib/research/experimentStore.ts')
 const { summarizeExperiment, exportObservationsCsv, exportReportMarkdown } =
   await vite.ssrLoadModule('/src/lib/research/summarizeExperiment.ts')
@@ -76,6 +77,23 @@ function persist(force = false) {
   if (!force && now - lastPersist < 2000) return
   lastPersist = now
   appendSessionSnapshot(experimentId, session)
+}
+
+function loadExperiment(id) {
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error('Invalid experiment ID')
+  if (!listExperiments().includes(id)) throw new Error(`Experiment not found: ${id}`)
+  persist(true)
+  quotes?.cancel()
+  experimentId = id
+  session = loadSession(experimentId) || { ...emptyResearchSession(), state: loadState(experimentId) || createInitialState() }
+  if (session.state.codeVersion === RESEARCH_CODE_VERSION) {
+    const events = readJournal(experimentId, true)
+    for (const event of events.slice(session.sequence)) session = applyResearchEvent(session, event)
+  }
+  state = session.state
+  candles = session.candles
+  resetQuotes()
+  persist(true)
 }
 
 function request(payload) {
@@ -166,6 +184,7 @@ const api = createHttpServer(async (req, res) => {
         live: true,
         experimentId,
         experiments: listExperiments(),
+        experimentSummaries: listExperimentSummaries(),
         registryCount: STRATEGY_REGISTRY.length,
         registry: STRATEGY_REGISTRY.map((s) => ({
           id: s.id, name: s.name, family: s.family, rules: s.rules, version: s.version,
@@ -240,6 +259,22 @@ const api = createHttpServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/control/reset') {
       // Clear all live records and begin a fresh discovery from zero.
       startRun('discovery')
+      return json(res, 200, {
+        ok: true,
+        experimentId,
+        stage: state.stage,
+        observationCount: state.observations.length,
+        endsAt: state.endsAt,
+      })
+    }
+    if (req.method === 'POST' && url.pathname === '/control/load-experiment') {
+      const body = await readBody(req)
+      const id = typeof body.id === 'string' ? body.id : ''
+      try {
+        loadExperiment(id)
+      } catch (e) {
+        return json(res, 400, { error: e instanceof Error ? e.message : String(e) })
+      }
       return json(res, 200, {
         ok: true,
         experimentId,

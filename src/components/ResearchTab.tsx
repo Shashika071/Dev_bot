@@ -134,6 +134,12 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
   const observationCount = usingServer
     ? (remote?.state?.observationCount ?? 0)
     : browser.state.observations.length
+  const otherRuns = usingServer
+    ? (((remote as { experimentSummaries?: Array<{ id: string; observationCount: number; stage: string | null; startedAt: number | null }> } | null)
+        ?.experimentSummaries ?? [])
+      .filter((r) => r.id !== experimentId && r.observationCount > 0)
+      .slice(0, 8))
+    : []
 
   function confirmWipe(action: string): boolean {
     if (observationCount <= 0) return true
@@ -368,6 +374,41 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
             ? (remoteLive ? (legacy ? 'Old run is read-only. Start a new v2 experiment to collect corrected results.' : 'Server collector is running. You can close this tab; research continues.') : 'Connection lost. This is a snapshot; live collection status is unknown.')
             : 'For a full 72h on the deployed site: leave this browser open (or reopen and click Resume). Data is stored in this browser only. Auto trade can stay OFF.'}
         </p>
+
+        {usingServer && otherRuns.length > 0 && (
+          <div className="mt-3 rounded border border-slate-700 bg-slate-950/50 p-2">
+            <div className="mb-1 font-medium text-slate-200">Previous saved runs (not wiped)</div>
+            <p className="mb-2 text-[11px] text-slate-500">
+              Start/Reset creates a new run. Your older observations are still on the server — load one below.
+            </p>
+            <div className="flex flex-col gap-1">
+              {otherRuns.map((run) => (
+                <div key={run.id} className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                  <span className="text-slate-300">
+                    {run.id}
+                    {' · '}
+                    <span className="text-emerald-300">{run.observationCount} obs</span>
+                    {run.stage ? ` · ${run.stage}` : ''}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={controlsDisabled}
+                    className={`${btn} bg-slate-700 text-slate-100 hover:bg-slate-600`}
+                    onClick={() =>
+                      void runRemote(
+                        '/control/load-experiment',
+                        { id: run.id },
+                        `Loaded ${run.id} (${run.observationCount} observations)`,
+                      )
+                    }
+                  >
+                    Load this run
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </section>
 
       <section className="rounded border border-slate-800 bg-[#0c1118] p-3">
