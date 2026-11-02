@@ -10,6 +10,7 @@ export interface ProposalQuote {
   payout: number
   barrier: string
   responseEpoch: number
+  requestEpoch?: number
   rawError?: string
 }
 
@@ -27,6 +28,7 @@ export async function proposeOneTouchOnly(
   side: 'RISE' | 'FALL',
 ): Promise<ProposalQuote | null> {
   const barrier = formatRelativeBarrier(settings.barrierAbs, side === 'RISE' ? 1 : -1)
+  const requestEpoch = Date.now() / 1000
   try {
     const msg = await transport.request({
       proposal: 1,
@@ -44,7 +46,7 @@ export async function proposeOneTouchOnly(
         ask: NaN,
         payout: NaN,
         barrier,
-        responseEpoch: Math.floor(Date.now() / 1000),
+        requestEpoch, responseEpoch: Date.now() / 1000,
         rawError: String((msg.error as { message?: string }).message ?? 'proposal error'),
       }
     }
@@ -56,7 +58,7 @@ export async function proposeOneTouchOnly(
         ask: NaN,
         payout: NaN,
         barrier,
-        responseEpoch: Math.floor(Date.now() / 1000),
+        requestEpoch, responseEpoch: Date.now() / 1000,
         rawError: 'Malformed proposal',
       }
     }
@@ -64,14 +66,14 @@ export async function proposeOneTouchOnly(
       ask,
       payout,
       barrier,
-      responseEpoch: Math.floor(Date.now() / 1000),
+      requestEpoch, responseEpoch: Date.now() / 1000,
     }
   } catch (e) {
     return {
       ask: NaN,
       payout: NaN,
       barrier,
-      responseEpoch: Math.floor(Date.now() / 1000),
+      requestEpoch, responseEpoch: Date.now() / 1000,
       rawError: e instanceof Error ? e.message : 'proposal failed',
     }
   }

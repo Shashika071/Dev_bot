@@ -1,4 +1,6 @@
 import { Fragment, useEffect, useState } from 'react'
+import { RESEARCH_CODE_VERSION } from '../lib/research/experimentEngine'
+import type { StrategySummary } from '../lib/research/summarizeExperiment'
 import type { MarketState } from '../lib/deriv/marketFeed'
 import { useBrowserResearch } from '../hooks/useBrowserResearch'
 import {
@@ -20,8 +22,8 @@ function ago(epoch: number | null | undefined) {
 type RemotePayload = Awaited<ReturnType<typeof fetchResearchStatus>>
 
 export function ResearchTab({ market }: { market: MarketState | null }) {
-  const browser = useBrowserResearch(market)
   const [mode, setMode] = useState<'server' | 'browser'>('browser')
+  const browser = useBrowserResearch(market, mode === 'browser')
   const [remote, setRemote] = useState<RemotePayload | null>(null)
   const [remoteLive, setRemoteLive] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -53,7 +55,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
       } catch {
         if (cancelled) return
         setRemoteLive(false)
-        setMode('browser')
+        // Preserve the server snapshot on disconnect; never swap to another experiment.
       }
     }
     void poll()
@@ -81,7 +83,13 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
     }
   }
 
-  const usingServer = mode === 'server' && remoteLive
+  function confirmReset(): boolean {
+    return window.confirm(
+      'Reset research? This clears all observations and starts a new 72h discovery from zero. Export first if you need the current run.',
+    )
+  }
+
+  const usingServer = mode === 'server' && remote != null
   const st = usingServer ? remote?.state : browser.state
   const strategies = usingServer
     ? (remote?.summary?.strategies ?? [])
@@ -89,6 +97,9 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
   const registryCount = usingServer
     ? (remote?.registryCount ?? 0)
     : browser.registry.length
+  const summary = usingServer ? remote?.summary : browser.summary
+  const legacy = (summary?.codeVersion ?? st?.codeVersion) !== RESEARCH_CODE_VERSION
+  const controlsDisabled = busy || (usingServer && !remoteLive)
   const contract = (st as { contract?: { contractType: string; barrierAbs: number; duration: number; durationUnit: string; paperStake: number; currency: string } } | undefined)?.contract
 
   return (
@@ -103,7 +114,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
         <div className="text-right text-[11px]">
           {usingServer ? (
             <>
-              <div className="text-emerald-400">● Server collector (keeps running if you close tab)</div>
+              <div className={remoteLive ? "text-emerald-400" : "text-rose-400"}>{remoteLive ? "● Server collector" : "● Server disconnected — last saved snapshot"}</div>
               <div className="text-slate-500">Report {generatedAt ? ago(generatedAt) : '—'}</div>
             </>
           ) : (
@@ -123,6 +134,16 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
           After you redeploy with the <code className="text-amber-100">research</code> container,
           this becomes always-on and closing the tab is OK.
         </p>
+      )}
+
+      {legacy && (
+        <p className="rounded border border-amber-700 bg-amber-950/40 p-3 text-amber-200">
+          Pre-fix experiment: preserved read-only. Paired entries, quotes and expiry were affected by known bugs.
+          Export this run and start a new discovery with the corrected engine. Legacy P&amp;L is not comparable.
+        </p>
+      )}
+      {browser.storageError && !usingServer && (
+        <p role="alert" className="text-rose-300">Browser storage is full or unavailable. Export the in-memory results now; new observations are not being saved.</p>
       )}
 
       <section className="relative z-10 rounded border border-slate-800 bg-[#0c1118] p-3">
@@ -162,7 +183,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
             <>
               <button
                 type="button"
-                disabled={busy}
+                disabled={controlsDisabled}
                 onClick={() => void runRemote('/control/start-discovery', undefined, 'Discovery started (server)')}
                 className={`${btn} bg-emerald-600 text-white hover:bg-emerald-500`}
               >
@@ -170,7 +191,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
               </button>
               <button
                 type="button"
-                disabled={busy}
+                disabled={controlsDisabled || legacy}
                 onClick={() => void runRemote('/control/resume', undefined, 'Resumed collecting')}
                 className={`${btn} bg-slate-600 text-slate-100 hover:bg-slate-500`}
               >
@@ -178,7 +199,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
               </button>
               <button
                 type="button"
-                disabled={busy}
+                disabled={controlsDisabled || legacy}
                 onClick={() => void runRemote('/control/stop-entries', undefined, 'Stopped new entries')}
                 className={`${btn} bg-slate-600 text-slate-100 hover:bg-slate-500`}
               >
@@ -186,7 +207,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
               </button>
               <button
                 type="button"
-                disabled={busy}
+                disabled={controlsDisabled}
                 onClick={() =>
                   void runRemote(
                     '/control/start-confirmation',
@@ -198,14 +219,25 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
               >
                 Start confirmation (same IDs)
               </button>
+              <button
+                type="button"
+                disabled={controlsDisabled}
+                onClick={() => {
+                  if (!confirmReset()) return
+                  void runRemote('/control/reset', undefined, 'Reset — all records cleared, discovery restarted from 0')
+                }}
+                className={`${btn} bg-rose-800 text-rose-100 hover:bg-rose-700`}
+              >
+                Reset (clear all)
+              </button>
             </>
           ) : (
             <>
               <button
                 type="button"
                 onClick={() => {
-                  const next = browser.start()
-                  note(`Discovery started — stage: ${next.stage}`)
+                  try { const next = browser.start(); note(`Discovery started — stage: ${next.stage}`) }
+                  catch { note('Could not archive the existing run. Export it before starting another run.') }
                 }}
                 className={`${btn} bg-emerald-600 text-white hover:bg-emerald-500`}
               >
@@ -213,6 +245,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
               </button>
               <button
                 type="button"
+                disabled={legacy}
                 onClick={() => {
                   const next = browser.resume()
                   note(`Resumed — stage: ${next.stage}`)
@@ -223,6 +256,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
               </button>
               <button
                 type="button"
+                disabled={legacy}
                 onClick={() => {
                   const next = browser.stopEntries()
                   note(`Stopped new entries — stage: ${next.stage}`)
@@ -234,12 +268,27 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
               <button
                 type="button"
                 onClick={() => {
-                  const next = browser.startConfirmation()
-                  note(`Confirmation started — stage: ${next.stage}`)
+                  try { const next = browser.startConfirmation(); note(`Confirmation started — stage: ${next.stage}`) }
+                  catch { note('Could not archive the existing run. Export it before starting another run.') }
                 }}
                 className={`${btn} bg-slate-600 text-slate-100 hover:bg-slate-500`}
               >
                 Start confirmation (same IDs)
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!confirmReset()) return
+                  try {
+                    const next = browser.resetAll()
+                    note(`Reset — observations 0, stage: ${next.stage}`)
+                  } catch {
+                    note('Could not archive the existing run. Export it before reset.')
+                  }
+                }}
+                className={`${btn} bg-rose-800 text-rose-100 hover:bg-rose-700`}
+              >
+                Reset (clear all)
               </button>
             </>
           )}
@@ -253,7 +302,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
 
         <p className="mt-2 text-[11px] text-slate-500">
           {usingServer
-            ? 'Server collector is running on the VPS. You can close this tab; research continues.'
+            ? (remoteLive ? (legacy ? 'Old run is read-only. Start a new v2 experiment to collect corrected results.' : 'Server collector is running. You can close this tab; research continues.') : 'Connection lost. This is a snapshot; live collection status is unknown.')
             : 'For a full 72h on the deployed site: leave this browser open (or reopen and click Resume). Data is stored in this browser only. Auto trade can stay OFF.'}
         </p>
       </section>
@@ -277,33 +326,26 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
             )}
           </div>
         </div>
+        <p className="mt-2 text-[11px] text-slate-400">
+          H/M/U/P = hit / miss / unknown / pending. Reference touches and post-quote touches have different entries.
+          P&amp;L and cost use the same settled quoted observations only. Direction percentages exclude unchanged and unavailable endpoints.
+          * Fewer than 20 directional outcomes; larger samples are still exploratory, not proof of an advantage.
+        </p>
         <div className="mt-2 overflow-auto">
-          <table className="w-full min-w-[900px] text-left text-[11px]">
+          <table className="w-full min-w-[1400px] text-left text-[11px]">
             <thead className="text-slate-500">
               <tr>
                 <th className="px-2 py-1">ID</th>
                 <th className="px-2 py-1">Name</th>
                 <th className="px-2 py-1">n</th>
                 <th className="px-2 py-1">7m cont%</th>
-                <th className="px-2 py-1">vs random</th>
-                <th className="px-2 py-1">Touch H/M/U</th>
+                <th className="px-2 py-1">50/50 reference</th>
+                <th className="px-2 py-1">Reference H/M/U/P</th>
                 <th className="px-2 py-1">Quote P&L</th>
               </tr>
             </thead>
             <tbody>
-              {strategies.map((s: {
-                id: string
-                name: string
-                family: string
-                rules: string
-                candidatesAccepted: number
-                horizons: Array<{ minutes: number; contRate: number | null; randomContRate: number | null; insufficient: boolean }>
-                touchHits: number
-                touchMisses: number
-                touchUnknown: number
-                pnlUnavailable: boolean
-                paperPnl: number | null
-              }) => {
+              {strategies.map((s: StrategySummary) => {
                 const h7 = s.horizons.find((h) => h.minutes === 7)
                 return (
                   <Fragment key={s.id}>
@@ -316,12 +358,19 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
                       <td className="px-2 py-1 tabular-nums">{s.candidatesAccepted}</td>
                       <td className="px-2 py-1 tabular-nums">{h7?.insufficient ? `${pct(h7.contRate)}*` : pct(h7?.contRate)}</td>
                       <td className="px-2 py-1 tabular-nums">{pct(h7?.randomContRate)}</td>
-                      <td className="px-2 py-1 tabular-nums">{s.touchHits}/{s.touchMisses}/{s.touchUnknown}</td>
-                      <td className="px-2 py-1">{s.pnlUnavailable ? 'UNAVAILABLE' : (s.paperPnl?.toFixed(4) ?? '—')}</td>
+                      <td className="px-2 py-1 tabular-nums">{s.touchHits}/{s.touchMisses}/{s.touchUnknown}/{s.touchPending ?? 0}</td>
+                      <td className="px-2 py-1">{s.quotesAvailable}/{s.candidatesAccepted}</td>
+                      <td className="px-2 py-1">{legacy ? "—" : `${s.quotedHits}/${s.quotedMisses}/${s.quotedUnknown}/${s.quotedPending}`}</td>
+                      <td className="px-2 py-1">{legacy ? "—" : `${s.quotedSettled} / ${s.paperCost?.toFixed(2) ?? "—"}`}</td>
+                      <td className="px-2 py-1">{legacy || s.pnlUnavailable ? 'UNAVAILABLE' : (s.paperPnl?.toFixed(4) ?? '—')}</td>
+                      <td className="px-2 py-1">{legacy ? '—' : pct(s.paperReturn)}</td>
                     </tr>
                     {expanded === s.id && (
                       <tr className="border-t border-slate-900/50 bg-[#121820]">
-                        <td colSpan={7} className="px-3 py-2 text-[11px] text-slate-400 whitespace-pre-wrap">{s.rules}</td>
+                        <td colSpan={11} className="px-3 py-2 text-[11px] text-slate-400 whitespace-pre-wrap">{s.rules}{'\n\n'}
+                          7m: {h7?.continuation ?? 0} continuation / {h7?.reversal ?? 0} reversal / {h7?.unchanged ?? 0} unchanged / {h7?.unknown ?? 0} unknown / {h7?.pending ?? 0} pending.
+                          {'\n'}Quoted results include only simulations entered after quote receipt. Unquoted observations do not contribute to P&amp;L.
+                        </td>
                       </tr>
                     )}
                   </Fragment>

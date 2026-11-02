@@ -9,8 +9,10 @@ import {
 } from './experimentEngine'
 import { STRATEGY_COOLDOWN_SEC } from './horizons'
 import { RESEARCH_FORBIDDEN_METHODS } from './touchPaper'
+import { summarizeExperiment } from './summarizeExperiment'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import type { Candle } from '../types'
 
 function closedFixtures(n: number) {
   return fixtureCandles(n).map((c) => ({ ...c, isClosed: true }))
@@ -85,5 +87,73 @@ describe('experiment engine', () => {
     const propose = readFileSync(resolve('src/lib/research/proposeOnly.ts'), 'utf8')
     expect(propose.includes('buy:')).toBe(false)
     expect(propose.includes('buyOneTouch')).toBe(false)
+  })
+
+  it('admits both S6 and S7 on the same tick (shared cooldown snapshot)', () => {
+    const start = 1_700_000_040 // minute-aligned
+    const candles: Candle[] = []
+    let px = 100
+    for (let i = 0; i < 220; i++) {
+      const open = px
+      // flat warmup, then three strict up closes at the end
+      if (i >= 217) px += 1
+      candles.push({
+        time: start + i * 60,
+        open,
+        high: Math.max(open, px) + 0.2,
+        low: Math.min(open, px) - 0.2,
+        close: px,
+        isClosed: true,
+      })
+    }
+    const last = candles[candles.length - 1]!
+    const closeEpoch = last.time + 60
+    let state = startDiscovery(createInitialState('discovery', ['S6', 'S7']), closeEpoch * 1000)
+    state = onTick(
+      state,
+      { epoch: closeEpoch, quote: last.close, symbol: 'R_100' },
+      candles,
+      closeEpoch,
+      true,
+    )
+    const ids = state.observations.map((o) => o.strategyId).sort()
+    expect(ids).toEqual(['S6', 'S7'])
+    expect(state.rejected.filter((r) => r.reason === 'Cooldown active')).toHaveLength(0)
+  })
+
+  it('uses exact 50% equally weighted RISE/FALL as vs-random', () => {
+    const t0 = 1_700_000_040
+    let state = startDiscovery(createInitialState('discovery', ['S6']), t0 * 1000)
+    state = {
+      ...state,
+      observations: [{
+        id: 'S6:1:RISE',
+        strategyId: 'S6',
+        side: 'RISE',
+        candleTime: t0 - 60,
+        signalEpoch: t0,
+        receiptEpoch: t0,
+        entryReferencePrice: 100,
+        entryTick: { epoch: t0, quote: 100, symbol: 'R_100' },
+        forming: false,
+        reason: 'test',
+        atr: 1,
+        lastTickEpoch: t0 + 420,
+        horizons: [{
+          minutes: 7,
+          targetEpoch: t0 + 420,
+          status: 'continuation',
+          observedEpoch: t0 + 420,
+          observedPrice: 101,
+          signedMove: 1,
+          signedMoveInAtr: 1,
+        }],
+        pendingHorizons: false,
+      }],
+    }
+    const summary = summarizeExperiment(state)
+    const h7 = summary.strategies[0]!.horizons.find((h) => h.minutes === 7)!
+    expect(h7.contRate).toBe(1)
+    expect(h7.randomContRate).toBe(0.5)
   })
 })

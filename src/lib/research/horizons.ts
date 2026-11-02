@@ -30,10 +30,8 @@ function settle(
   side: ResearchSide,
   entry: number,
   atr14: number | null,
-  randomSide: ResearchSide,
 ): HorizonResult {
   const signedMove = sign(side) * (tick.quote - entry)
-  const randomSignedMove = sign(randomSide) * (tick.quote - entry)
   return {
     ...h,
     status: classify(signedMove),
@@ -42,8 +40,6 @@ function settle(
     delaySec: tick.epoch - h.targetEpoch,
     signedMove,
     signedMoveInAtr: atr14 != null && atr14 > 0 ? signedMove / atr14 : null,
-    randomSignedMove,
-    randomClass: classify(randomSignedMove),
     reason: undefined,
   }
 }
@@ -74,7 +70,7 @@ export function advanceObservationHorizons(
     if (tick.epoch > h.targetEpoch + MAX_HORIZON_DELAY_SEC) {
       return markUnknown(h, 'No timely horizon tick (max delay 5s)')
     }
-    return settle(h, tick, obs.side, obs.entryReferencePrice, obs.atr.atr14, obs.randomSide)
+    return settle(h, tick, obs.side, obs.entryReferencePrice, obs.atr.atr14)
   })
   return {
     ...obs,

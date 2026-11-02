@@ -126,7 +126,8 @@ export interface ResearchObservation {
   total?: number
   metrics?: Record<string, number | boolean | string | null>
   atr: FrozenAtr
-  randomSide: ResearchSide
+  /** Legacy v1 sampled benchmark; v2 uses an exact equally weighted benchmark. */
+  randomSide?: ResearchSide
   lastTickEpoch: number
   horizons: HorizonResult[]
   pendingHorizons: boolean
@@ -134,21 +135,32 @@ export interface ResearchObservation {
   touch?: TouchPaperState
 }
 
-export interface TouchPaperState {
-  barrierAbs: number
-  durationMin: number
-  stake: number
+export interface TouchPathState {
   paperEntryEpoch: number | null
   paperEntryPrice: number | null
   absoluteBarrier: number | null
   status: 'pending' | 'hit' | 'miss' | 'unknown'
   firstTouchEpoch?: number
   reason?: string
+  lastTickEpoch?: number
+  coverageLost?: boolean
+}
+
+export interface TouchPaperState extends TouchPathState {
+  barrierAbs: number
+  durationMin: number
+  stake: number
   proposalAsk?: number | null
   proposalPayout?: number | null
   proposalAgeSec?: number | null
   paperPnl?: number | null
   quoteAvailable: boolean
+  quoteStatus?: 'waiting' | 'available' | 'unavailable' | 'expired'
+  quoteReason?: string
+  quoteRequestEpoch?: number
+  quoteResponseEpoch?: number
+  /** Separate simulation entered on the first tick after quote receipt. */
+  quotedPath?: TouchPathState
 }
 
 export interface RejectedCandidate {

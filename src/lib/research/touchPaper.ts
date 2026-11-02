@@ -1,138 +1,148 @@
-/**
- * Quote-based / tick-path ONETOUCH paper simulation.
- * Never sends buy. Proposals are optional and may be unavailable.
- */
+/** Public-tick reference touches and a separate, causal quote-based simulation. */
 import type { Tick } from '../types'
 import type { FrozenContractSettings } from './contractSettings'
-import type { ResearchObservation, TouchPaperState } from './strategies/types'
+import type { ResearchObservation, TouchPathState } from './strategies/types'
+import { MAX_TICK_GAP_SEC } from './horizons'
 
 export function formatRelativeBarrier(abs: number, sign: 1 | -1): string {
-  const mag = Math.abs(abs)
-  const body = Number.isInteger(mag) ? String(mag) : String(mag)
-  return sign > 0 ? `+${body}` : `-${body}`
+  return `${sign > 0 ? '+' : '-'}${Math.abs(abs)}`
 }
 
-/**
- * Absolute barrier from paper entry price.
- * RISE uses +barrierAbs; FALL uses -barrierAbs (touch that level).
- */
-export function absoluteBarrier(
-  entryPrice: number,
-  side: 'RISE' | 'FALL',
-  barrierAbs: number,
-): number {
-  return side === 'RISE' ? entryPrice + barrierAbs : entryPrice - barrierAbs
+export function absoluteBarrier(entry: number, side: 'RISE' | 'FALL', distance: number): number {
+  return side === 'RISE' ? entry + distance : entry - distance
+}
+
+function startPath(tick: Tick, side: 'RISE' | 'FALL', distance: number): TouchPathState {
+  return {
+    paperEntryEpoch: tick.epoch, paperEntryPrice: tick.quote,
+    absoluteBarrier: absoluteBarrier(tick.quote, side, distance),
+    status: 'pending', lastTickEpoch: tick.epoch, coverageLost: false,
+  }
 }
 
 export function maybeStartTouchPaper(
-  obs: ResearchObservation,
-  contract: FrozenContractSettings,
-  entryTick: Tick,
+  obs: ResearchObservation, contract: FrozenContractSettings, tick: Tick,
 ): ResearchObservation {
-  const touch: TouchPaperState = {
-    barrierAbs: contract.barrierAbs,
-    durationMin: contract.duration,
-    stake: contract.paperStake,
-    // Causal paper entry = same as signal reference tick for this build
-    // (quote may arrive later; when quote unavailable we still track tick path)
-    paperEntryEpoch: entryTick.epoch,
-    paperEntryPrice: entryTick.quote,
-    absoluteBarrier: absoluteBarrier(entryTick.quote, obs.side, contract.barrierAbs),
-    status: 'pending',
-    quoteAvailable: false,
-    proposalAsk: null,
-    proposalPayout: null,
-    proposalAgeSec: null,
-    paperPnl: null,
-  }
-  return { ...obs, touch }
+  return { ...obs, touch: {
+    ...startPath(tick, obs.side, contract.barrierAbs),
+    barrierAbs: contract.barrierAbs, durationMin: contract.duration, stake: contract.paperStake,
+    quoteAvailable: false, quoteStatus: 'waiting', proposalAsk: null,
+    proposalPayout: null, proposalAgeSec: null, paperPnl: null,
+  } }
 }
 
-/** Attach a contemporaneous proposal quote if age is acceptable. Never buys. */
+export interface PaperQuote {
+  ask: number
+  payout: number
+  requestEpoch?: number
+  responseEpoch: number
+  rawError?: string
+}
+
 export function attachProposalQuote(
-  obs: ResearchObservation,
-  quote: { ask: number; payout: number; responseEpoch: number },
-  contract: FrozenContractSettings,
+  obs: ResearchObservation, quote: PaperQuote, contract: FrozenContractSettings,
 ): ResearchObservation {
-  if (!obs.touch || obs.touch.paperEntryEpoch == null) return obs
-  const age = quote.responseEpoch - obs.touch.paperEntryEpoch
-  if (age < 0 || age > contract.maxQuoteAgeSec) {
-    return {
-      ...obs,
-      touch: {
-        ...obs.touch,
-        quoteAvailable: false,
-        reason: obs.touch.reason ?? `Proposal age ${age}s outside max ${contract.maxQuoteAgeSec}s`,
-      },
-    }
+  const t = obs.touch
+  if (!t || t.quoteStatus !== 'waiting') return obs
+  const age = quote.responseEpoch - obs.receiptEpoch
+  const invalid = quote.rawError || (!Number.isFinite(quote.ask) || quote.ask <= 0
+    || !Number.isFinite(quote.payout) || quote.payout < quote.ask ? 'Invalid proposal prices' : '')
+  if (invalid || !Number.isFinite(age) || age < 0 || age > contract.maxQuoteAgeSec) {
+    return { ...obs, touch: { ...t, quoteStatus: 'unavailable', quoteAvailable: false,
+      quoteReason: invalid || 'Proposal arrived outside the entry quote deadline',
+      quoteRequestEpoch: quote.requestEpoch, quoteResponseEpoch: quote.responseEpoch } }
   }
-  return {
-    ...obs,
-    touch: {
-      ...obs.touch,
-      quoteAvailable: true,
-      proposalAsk: quote.ask,
-      proposalPayout: quote.payout,
-      proposalAgeSec: age,
-    },
-  }
+  // A later quote never prices an already observed reference touch.
+  // The separate quotedPath starts on a subsequent fresh tick.
+  return { ...obs, touch: { ...t, quoteAvailable: true, quoteStatus: 'available',
+    proposalAsk: quote.ask, proposalPayout: quote.payout, proposalAgeSec: age,
+    quoteRequestEpoch: quote.requestEpoch, quoteResponseEpoch: quote.responseEpoch,
+    paperPnl: null } }
 }
 
-function touched(side: 'RISE' | 'FALL', price: number, barrier: number): boolean {
-  // Consistent with typical touch: RISE touches at/above upper; FALL at/below lower
-  if (side === 'RISE') return price >= barrier
-  return price <= barrier
+function advancePath(
+  path: TouchPathState, side: 'RISE' | 'FALL', durationMin: number,
+  tick: Tick | null, healthy: boolean,
+): TouchPathState {
+  if (path.status !== 'pending') return path
+  const entry = path.paperEntryEpoch
+  const barrier = path.absoluteBarrier
+  if (entry == null || barrier == null) return { ...path, status: 'unknown', reason: 'Missing entry' }
+  if (!healthy) return { ...path, coverageLost: true, reason: 'Tick coverage interrupted' }
+  if (!tick || tick.epoch <= (path.lastTickEpoch ?? entry)) return path
+  const coverageLost = !!path.coverageLost || tick.epoch - (path.lastTickEpoch ?? entry) > MAX_TICK_GAP_SEC
+  const next = { ...path, lastTickEpoch: tick.epoch, coverageLost }
+  const expiry = entry + durationMin * 60
+  // Directional endpoint tolerance must never extend the Touch contract.
+  if (tick.epoch <= expiry && (side === 'RISE' ? tick.quote >= barrier : tick.quote <= barrier)) {
+    return { ...next, status: 'hit', firstTouchEpoch: tick.epoch, reason: undefined }
+  }
+  if (tick.epoch >= expiry) {
+    return { ...next, status: coverageLost ? 'unknown' : 'miss',
+      reason: coverageLost ? 'Incomplete tick coverage during contract window' : 'No touch by expiry' }
+  }
+  return next
+}
+
+function expirePath(path: TouchPathState, durationMin: number, now: number): TouchPathState {
+  if (path.status !== 'pending' || path.paperEntryEpoch == null) return path
+  if (now <= path.paperEntryEpoch + durationMin * 60 + MAX_TICK_GAP_SEC) return path
+  return { ...path, status: 'unknown', coverageLost: true, reason: 'No complete tick coverage through expiry' }
+}
+
+function quotedPnl(obs: ResearchObservation): ResearchObservation {
+  const t = obs.touch
+  if (!t) return obs
+  const p = t.quotedPath
+  const pnl = t.quoteAvailable && t.proposalAsk != null && t.proposalPayout != null
+    ? p?.status === 'hit' ? t.proposalPayout - t.proposalAsk
+      : p?.status === 'miss' ? -t.proposalAsk : null
+    : null
+  return { ...obs, touch: { ...t, paperPnl: pnl } }
 }
 
 export function advanceTouchPaper(
-  obs: ResearchObservation,
-  tick: Tick | null,
-  healthy: boolean,
-  _contract: FrozenContractSettings,
+  obs: ResearchObservation, tick: Tick | null, healthy: boolean,
+  contract: FrozenContractSettings, receiptEpoch = tick?.epoch ?? obs.receiptEpoch,
 ): ResearchObservation {
   const t = obs.touch
-  if (!t || t.status !== 'pending') return obs
-  if (t.paperEntryEpoch == null || t.paperEntryPrice == null || t.absoluteBarrier == null) {
-    return { ...obs, touch: { ...t, status: 'unknown', reason: 'Missing paper entry' } }
-  }
-
-  if (!healthy) {
-    return { ...obs, touch: { ...t, status: 'unknown', reason: 'Feed interrupted during paper window' } }
-  }
-  if (!tick) return obs
-  if (tick.epoch < t.paperEntryEpoch) return obs // ignore pre-entry
-
-  const expiry = t.paperEntryEpoch + t.durationMin * 60
-  if (tick.epoch > expiry + 5) {
-    // No touch observed; if we had continuous coverage treat as miss, else unknown
-    // Conservative: mark miss only if lastTick was recent through expiry
-    const covered = obs.lastTickEpoch >= expiry - 10
-    if (!covered) {
-      return { ...obs, touch: { ...t, status: 'unknown', reason: 'Incomplete tick coverage in contract window' } }
-    }
-    const pnl = t.quoteAvailable && t.proposalAsk != null ? -t.proposalAsk : null
-    return {
-      ...obs,
-      touch: { ...t, status: 'miss', paperPnl: pnl, reason: 'No touch before expiry' },
+  if (!t) return obs
+  const reference = advancePath(t, obs.side, t.durationMin, tick, healthy)
+  let next = { ...t, ...reference }
+  if (t.quotedPath) {
+    next.quotedPath = advancePath(t.quotedPath, obs.side, t.durationMin, tick, healthy)
+  } else if (t.quoteAvailable && t.quoteResponseEpoch != null && tick && healthy) {
+    if (receiptEpoch - t.quoteResponseEpoch > contract.maxQuoteAgeSec) {
+      next = { ...next, quoteAvailable: false, quoteStatus: 'expired',
+        quoteReason: 'No timely fresh entry tick after proposal receipt' }
+    } else if (tick.epoch >= t.quoteResponseEpoch && receiptEpoch >= t.quoteResponseEpoch) {
+      next.quotedPath = startPath(tick, obs.side, t.barrierAbs)
     }
   }
-
-  if (touched(obs.side, tick.quote, t.absoluteBarrier)) {
-    const pnl = t.quoteAvailable && t.proposalAsk != null && t.proposalPayout != null
-      ? t.proposalPayout - t.proposalAsk
-      : null
-    return {
-      ...obs,
-      touch: {
-        ...t,
-        status: 'hit',
-        firstTouchEpoch: tick.epoch,
-        paperPnl: pnl,
-      },
-    }
-  }
-  return obs
+  return quotedPnl({ ...obs, touch: next })
 }
 
-/** Research must never call buy — exported for tests. */
+export function expireTouchPaper(
+  obs: ResearchObservation, now: number, contract: FrozenContractSettings,
+): ResearchObservation {
+  const t = obs.touch
+  if (!t) return obs
+  let next = { ...t, ...expirePath(t, t.durationMin, now) }
+  if (t.quotedPath) next.quotedPath = expirePath(t.quotedPath, t.durationMin, now)
+  if (t.quoteStatus === 'waiting' && now > obs.receiptEpoch + contract.maxQuoteAgeSec) {
+    next = { ...next, quoteStatus: 'unavailable', quoteReason: 'No timely proposal received' }
+  }
+  if (t.quoteAvailable && !t.quotedPath && t.quoteResponseEpoch != null
+    && now > t.quoteResponseEpoch + contract.maxQuoteAgeSec) {
+    next = { ...next, quoteAvailable: false, quoteStatus: 'expired', quoteReason: 'No timely post-quote entry' }
+  }
+  return quotedPnl({ ...obs, touch: next })
+}
+
+export function hasPendingTouch(obs: ResearchObservation): boolean {
+  const t = obs.touch
+  return !!t && (t.status === 'pending' || t.quoteStatus === 'waiting'
+    || (t.quoteAvailable && (!t.quotedPath || t.quotedPath.status === 'pending')))
+}
+
 export const RESEARCH_FORBIDDEN_METHODS = ['buy', 'buyOneTouch', 'placeTouchTrades'] as const

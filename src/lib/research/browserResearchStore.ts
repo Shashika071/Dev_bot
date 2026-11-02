@@ -17,18 +17,18 @@ export function loadBrowserResearch(): ExperimentState {
   }
 }
 
-export function saveBrowserResearch(state: ExperimentState): void {
+export function archiveBrowserResearch(state: ExperimentState): void {
+  if (state.startedAt != null) {
+    // Fail visibly rather than overwriting the only copy if storage is full.
+    localStorage.setItem(`${KEY}_archive_${state.startedAt}_${Date.now()}`, JSON.stringify(state))
+  }
+}
+
+export function saveBrowserResearch(state: ExperimentState): boolean {
   try {
-    // Cap observations to keep localStorage healthy
-    const lean: ExperimentState = {
-      ...state,
-      observations: state.observations.slice(-2000),
-      rejected: state.rejected.slice(-2000),
-      acceptedKeys: state.acceptedKeys.slice(-4000),
-      b0Fired: state.b0Fired.slice(-2000),
-    }
-    localStorage.setItem(KEY, JSON.stringify(lean))
+    localStorage.setItem(KEY, JSON.stringify(state))
+    return true
   } catch {
-    // quota / private mode — ignore; UI still works in memory
+    return false
   }
 }

@@ -3,6 +3,7 @@
  * Never places trades.
  */
 import type { Candle, Tick } from '../types'
+import { closedSegments } from '../deriv/candles'
 import { enrich, WARMUP_BARS } from '../strategy/signalEngine'
 import { freezeAtr14 } from './atrFreeze'
 import { buildResearchExtras } from './strategies/buildExtras'
@@ -19,11 +20,11 @@ import {
   makeHorizons,
   STRATEGY_COOLDOWN_SEC,
 } from './horizons'
-import { advanceTouchPaper, maybeStartTouchPaper } from './touchPaper'
+import { advanceTouchPaper, maybeStartTouchPaper, expireTouchPaper, hasPendingTouch } from './touchPaper'
 import { DEFAULT_FROZEN_CONTRACT, type FrozenContractSettings } from './contractSettings'
 
 export { DEFAULT_FROZEN_CONTRACT, type FrozenContractSettings }
-export const RESEARCH_CODE_VERSION = 'v100-research-engine-1'
+export const RESEARCH_CODE_VERSION = 'v100-research-engine-2'
 export const DISCOVERY_HOURS = 72
 
 export type ExperimentStage =
@@ -55,6 +56,7 @@ export interface ExperimentState {
   downtimeSec: number
   lastTickEpoch: number | null
   feedHealthy: boolean
+  lastClosedEvaluated?: number
   awaitingCloseEntry: Array<{
     strategyId: StrategyId
     candleTime: number
@@ -98,18 +100,19 @@ export function createInitialState(
 export function startDiscovery(state: ExperimentState, nowMs: number): ExperimentState {
   const startedAt = Math.floor(nowMs / 1000)
   return {
-    ...createInitialState('discovery', state.enabledStrategyIds, state.contract),
+    ...createInitialState(state.mode, state.enabledStrategyIds, state.contract),
     stage: 'collecting',
     startedAt,
     endsAt: startedAt + DISCOVERY_HOURS * 3600,
-    mode: 'discovery',
+    mode: state.mode,
   }
 }
 
 /** Resume without resetting endsAt */
-export function resumeCollecting(state: ExperimentState): ExperimentState {
+export function resumeCollecting(state: ExperimentState, nowEpoch = Date.now() / 1000): ExperimentState {
+  if (state.codeVersion !== RESEARCH_CODE_VERSION) return state
   if (state.stage === 'completed' || state.stage === 'not_started') return state
-  if (state.endsAt != null && Math.floor(Date.now() / 1000) >= state.endsAt) {
+  if (state.endsAt != null && nowEpoch >= state.endsAt) {
     return { ...state, stage: 'finishing' }
   }
   return { ...state, stage: 'collecting' }
@@ -161,7 +164,6 @@ function pushObservation(
   state.acceptedKeys.push(key)
   setCooldown(state, partial.strategyId, partial.signalEpoch)
   const atr = freezeAtr14(partial.atrCandles)
-  const randomSide: ResearchObservation['side'] = Math.random() < 0.5 ? 'RISE' : 'FALL'
   let obs: ResearchObservation = {
     id: key,
     strategyId: partial.strategyId,
@@ -178,7 +180,6 @@ function pushObservation(
     total: partial.total,
     metrics: partial.metrics,
     atr,
-    randomSide,
     lastTickEpoch: partial.tick.epoch,
     horizons: makeHorizons(partial.signalEpoch),
     pendingHorizons: true,
@@ -198,6 +199,10 @@ export function onTick(
   receiptEpoch: number,
   feedHealthy: boolean,
 ): ExperimentState {
+  // Never mix corrected calculations into a pre-fix experiment.
+  if (state.codeVersion !== RESEARCH_CODE_VERSION) return state
+  if (!Number.isFinite(tick.epoch) || !Number.isFinite(tick.quote) || tick.quote <= 0
+    || (state.lastTickEpoch != null && tick.epoch <= state.lastTickEpoch)) return state
   const next: ExperimentState = {
     ...state,
     feedHealthy,
@@ -209,6 +214,8 @@ export function onTick(
     rejected: [...state.rejected],
     awaitingCloseEntry: [...state.awaitingCloseEntry],
   }
+  // Every member of a pair sees cooldowns from BEFORE this tick's batch.
+  const admissionState = { ...next, cooldowns: { ...next.cooldowns } }
 
   if (!feedHealthy) {
     if (next.stage === 'collecting') next.stage = 'reconnecting'
@@ -226,7 +233,7 @@ export function onTick(
   // Advance pending observations
   next.observations = next.observations.map((o) => {
     let adv = advanceObservationHorizons(o, tick, true)
-    adv = advanceTouchPaper(adv, tick, true, next.contract)
+    adv = advanceTouchPaper(adv, tick, true, next.contract, receiptEpoch)
     return adv
   })
 
@@ -247,7 +254,7 @@ export function onTick(
       })
       continue
     }
-    if (onCooldown(next, pending.strategyId, tick.epoch)) {
+    if (!acceptingNew(next, tick.epoch) || onCooldown(admissionState, pending.strategyId, tick.epoch)) {
       next.rejected.push({
         strategyId: pending.strategyId,
         candleTime: pending.candleTime,
@@ -278,7 +285,7 @@ export function onTick(
 
   // Finish when no pending work
   if (next.stage === 'finishing') {
-    const pending = next.observations.some((o) => o.pendingHorizons || o.touch?.status === 'pending')
+    const pending = next.observations.some((o) => o.pendingHorizons || hasPendingTouch(o))
       || next.awaitingCloseEntry.length > 0
     if (!pending) {
       next.stage = 'completed'
@@ -290,7 +297,7 @@ export function onTick(
   if (!acceptingNew(next, tick.epoch)) return next
   if (candles.length < WARMUP_BARS + 5) return next
 
-  const closed = candles.filter((c) => c.isClosed)
+  const closed = closedSegments(candles).at(-1) ?? []
   if (closed.length < WARMUP_BARS + 1) return next
 
   // Detect newly closed candle: last closed time just completed
@@ -300,14 +307,15 @@ export function onTick(
     : null
 
   // Build series on window (closed + optional forming treated closed for B0)
-  const forClosed = closed.length > WARMUP_BARS + 250 ? closed.slice(-(WARMUP_BARS + 250)) : closed
+  const forClosed = closed.slice(-(WARMUP_BARS + 200))
   const seriesClosed = enrich(forClosed)
   const extrasClosed = buildResearchExtras(forClosed)
 
   // Process completed-candle strategies when we see first tick of new minute after close
   // Signal candle = lastClosed; closeEpoch = lastClosed.time + 60
   const closeEpoch = lastClosed.time + 60
-  if (tick.epoch >= closeEpoch && tick.epoch <= closeEpoch + 5) {
+  if (tick.epoch >= closeEpoch && tick.epoch <= closeEpoch + 5 && next.lastClosedEvaluated !== lastClosed.time) {
+    next.lastClosedEvaluated = lastClosed.time
     const index = forClosed.length - 1
     const ctxBase: StrategyContext = {
       candles: forClosed,
@@ -328,7 +336,7 @@ export function onTick(
       if (next.awaitingCloseEntry.some((a) => a.strategyId === def.id && a.candleTime === lastClosed.time && a.side === hit.side)) {
         continue
       }
-      if (onCooldown(next, def.id, tick.epoch)) {
+      if (onCooldown(admissionState, def.id, tick.epoch)) {
         next.rejected.push({
           strategyId: def.id,
           candleTime: lastClosed.time,
@@ -361,7 +369,8 @@ export function onTick(
   // B0 forming evaluation
   if (forming && next.enabledStrategyIds.includes('B0')) {
     const preview = [...closed, { ...forming, isClosed: true }]
-    const win = preview.length > WARMUP_BARS + 250 ? preview.slice(-(WARMUP_BARS + 250)) : preview
+    const win = closedSegments(preview.slice(-(WARMUP_BARS + 200))).at(-1) ?? []
+    if (win.length <= WARMUP_BARS) return next
     const series = enrich(win)
     const extras = buildResearchExtras(win)
     const index = win.length - 1
@@ -378,7 +387,7 @@ export function onTick(
     if (hit) {
       const key = `B0:${forming.time}:${hit.side}`
       if (!next.b0Fired.includes(key) && !next.acceptedKeys.includes(key)) {
-        if (onCooldown(next, 'B0', tick.epoch)) {
+        if (onCooldown(admissionState, 'B0', tick.epoch)) {
           next.rejected.push({
             strategyId: 'B0',
             candleTime: forming.time,
@@ -417,9 +426,9 @@ export function listEnabledCandidates(
   candles: Candle[],
 ): SignalCandidate[] {
   // Diagnostic helper for tests
-  const closed = candles.filter((c) => c.isClosed)
+  const closed = closedSegments(candles).at(-1) ?? []
   if (closed.length < WARMUP_BARS + 1) return []
-  const forClosed = closed
+  const forClosed = closed.slice(-(WARMUP_BARS + 200))
   const series = enrich(forClosed)
   const extras = buildResearchExtras(forClosed)
   const index = forClosed.length - 1
@@ -445,4 +454,27 @@ export function listEnabledCandidates(
     })
   }
   return out
+}
+
+/** Deadline processing also runs when the feed is silent. Pure and replayable. */
+export function advanceExperimentClock(state: ExperimentState, now: number): ExperimentState {
+  if (state.codeVersion !== RESEARCH_CODE_VERSION || state.stage === 'not_started' || state.stage === 'completed') return state
+  const observations = state.observations.map((obs) => {
+    const horizons = obs.horizons.map((h) => h.status === 'pending' && now > h.targetEpoch + 5
+      ? { ...h, status: 'unknown' as const, reason: 'No timely horizon tick (clock deadline)' } : h)
+    return expireTouchPaper({ ...obs, horizons, pendingHorizons: horizons.some((h) => h.status === 'pending') }, now, state.contract)
+  })
+  let stage: ExperimentStage = state.stage
+  if (state.endsAt != null && now >= state.endsAt) stage = 'finishing'
+  if (stage === 'finishing' && !observations.some((o) => o.pendingHorizons || hasPendingTouch(o))) stage = 'completed'
+  return { ...state, observations, stage, finishedAt: stage === 'completed' ? now : state.finishedAt }
+}
+
+export function interruptResearchFeed(state: ExperimentState): ExperimentState {
+  if (state.codeVersion !== RESEARCH_CODE_VERSION || state.stage === 'not_started' || state.stage === 'completed') return state
+  return { ...state, feedHealthy: false,
+    stage: state.stage === 'collecting' ? 'reconnecting' : state.stage,
+    observations: state.observations.map((o) => advanceTouchPaper(
+      advanceObservationHorizons(o, null, false), null, false, state.contract)),
+  }
 }

@@ -27,17 +27,14 @@ const vite = await createViteServer({
 const {
   createInitialState,
   startDiscovery,
-  resumeCollecting,
-  onTick,
   RESEARCH_CODE_VERSION,
 } = await vite.ssrLoadModule('/src/lib/research/experimentEngine.ts')
 const {
   newExperimentId,
   latestExperimentId,
   loadState,
-  appendStateSnapshot,
+  appendSessionSnapshot, loadSession, appendJournal, readJournal,
   appendTick,
-  appendEvent,
   listExperiments,
 } = await vite.ssrLoadModule('/src/lib/research/experimentStore.ts')
 const { summarizeExperiment, exportObservationsCsv, exportReportMarkdown } =
@@ -46,29 +43,81 @@ const { applyTick, candlesFromHistory, finalizeByClock } =
   await vite.ssrLoadModule('/src/lib/deriv/candles.ts')
 const { proposeOneTouchOnly } =
   await vite.ssrLoadModule('/src/lib/research/proposeOnly.ts')
-const { attachProposalQuote } =
-  await vite.ssrLoadModule('/src/lib/research/touchPaper.ts')
 const { STRATEGY_REGISTRY } =
   await vite.ssrLoadModule('/src/lib/research/strategies/registry.ts')
 
+const { applyResearchEvent, emptyResearchSession } = await vite.ssrLoadModule('/src/lib/research/researchSession.ts')
+const { ResearchQuoteScheduler } = await vite.ssrLoadModule('/src/lib/research/quoteScheduler.ts')
 let experimentId = idArg || latestExperimentId() || newExperimentId('discovery')
-let state = loadState(experimentId) || createInitialState()
-appendStateSnapshot(experimentId, state)
-
-let candles = []
+let session = loadSession(experimentId) || { ...emptyResearchSession(), state: loadState(experimentId) || createInitialState() }
+// Restore all journal events after the atomic checkpoint, including quote responses.
+if (session.state.codeVersion === RESEARCH_CODE_VERSION) {
+  const events = readJournal(experimentId, true)
+  for (const event of events.slice(session.sequence)) session = applyResearchEvent(session, event)
+}
+let state = session.state
+let candles = session.candles
 let lastPersist = 0
 let feedHealthy = false
 let lastReceipt = 0
-let downtimeAccum = 0
-let unhealthySince = null
-let proposalBusy = false
+let quotes = null
+
+function record(event) {
+  if (state.codeVersion !== RESEARCH_CODE_VERSION) return
+  appendJournal(experimentId, event)
+  session = applyResearchEvent(session, event)
+  state = session.state
+  candles = session.candles
+}
 
 function persist(force = false) {
+  if (state.codeVersion !== RESEARCH_CODE_VERSION) return
   const now = Date.now()
   if (!force && now - lastPersist < 2000) return
   lastPersist = now
-  appendStateSnapshot(experimentId, state)
+  appendSessionSnapshot(experimentId, session)
 }
+
+function request(payload) {
+  return new Promise((resolve, reject) => {
+    if (ws?.readyState !== WebSocket.OPEN) return reject(new Error('Public feed disconnected'))
+    const id = reqId++
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error('Proposal timeout')) }, 5000)
+    pending.set(id, { resolve, reject, timer })
+    ws.send(JSON.stringify({ ...payload, req_id: id }), (error) => {
+      if (error) { clearTimeout(timer); pending.delete(id); reject(error) }
+    })
+  })
+}
+
+function resetQuotes() {
+  quotes?.cancel()
+  const runId = experimentId
+  const contract = { ...state.contract }
+  quotes = new ResearchQuoteScheduler(
+    (side) => proposeOneTouchOnly({ request }, contract, SYMBOL, side),
+    (ids, quote) => {
+      if (runId !== experimentId) return
+      record({ type: 'quote', ids, quote })
+      persist(true)
+    },
+  )
+}
+
+function startRun(mode, ids = state.enabledStrategyIds) {
+  persist(true)
+  quotes?.cancel()
+  const seed = candles
+  const contract = state.contract
+  experimentId = newExperimentId(mode)
+  session = emptyResearchSession()
+  state = session.state
+  const started = startDiscovery(createInitialState(mode, ids, contract), Date.now())
+  record({ type: 'start', state: started, candles: seed })
+  resetQuotes()
+  persist(true)
+}
+
 
 function json(res, code, body) {
   const raw = JSON.stringify(body)
@@ -132,7 +181,8 @@ const api = createHttpServer(async (req, res) => {
           enabledStrategyIds: state.enabledStrategyIds,
           lastTickEpoch: state.lastTickEpoch,
           feedHealthy,
-          downtimeSec: state.downtimeSec + downtimeAccum,
+          downtimeSec: state.downtimeSec,
+          codeVersion: state.codeVersion,
           observationCount: state.observations.length,
           rejectedCount: state.rejected.length,
         },
@@ -165,30 +215,38 @@ const api = createHttpServer(async (req, res) => {
       return json(res, 200, summarizeExperiment(state))
     }
     if (req.method === 'POST' && url.pathname === '/control/start-discovery') {
-      experimentId = newExperimentId('discovery')
-      state = startDiscovery(createInitialState(), Date.now())
-      appendStateSnapshot(experimentId, state)
-      appendEvent(experimentId, { type: 'start_discovery', at: Date.now() })
+      startRun('discovery')
       return json(res, 200, { ok: true, experimentId, stage: state.stage, endsAt: state.endsAt })
     }
     if (req.method === 'POST' && url.pathname === '/control/resume') {
-      state = resumeCollecting(state)
+      if (state.codeVersion !== RESEARCH_CODE_VERSION) return json(res, 409, { error: 'Pre-fix experiment is read-only. Export it and start a new discovery.' })
+      record({ type: 'resume', now: Date.now() / 1000 })
       persist(true)
       return json(res, 200, { ok: true, stage: state.stage, endsAt: state.endsAt })
     }
     if (req.method === 'POST' && url.pathname === '/control/stop-entries') {
-      state = { ...state, stage: 'finishing' }
+      if (state.codeVersion !== RESEARCH_CODE_VERSION) return json(res, 409, { error: 'Pre-fix experiment is read-only' })
+      record({ type: 'stop_entries' })
       persist(true)
       return json(res, 200, { ok: true, stage: state.stage })
     }
     if (req.method === 'POST' && url.pathname === '/control/start-confirmation') {
       const body = await readBody(req)
       const ids = Array.isArray(body.strategyIds) ? body.strategyIds : state.enabledStrategyIds
-      experimentId = newExperimentId('confirmation')
-      state = startDiscovery(createInitialState('confirmation', ids), Date.now())
-      state = { ...state, mode: 'confirmation' }
-      appendStateSnapshot(experimentId, state)
+      if (!ids.length || ids.some((id) => !STRATEGY_REGISTRY.some((s) => s.id === id)) || new Set(ids).size !== ids.length) return json(res, 400, { error: 'Invalid strategy IDs' })
+      startRun('confirmation', ids)
       return json(res, 200, { ok: true, experimentId, mode: 'confirmation', enabledStrategyIds: ids })
+    }
+    if (req.method === 'POST' && url.pathname === '/control/reset') {
+      // Clear all live records and begin a fresh discovery from zero.
+      startRun('discovery')
+      return json(res, 200, {
+        ok: true,
+        experimentId,
+        stage: state.stage,
+        observationCount: state.observations.length,
+        endsAt: state.endsAt,
+      })
     }
     json(res, 404, { error: 'not found' })
   } catch (e) {
@@ -226,7 +284,13 @@ function connect() {
   ws.on('message', async (raw) => {
     let msg
     try { msg = JSON.parse(String(raw)) } catch { return }
-    lastReceipt = Date.now()
+    const reply = pending.get(msg.req_id)
+    if (reply && typeof reply === 'object') {
+      clearTimeout(reply.timer)
+      pending.delete(msg.req_id)
+      reply.resolve(msg)
+      return
+    }
     if (msg.error) {
       console.warn('[research] WS error', msg.error.message)
       return
@@ -240,9 +304,12 @@ function connect() {
         low: Number(c.low),
         close: Number(c.close),
       }))
-      candles = finalizeByClock(candlesFromHistory(rows), Math.floor(Date.now() / 1000))
+      const history = finalizeByClock(candlesFromHistory(rows), Math.floor(Date.now() / 1000))
+      // Keep the live warmup available even while an old run is read-only.
+      candles = history
+      record({ type: 'history', candles: history })
       feedHealthy = candles.length >= 120
-      appendEvent(experimentId, { type: 'history_loaded', bars: candles.length, at: Date.now() })
+      persist(true)
       const subId = reqId++
       ws.send(JSON.stringify({ ticks: SYMBOL, subscribe: 1, req_id: subId }))
       return
@@ -253,86 +320,48 @@ function connect() {
         quote: Number(msg.tick.quote),
         symbol: msg.tick.symbol || SYMBOL,
       }
-      appendTick(experimentId, { ...tick, receiptMs: Date.now() })
-      const applied = applyTick(candles, tick)
-      candles = applied.candles
-      const age = Math.abs(Date.now() / 1000 - tick.epoch)
-      const healthy = age <= 10 && candles.length >= 120
-      if (!healthy) {
-        if (unhealthySince == null) unhealthySince = Date.now()
-        feedHealthy = false
-      } else {
-        if (unhealthySince != null) {
-          downtimeAccum += (Date.now() - unhealthySince) / 1000
-          unhealthySince = null
-        }
-        feedHealthy = true
-      }
+      const receiptEpoch = Date.now() / 1000
+      lastReceipt = Date.now()
+      const healthy = Math.abs(receiptEpoch - tick.epoch) <= 10 && candles.length >= 120
+      feedHealthy = healthy
       const beforeCount = state.observations.length
-      state = onTick(state, tick, candles, Date.now() / 1000, feedHealthy)
-      state = { ...state, downtimeSec: downtimeAccum }
-
-      // Optional public proposal for newly accepted observations (best-effort; never buy)
-      if (!proposalBusy && state.observations.length > beforeCount) {
-        const newest = state.observations[state.observations.length - 1]
-        if (newest && !newest.touch?.quoteAvailable) {
-          proposalBusy = true
-          try {
-            const transport = {
-              request: (payload) => new Promise((resolve, reject) => {
-                const id = reqId++
-                const timer = setTimeout(() => {
-                  pending.delete(id)
-                  reject(new Error('proposal timeout'))
-                }, 8000)
-                pending.set(id, { resolve, reject, timer })
-                ws.send(JSON.stringify({ ...payload, req_id: id }))
-              }),
-            }
-            // Resolve pending proposal responses in message handler via pending map objects
-            const quote = await proposeOneTouchOnly(transport, state.contract, SYMBOL, newest.side)
-            if (quote && Number.isFinite(quote.ask) && !quote.rawError) {
-              const idx = state.observations.findIndex((o) => o.id === newest.id)
-              if (idx >= 0) {
-                const updated = attachProposalQuote(state.observations[idx], quote, state.contract)
-                const obs = [...state.observations]
-                obs[idx] = updated
-                state = { ...state, observations: obs }
-              }
-            }
-          } catch {
-            // leave quote unavailable
-          } finally {
-            proposalBusy = false
-          }
-        }
+      if (state.codeVersion === RESEARCH_CODE_VERSION) {
+        appendTick(experimentId, { ...tick, receiptMs: receiptEpoch * 1000 })
+        record({ type: 'tick', tick, receiptEpoch, healthy })
+        quotes?.enqueue(state.observations.slice(beforeCount), state.contract)
+        persist()
+      } else {
+        candles = applyTick(candles, tick).candles.slice(-1000)
       }
-      persist()
-    }
-    const p = pending.get(msg.req_id)
-    if (p && typeof p === 'object' && p.resolve) {
-      clearTimeout(p.timer)
-      pending.delete(msg.req_id)
-      p.resolve(msg)
     }
   })
   ws.on('close', () => {
     feedHealthy = false
-    if (unhealthySince == null) unhealthySince = Date.now()
-    appendEvent(experimentId, { type: 'ws_close', at: Date.now() })
+    record({ type: 'feed_unhealthy' })
+    for (const [id, job] of pending) {
+      if (typeof job === 'object') { clearTimeout(job.timer); job.reject(new Error('Public feed disconnected')) }
+      pending.delete(id)
+    }
+    persist(true)
     setTimeout(connect, 2000)
   })
   ws.on('error', () => { /* reconnect via close */ })
 }
 
+record({ type: 'feed_unhealthy' })
+resetQuotes()
+persist(true)
 connect()
 
 setInterval(() => {
   if (Date.now() - lastReceipt > 15000) {
     feedHealthy = false
+    record({ type: 'feed_unhealthy' })
     try { ws?.terminate() } catch { /* */ }
   }
-}, 5000)
+  record({ type: 'clock', now: Date.now() / 1000 })
+  persist()
+}, 1000)
 
 process.on('SIGINT', () => {
   persist(true)

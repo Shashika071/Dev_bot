@@ -1,6 +1,7 @@
 import { wilsonInterval } from './statistics'
 import { STRATEGY_REGISTRY } from './strategies/registry'
 import type { ExperimentState } from './experimentEngine'
+import { RESEARCH_CODE_VERSION } from './experimentEngine'
 import type { HorizonMin, ResearchObservation, StrategyId } from './strategies/types'
 import { HORIZON_MINUTES } from './horizons'
 
@@ -34,7 +35,13 @@ export interface StrategySummary {
   touchHits: number
   touchMisses: number
   touchUnknown: number
+  touchPending: number
   quotesAvailable: number
+  quotedSettled: number
+  quotedHits: number
+  quotedMisses: number
+  quotedUnknown: number
+  quotedPending: number
   paperCost: number | null
   paperPnl: number | null
   paperReturn: number | null
@@ -50,7 +57,6 @@ function horizonSummary(rows: ResearchObservation[], minutes: HorizonMin): Strat
   let pending = 0, unknown = 0, unchanged = 0, continuation = 0, reversal = 0
   const signed: number[] = []
   const signedAtr: number[] = []
-  let randCont = 0, randRev = 0
   for (const o of rows) {
     const h = o.horizons.find((x) => x.minutes === minutes)
     if (!h) continue
@@ -63,12 +69,9 @@ function horizonSummary(rows: ResearchObservation[], minutes: HorizonMin): Strat
       if (h.signedMove != null) signed.push(h.signedMove)
       if (h.signedMoveInAtr != null) signedAtr.push(h.signedMoveInAtr)
     }
-    if (h.randomClass === 'continuation') randCont += 1
-    if (h.randomClass === 'reversal') randRev += 1
   }
   const dirN = continuation + reversal
   const contRate = dirN ? continuation / dirN : null
-  const randN = randCont + randRev
   return {
     minutes,
     total: rows.length,
@@ -80,7 +83,9 @@ function horizonSummary(rows: ResearchObservation[], minutes: HorizonMin): Strat
     contRate,
     avgSignedMove: mean(signed),
     avgSignedMoveInAtr: mean(signedAtr),
-    randomContRate: randN ? randCont / randN : null,
+    // On each non-flat endpoint exactly one of RISE/FALL succeeds.
+    // Use the same denominator as contRate; ties are separately displayed.
+    randomContRate: dirN ? 0.5 : null,
     descriptiveWilson: dirN ? wilsonInterval(continuation, dirN) : null,
     insufficient: dirN < INSUFFICIENT,
   }
@@ -88,6 +93,8 @@ function horizonSummary(rows: ResearchObservation[], minutes: HorizonMin): Strat
 
 export function summarizeExperiment(state: ExperimentState): {
   generatedAt: number
+  codeVersion: string
+  legacy: boolean
   stage: ExperimentState['stage']
   mode: ExperimentState['mode']
   startedAt: number | null
@@ -115,8 +122,11 @@ export function summarizeExperiment(state: ExperimentState): {
       const touchMisses = rows.filter((r) => r.touch?.status === 'miss').length
       const touchUnknown = rows.filter((r) => r.touch?.status === 'unknown').length
       const quoted = rows.filter((r) => r.touch?.quoteAvailable)
-      const cost = quoted.reduce((s, r) => s + (r.touch?.proposalAsk ?? 0), 0)
-      const pnlVals = quoted.map((r) => r.touch?.paperPnl).filter((x): x is number => x != null)
+      const settled = state.codeVersion === RESEARCH_CODE_VERSION ? quoted.filter((r) =>
+        (r.touch?.quotedPath?.status === 'hit' || r.touch?.quotedPath?.status === 'miss')
+        && Number.isFinite(r.touch.paperPnl) && r.touch.proposalAsk != null && r.touch.proposalAsk > 0) : []
+      const cost = settled.reduce((s, r) => s + r.touch!.proposalAsk!, 0)
+      const pnlVals = settled.map((r) => r.touch!.paperPnl!)
       const pnl = pnlVals.length ? pnlVals.reduce((a, b) => a + b, 0) : null
       return {
         id: d.id,
@@ -130,16 +140,24 @@ export function summarizeExperiment(state: ExperimentState): {
         touchHits,
         touchMisses,
         touchUnknown,
+        touchPending: rows.filter((r) => r.touch?.status === 'pending').length,
         quotesAvailable: quoted.length,
-        paperCost: quoted.length ? cost : null,
+        quotedSettled: settled.length,
+        quotedHits: settled.filter((r) => r.touch?.quotedPath?.status === 'hit').length,
+        quotedMisses: settled.filter((r) => r.touch?.quotedPath?.status === 'miss').length,
+        quotedUnknown: quoted.filter((r) => r.touch?.quotedPath?.status === 'unknown').length,
+        quotedPending: quoted.filter((r) => !r.touch?.quotedPath || r.touch.quotedPath.status === 'pending').length,
+        paperCost: settled.length ? cost : null,
         paperPnl: pnl,
         paperReturn: pnl != null && cost > 0 ? pnl / cost : null,
-        pnlUnavailable: quoted.length === 0,
+        pnlUnavailable: settled.length === 0,
       }
     })
 
   return {
     generatedAt: Math.floor(Date.now() / 1000),
+    codeVersion: state.codeVersion,
+    legacy: state.codeVersion !== RESEARCH_CODE_VERSION,
     stage: state.stage,
     mode: state.mode,
     startedAt: state.startedAt,
@@ -151,11 +169,16 @@ export function summarizeExperiment(state: ExperimentState): {
     rejectedCount: state.rejected.length,
     strategies,
     notes: [
+      ...(state.codeVersion !== RESEARCH_CODE_VERSION ? ['PRE-FIX RUN: preserved read-only. Paired entries, quote coverage and expiry were affected by known bugs; legacy P&L is not comparable. Start a new v2 run.'] : []),
       'Rankings are descriptive/exploratory; observations can overlap and correlate.',
       '80% baseline score means 4/5 conditions — not an 80% win probability.',
       'B0 uses forming-candle timing; compare completed strategies primarily to B1.',
       '7-minute horizon is the predeclared primary direction horizon.',
       'Touch paper P&L is quote-based only when proposals were available; otherwise unavailable.',
+      'Reference Touch counts start at the signal tick. Quoted Touch counts start at a fresh tick after quote receipt; earlier touches never earn quoted P&L.',
+      'P&L and purchase cost include the SAME settled quoted cohort only; pending, unknown and unquoted outcomes are excluded and counted separately.',
+      'The random reference is the exact equally weighted RISE/FALL expectation. Directional percentages exclude unchanged, pending and unknown endpoints.',
+      'The <20 marker only flags a very small sample; removing it does not establish statistical significance.',
       'Never auto-enables a top strategy in production.',
       'Prior filter-comparison reports that passed filterConfig into runTouchBacktest did not apply filters.',
     ],
@@ -165,18 +188,25 @@ export function summarizeExperiment(state: ExperimentState): {
 export function exportObservationsCsv(state: ExperimentState): string {
   const header = [
     'id', 'strategyId', 'side', 'candleTime', 'signalEpoch', 'entryPrice', 'forming', 'reason',
-    'atr14', 'h1', 'h3', 'h5', 'h7', 'touchStatus', 'touchPnl', 'quoteAvailable',
+    'atr14', 'h1', 'h3', 'h5', 'h7', 'referenceTouchStatus', 'quotePnl', 'quoteAvailable',
+    'quoteStatus', 'quoteReason', 'quoteRequestEpoch', 'quoteResponseEpoch', 'quoteEntryEpoch',
+    'quoteEntryPrice', 'quoteBarrier', 'quoteTouchStatus', 'quoteFirstTouchEpoch', 'ask', 'payout', 'codeVersion',
   ]
   const lines = [header.join(',')]
   for (const o of state.observations) {
     const hs = Object.fromEntries(o.horizons.map((h) => [h.minutes, h.status]))
     lines.push([
       o.id, o.strategyId, o.side, o.candleTime, o.signalEpoch, o.entryReferencePrice, o.forming,
-      JSON.stringify(o.reason),
+      o.reason,
       o.atr.atr14 ?? '',
       hs[1] ?? '', hs[3] ?? '', hs[5] ?? '', hs[7] ?? '',
       o.touch?.status ?? '', o.touch?.paperPnl ?? '', o.touch?.quoteAvailable ?? '',
-    ].join(','))
+      o.touch?.quoteStatus ?? '', o.touch?.quoteReason ?? '', o.touch?.quoteRequestEpoch ?? '',
+      o.touch?.quoteResponseEpoch ?? '', o.touch?.quotedPath?.paperEntryEpoch ?? '',
+      o.touch?.quotedPath?.paperEntryPrice ?? '', o.touch?.quotedPath?.absoluteBarrier ?? '',
+      o.touch?.quotedPath?.status ?? '', o.touch?.quotedPath?.firstTouchEpoch ?? '',
+      o.touch?.proposalAsk ?? '', o.touch?.proposalPayout ?? '', state.codeVersion,
+    ].map((v) => `"${String(v).replaceAll('"', '""')}"`).join(','))
   }
   return lines.join('\n')
 }
@@ -191,15 +221,17 @@ export function exportReportMarkdown(summary: ReturnType<typeof summarizeExperim
     '',
     '## Strategies (descriptive)',
     '',
-    '| ID | Name | n | 7m cont% | Touch hit/miss/unk | Quote P&L |',
-    '|----|------|---|----------|--------------------|-----------|',
+    `Code version: ${summary.codeVersion}${summary.legacy ? ' (pre-fix, read-only)' : ''}`,
+    '',
+    '| ID | Name | n | 7m cont% | Reference H/M/U/P | Quotes/n | Quoted H/M/U/P | Settled cost | Quote P&L | Return |',
+    '|----|------|---|----------|-------------------|----------|----------------|--------------|-----------|--------|',
   ]
   for (const s of summary.strategies) {
     const h7 = s.horizons.find((h) => h.minutes === 7)
     const cont = h7?.contRate == null ? '—' : `${(100 * h7.contRate).toFixed(1)}%`
     const pnl = s.pnlUnavailable ? 'UNAVAILABLE' : (s.paperPnl?.toFixed(4) ?? '—')
     lines.push(
-      `| ${s.id} | ${s.name} | ${s.candidatesAccepted} | ${cont} | ${s.touchHits}/${s.touchMisses}/${s.touchUnknown} | ${pnl} |`,
+      `| ${s.id} | ${s.name} | ${s.candidatesAccepted} | ${cont} | ${s.touchHits}/${s.touchMisses}/${s.touchUnknown}/${s.touchPending} | ${s.quotesAvailable}/${s.candidatesAccepted} | ${s.quotedHits}/${s.quotedMisses}/${s.quotedUnknown}/${s.quotedPending} | ${s.paperCost?.toFixed(4) ?? '—'} | ${pnl} | ${s.paperReturn == null ? '—' : (s.paperReturn * 100).toFixed(2) + '%'} |`,
     )
   }
   lines.push('', '## Notes', '')
