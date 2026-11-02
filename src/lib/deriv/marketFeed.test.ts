@@ -116,7 +116,21 @@ describe('history synchronization and signal timing', () => {
     candles[50].high = NaN
     client.handler({ req_id: client.requests.length, candles })
     expect(feed.getSnapshot().ready).toBe(false)
-    expect(feed.getSnapshot().error).toContain('Invalid')
+    expect(feed.getSnapshot().error).toMatch(/Invalid|Recovering/)
+  })
+  it('retries history after a bad page instead of staying stuck', () => {
+    feed.start()
+    tick(55)
+    const bad = fixtureCandles(120, minute - 119 * 60).map((c) => ({ ...c, epoch: c.time }))
+    bad[50].high = NaN
+    const badId = client.requests.length
+    client.handler({ req_id: badId, candles: bad })
+    expect(feed.getSnapshot().ready).toBe(false)
+    // Recovery schedules a fresh history request from the latest tick.
+    expect(client.requests.length).toBeGreaterThan(badId)
+    history(minute)
+    expect(feed.getSnapshot().ready).toBe(true)
+    expect(feed.getSnapshot().error).toBeNull()
   })
   it('detects silence and reconnects even if the socket stays open', () => {
     ready()

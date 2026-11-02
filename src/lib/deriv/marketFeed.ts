@@ -33,6 +33,16 @@ export interface FeedClient {
 
 type Listener = (state: MarketState, event?: { type: 'candle_close'; candle: Candle }) => void
 
+/** Keep the newest contiguous minute chain that does not go past `maxTime`. */
+function longestTrailingConsecutive(batch: Candle[], maxTime: number): Candle[] {
+  const sorted = [...batch].filter((c) => c.time <= maxTime).sort((a, b) => a.time - b.time)
+  if (!sorted.length) return []
+  let end = sorted.length - 1
+  let start = end
+  while (start > 0 && sorted[start]!.time === sorted[start - 1]!.time + 60) start -= 1
+  return sorted.slice(start, end + 1)
+}
+
 /** History ends before the first buffered tick, so replay cannot overwrite newer prices. */
 export class MarketFeed {
   private client: FeedClient
@@ -51,6 +61,7 @@ export class MarketFeed {
   private lastTick: Tick | null = null
   private lastReceipt = 0
   private syncStarted = 0
+  private lastRecoverAt = 0
   private watchdog: ReturnType<typeof setInterval> | null = null
 
   constructor(client: FeedClient = new DerivPublicClient(), now = Date.now) {
@@ -138,15 +149,28 @@ export class MarketFeed {
     })
   }
 
+  /** Drop a failed history pull and restart from the newest buffered tick. */
+  private recoverHistory(reason: string) {
+    const latest = this.buffered.at(-1) ?? this.lastTick
+    this.historyId = null
+    this.historyPages.clear()
+    this.syncing = true
+    this.state = { ...this.state, ready: false, error: reason }
+    this.emit()
+    const now = this.now()
+    // Avoid tight retry loops on persistent bad pages; watchdog will reconnect.
+    if (!latest || now - this.lastRecoverAt < 2500) return
+    this.lastRecoverAt = now
+    this.beginSync(latest)
+  }
+
   private finishHistorySync() {
     const firstTick = this.buffered[0]
     if (!firstTick) return
     const history = [...this.historyPages.values()].sort((a, b) => a.time - b.time)
     if (history.length < 120 || history.some((c, i) =>
       c.time > minuteBucket(this.historyTargetEnd) || (i > 0 && c.time !== history[i - 1].time + 60))) {
-      this.state = { ...this.state, ready: false, error: 'Invalid or incomplete history — waiting for recovery' }
-      this.historyId = null
-      this.emit()
+      this.recoverHistory('Invalid or incomplete history — retrying recovery')
       return
     }
     let candles = finalizeByClock(history, firstTick.epoch)
@@ -181,17 +205,23 @@ export class MarketFeed {
       if (!this.syncing || this.historyId == null || msg.req_id !== this.historyId || !this.buffered.length) return
       const batch = candlesFromHistory(msg.candles)
       const requested = Math.min(HISTORY_BATCH, HISTORY - this.historyPages.size)
-      if (batch.length !== msg.candles.length || batch.some((c, i) =>
-        c.time > minuteBucket(this.historyTargetEnd) || (i > 0 && c.time !== batch[i - 1].time + 60))) {
-        this.state = { ...this.state, ready: false, error: 'Invalid or incomplete history — waiting for recovery' }
-        this.emit()
+      // Prefer the longest trailing consecutive segment; Deriv occasionally drops a bar mid-page.
+      const usable = longestTrailingConsecutive(batch, minuteBucket(this.historyTargetEnd))
+      if (
+        usable.length < 1
+        || (usable.length < Math.min(120, Math.max(1, batch.length)) && usable.length < requested * 0.9)
+        || usable.some((c, i) =>
+          c.time > minuteBucket(this.historyTargetEnd) || (i > 0 && c.time !== usable[i - 1]!.time + 60))
+      ) {
+        this.recoverHistory('Invalid or incomplete history — retrying recovery')
         return
       }
-      for (const c of batch) this.historyPages.set(c.time, c)
+      for (const c of usable) this.historyPages.set(c.time, c)
       this.syncStarted = this.now()
-      const needMore = this.historyPages.size < HISTORY && batch.length >= Math.min(requested, HISTORY_BATCH)
-      if (needMore && batch.length > 0) {
-        const earliest = Math.min(...batch.map((c) => c.time))
+      // Keep paging while the API still returns a full page worth of usable bars.
+      const needMore = this.historyPages.size < HISTORY && usable.length >= Math.min(requested, HISTORY_BATCH)
+      if (needMore) {
+        const earliest = Math.min(...usable.map((c) => c.time))
         this.historyEnd = earliest - 60
         this.state = {
           ...this.state,

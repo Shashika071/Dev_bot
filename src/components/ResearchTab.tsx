@@ -10,6 +10,8 @@ import {
   researchExportUrl,
 } from '../lib/research/researchApi'
 
+const SERVER_CACHE_KEY = 'v100_research_server_status_v1'
+
 function pct(n: number | null | undefined) {
   return n == null ? '—' : `${(100 * n).toFixed(1)}%`
 }
@@ -21,10 +23,29 @@ function ago(epoch: number | null | undefined) {
 
 type RemotePayload = Awaited<ReturnType<typeof fetchResearchStatus>>
 
+function readServerCache(): RemotePayload | null {
+  try {
+    const raw = sessionStorage.getItem(SERVER_CACHE_KEY)
+    if (!raw) return null
+    return JSON.parse(raw) as RemotePayload
+  } catch {
+    return null
+  }
+}
+
+function writeServerCache(status: RemotePayload) {
+  try {
+    sessionStorage.setItem(SERVER_CACHE_KEY, JSON.stringify(status))
+  } catch {
+    /* ignore quota */
+  }
+}
+
 export function ResearchTab({ market }: { market: MarketState | null }) {
-  const [mode, setMode] = useState<'server' | 'browser'>('browser')
+  const cached = readServerCache()
+  const [mode, setMode] = useState<'loading' | 'server' | 'browser'>(cached ? 'server' : 'loading')
+  const [remote, setRemote] = useState<RemotePayload | null>(cached)
   const browser = useBrowserResearch(market, mode === 'browser')
-  const [remote, setRemote] = useState<RemotePayload | null>(null)
   const [remoteLive, setRemoteLive] = useState(false)
   const [busy, setBusy] = useState(false)
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -48,14 +69,26 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
         if (cancelled) return
         const status = await fetchResearchStatus(ctrl.signal)
         if (cancelled) return
+        const prevCount = (readServerCache()?.state?.observationCount
+          ?? cached?.state?.observationCount
+          ?? 0) as number
+        const nextCount = status?.state?.observationCount ?? 0
+        if (prevCount > 0 && nextCount === 0 && status?.experimentId !== readServerCache()?.experimentId) {
+          note(`New research run loaded (0 observations). Previous snapshot had ${prevCount}. Export/check older runs before Start/Reset.`)
+        }
         setRemoteLive(!!health.live)
         setGeneratedAt(health.generatedAt)
         setRemote(status)
+        writeServerCache(status)
         setMode('server')
       } catch {
         if (cancelled) return
         setRemoteLive(false)
-        // Preserve the server snapshot on disconnect; never swap to another experiment.
+        // Keep cached server snapshot after refresh; only fall back to browser when we never had server data.
+        setMode((prev) => {
+          if (prev === 'server' || readServerCache() != null) return 'server'
+          return 'browser'
+        })
       }
     }
     void poll()
@@ -73,6 +106,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
       await postResearchControl(path, body)
       const status = await fetchResearchStatus()
       setRemote(status)
+      writeServerCache(status)
       setRemoteLive(true)
       setMode('server')
       note(okMsg ?? `OK — stage: ${status?.state?.stage ?? 'updated'}`)
@@ -83,13 +117,8 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
     }
   }
 
-  function confirmReset(): boolean {
-    return window.confirm(
-      'Reset research? This clears all observations and starts a new 72h discovery from zero. Export first if you need the current run.',
-    )
-  }
-
-  const usingServer = mode === 'server' && remote != null
+  const usingServer = (mode === 'server' || mode === 'loading') && remote != null
+  const probing = mode === 'loading' && remote == null
   const st = usingServer ? remote?.state : browser.state
   const strategies = usingServer
     ? (remote?.summary?.strategies ?? [])
@@ -99,8 +128,19 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
     : browser.registry.length
   const summary = usingServer ? remote?.summary : browser.summary
   const legacy = (summary?.codeVersion ?? st?.codeVersion) !== RESEARCH_CODE_VERSION
-  const controlsDisabled = busy || (usingServer && !remoteLive)
+  const controlsDisabled = busy || probing || (usingServer && !remoteLive)
   const contract = (st as { contract?: { contractType: string; barrierAbs: number; duration: number; durationUnit: string; paperStake: number; currency: string } } | undefined)?.contract
+  const experimentId = usingServer ? (remote as { experimentId?: string } | null)?.experimentId : null
+  const observationCount = usingServer
+    ? (remote?.state?.observationCount ?? 0)
+    : browser.state.observations.length
+
+  function confirmWipe(action: string): boolean {
+    if (observationCount <= 0) return true
+    return window.confirm(
+      `${action} will clear ${observationCount} observations and start from zero. Export first if you need this run.`,
+    )
+  }
 
   return (
     <div className="mx-auto max-w-6xl space-y-4 p-4 text-xs text-slate-300">
@@ -112,10 +152,15 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
           </p>
         </div>
         <div className="text-right text-[11px]">
-          {usingServer ? (
+          {probing ? (
+            <div className="text-slate-400">● Connecting to research collector…</div>
+          ) : usingServer ? (
             <>
-              <div className={remoteLive ? "text-emerald-400" : "text-rose-400"}>{remoteLive ? "● Server collector" : "● Server disconnected — last saved snapshot"}</div>
+              <div className={remoteLive ? 'text-emerald-400' : 'text-rose-400'}>
+                {remoteLive ? '● Server collector' : '● Server disconnected — showing last saved snapshot'}
+              </div>
               <div className="text-slate-500">Report {generatedAt ? ago(generatedAt) : '—'}</div>
+              {experimentId && <div className="text-slate-500">Run {experimentId}</div>}
             </>
           ) : (
             <>
@@ -128,11 +173,24 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
         </div>
       </div>
 
-      {!usingServer && (
+      {probing && (
+        <p className="rounded border border-slate-700 bg-slate-900/60 px-3 py-2 text-slate-300">
+          Loading research status — keeping the last known observation count so refresh does not flash 0.
+        </p>
+      )}
+
+      {!probing && !usingServer && (
         <p className="rounded border border-amber-700/50 bg-amber-950/40 px-3 py-2 text-amber-200">
           Server collector not reachable yet — using browser mode for now.
           After you redeploy with the <code className="text-amber-100">research</code> container,
           this becomes always-on and closing the tab is OK.
+        </p>
+      )}
+
+      {usingServer && !remoteLive && observationCount > 0 && (
+        <p className="rounded border border-amber-700/50 bg-amber-950/40 px-3 py-2 text-amber-200">
+          Showing cached server snapshot ({observationCount} observations). Live collector is unreachable right now —
+          this is not a wipe; counts return when the research service responds again.
         </p>
       )}
 
@@ -165,9 +223,8 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
           <div>Last tick: {ago((st as { lastTickEpoch?: number | null } | undefined)?.lastTickEpoch)}</div>
           <div>
             Observations:{' '}
-            {usingServer
-              ? (remote?.state?.observationCount ?? 0)
-              : browser.state.observations.length}
+            <span className="font-semibold text-slate-100">{observationCount}</span>
+            {usingServer && !remoteLive ? ' (cached)' : ''}
           </div>
         </div>
 
@@ -184,7 +241,10 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
               <button
                 type="button"
                 disabled={controlsDisabled}
-                onClick={() => void runRemote('/control/start-discovery', undefined, 'Discovery started (server)')}
+                onClick={() => {
+                  if (!confirmWipe('Start 72h discovery')) return
+                  void runRemote('/control/start-discovery', undefined, 'Discovery started (server)')
+                }}
                 className={`${btn} bg-emerald-600 text-white hover:bg-emerald-500`}
               >
                 {busy ? 'Working…' : 'Start 72h discovery'}
@@ -208,13 +268,14 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
               <button
                 type="button"
                 disabled={controlsDisabled}
-                onClick={() =>
+                onClick={() => {
+                  if (!confirmWipe('Start confirmation')) return
                   void runRemote(
                     '/control/start-confirmation',
                     { strategyIds: remote?.state?.enabledStrategyIds },
                     'Confirmation started',
                   )
-                }
+                }}
                 className={`${btn} bg-slate-600 text-slate-100 hover:bg-slate-500`}
               >
                 Start confirmation (same IDs)
@@ -223,7 +284,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
                 type="button"
                 disabled={controlsDisabled}
                 onClick={() => {
-                  if (!confirmReset()) return
+                  if (!confirmWipe('Reset')) return
                   void runRemote('/control/reset', undefined, 'Reset — all records cleared, discovery restarted from 0')
                 }}
                 className={`${btn} bg-rose-800 text-rose-100 hover:bg-rose-700`}
@@ -236,6 +297,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
               <button
                 type="button"
                 onClick={() => {
+                  if (!confirmWipe('Start 72h discovery')) return
                   try { const next = browser.start(); note(`Discovery started — stage: ${next.stage}`) }
                   catch { note('Could not archive the existing run. Export it before starting another run.') }
                 }}
@@ -268,6 +330,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
               <button
                 type="button"
                 onClick={() => {
+                  if (!confirmWipe('Start confirmation')) return
                   try { const next = browser.startConfirmation(); note(`Confirmation started — stage: ${next.stage}`) }
                   catch { note('Could not archive the existing run. Export it before starting another run.') }
                 }}
@@ -278,7 +341,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
               <button
                 type="button"
                 onClick={() => {
-                  if (!confirmReset()) return
+                  if (!confirmWipe('Reset')) return
                   try {
                     const next = browser.resetAll()
                     note(`Reset — observations 0, stage: ${next.stage}`)
