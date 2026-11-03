@@ -7,7 +7,9 @@ import {
   listEnabledCandidates,
   DISCOVERY_HOURS,
 } from './experimentEngine'
-import { STRATEGY_COOLDOWN_SEC } from './horizons'
+import { makeHorizons, POST_WIN_COOLDOWN_SEC, STRATEGY_COOLDOWN_SEC } from './horizons'
+import { maybeStartTouchPaper } from './touchPaper'
+import { DEFAULT_FROZEN_CONTRACT } from './contractSettings'
 import { RESEARCH_FORBIDDEN_METHODS } from './touchPaper'
 import { summarizeExperiment } from './summarizeExperiment'
 import { readFileSync } from 'node:fs'
@@ -60,6 +62,47 @@ describe('experiment engine', () => {
     expect(state.observations.length).toBe(n1)
     // cooldown constant exported
     expect(STRATEGY_COOLDOWN_SEC).toBe(420)
+    expect(POST_WIN_COOLDOWN_SEC).toBe(900)
+  })
+
+  it('applies a 15-minute post-win break after a Touch HIT', () => {
+    const t0 = 1_700_100_000
+    let state = startDiscovery(createInitialState('confirmation', ['C5']), t0 * 1000)
+    const tick = { epoch: t0, quote: 100, symbol: 'R_100' }
+    const obs = maybeStartTouchPaper({
+      id: 'C5:1:RISE',
+      strategyId: 'C5',
+      side: 'RISE',
+      candleTime: t0 - 60,
+      signalEpoch: t0,
+      receiptEpoch: t0,
+      entryReferencePrice: 100,
+      entryTick: tick,
+      forming: false,
+      reason: 'seed',
+      atr: { atr14: 1, atrPct: 1, candleRange: 1, rangeOverAtr: 1 },
+      lastTickEpoch: t0,
+      horizons: makeHorizons(t0),
+      pendingHorizons: true,
+    }, DEFAULT_FROZEN_CONTRACT, tick)
+    state = {
+      ...state,
+      observations: [obs],
+      acceptedKeys: [obs.id],
+      cooldowns: { C5: t0 + STRATEGY_COOLDOWN_SEC },
+      lastTickEpoch: t0,
+      feedHealthy: true,
+    }
+    // HIT at t0+30 → cooldown must extend to hit + 900s
+    state = onTick(
+      state,
+      { epoch: t0 + 30, quote: 100.1, symbol: 'R_100' },
+      closedFixtures(80),
+      t0 + 30,
+      true,
+    )
+    expect(state.observations[0]?.touch?.status).toBe('hit')
+    expect(state.cooldowns.C5).toBe(t0 + 30 + POST_WIN_COOLDOWN_SEC)
   })
 
   it('marks horizons unknown when feed unhealthy', () => {

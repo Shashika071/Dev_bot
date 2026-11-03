@@ -232,6 +232,7 @@ export function summarizeExperiment(state: ExperimentState): {
       ] : []),
       'Rankings are descriptive/exploratory; observations can overlap and correlate.',
       'Do not label a small sample or a 100% observed Touch win rate as a proven best strategy.',
+      'After a Touch HIT, that strategy (and its pair) takes a 15-minute post-win break before new paper entries — same idea as the live trade cooldown after a win.',
       '80% baseline score means 4/5 conditions — not an 80% win probability.',
       'B0 uses forming-candle timing; compare completed strategies primarily to B1.',
       `Primary result: Touch within ${state.contract.duration} minutes of entry. A hit wins immediately when observed, including at expiry. It remains a win if price reverses or the feed disconnects later.`,

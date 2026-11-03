@@ -273,6 +273,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
           <p className="mt-2 text-[11px] text-slate-500">
             Frozen paper contract: {contract.contractType} barrier±{contract.barrierAbs}{' '}
             {contract.duration}{contract.durationUnit} stake={contract.paperStake} {contract.currency}
+            {' · '}7m entry cooldown · 15m break after each Touch win
           </p>
         )}
 

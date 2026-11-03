@@ -4,7 +4,10 @@ import type { HorizonMin, HorizonResult, MoveClass, ResearchObservation, Researc
 export const HORIZON_MINUTES: HorizonMin[] = [1, 3, 5, 7]
 export const MAX_HORIZON_DELAY_SEC = 5
 export const MAX_TICK_GAP_SEC = 10
+/** Pause after accepting a paper entry (same cadence as prior research). */
 export const STRATEGY_COOLDOWN_SEC = 420
+/** Extra pause after a Touch HIT — matches the live 15-minute break after a win. */
+export const POST_WIN_COOLDOWN_SEC = 15 * 60
 
 function sign(side: ResearchSide): 1 | -1 {
   return side === 'RISE' ? 1 : -1

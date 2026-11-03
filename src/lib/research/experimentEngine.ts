@@ -18,6 +18,7 @@ import type {
 import {
   advanceObservationHorizons,
   makeHorizons,
+  POST_WIN_COOLDOWN_SEC,
   STRATEGY_COOLDOWN_SEC,
 } from './horizons'
 import { advanceTouchPaper, maybeStartTouchPaper, expireTouchPaper, hasPendingTouch } from './touchPaper'
@@ -131,7 +132,32 @@ function onCooldown(state: ExperimentState, id: StrategyId, epoch: number): bool
 }
 
 function setCooldown(state: ExperimentState, id: StrategyId, fromEpoch: number): void {
-  state.cooldowns[cooldownKey(id)] = fromEpoch + STRATEGY_COOLDOWN_SEC
+  const until = fromEpoch + STRATEGY_COOLDOWN_SEC
+  const key = cooldownKey(id)
+  state.cooldowns[key] = Math.max(state.cooldowns[key] ?? 0, until)
+}
+
+/** After a confirmed Touch win, block that strategy (and its pair) for 15 minutes. */
+function applyPostWinCooldown(state: ExperimentState, id: StrategyId, winEpoch: number): void {
+  const until = winEpoch + POST_WIN_COOLDOWN_SEC
+  const key = cooldownKey(id)
+  state.cooldowns[key] = Math.max(state.cooldowns[key] ?? 0, until)
+}
+
+function applyNewTouchWins(
+  before: ExperimentState['observations'],
+  after: ExperimentState['observations'],
+  state: ExperimentState,
+): void {
+  const prevById = new Map(before.map((o) => [o.id, o]))
+  for (const obs of after) {
+    const prev = prevById.get(obs.id)
+    const wasHit = prev?.touch?.status === 'hit'
+    const nowHit = obs.touch?.status === 'hit'
+    if (!wasHit && nowHit && obs.touch?.firstTouchEpoch != null) {
+      applyPostWinCooldown(state, obs.strategyId, obs.touch.firstTouchEpoch)
+    }
+  }
 }
 
 function acceptingNew(state: ExperimentState, nowEpoch: number): boolean {
@@ -231,11 +257,17 @@ export function onTick(
   }
 
   // Advance pending observations
+  const beforeTouch = next.observations
   next.observations = next.observations.map((o) => {
     let adv = advanceObservationHorizons(o, tick, true)
     adv = advanceTouchPaper(adv, tick, true, next.contract, receiptEpoch)
     return adv
   })
+  applyNewTouchWins(beforeTouch, next.observations, next)
+  // Post-win cooldowns must also block same-tick admissions using the snapshot.
+  for (const [k, until] of Object.entries(next.cooldowns)) {
+    if ((admissionState.cooldowns[k] ?? 0) < until) admissionState.cooldowns[k] = until
+  }
 
   // Resolve awaiting close-entry (first tick after candle close)
   const stillAwaiting = []
