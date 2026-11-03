@@ -22,7 +22,11 @@ import {
   STRATEGY_COOLDOWN_SEC,
 } from './horizons'
 import { advanceTouchPaper, maybeStartTouchPaper, expireTouchPaper, hasPendingTouch } from './touchPaper'
-import { DEFAULT_FROZEN_CONTRACT, type FrozenContractSettings } from './contractSettings'
+import {
+  DEFAULT_FROZEN_CONTRACT,
+  normalizeContractSettings,
+  type FrozenContractSettings,
+} from './contractSettings'
 
 export { DEFAULT_FROZEN_CONTRACT, type FrozenContractSettings }
 export const RESEARCH_CODE_VERSION = 'v100-research-engine-2'
@@ -83,7 +87,7 @@ export function createInitialState(
     endsAt: null,
     finishedAt: null,
     codeVersion: RESEARCH_CODE_VERSION,
-    contract: { ...contract },
+    contract: normalizeContractSettings(contract),
     enabledStrategyIds: [...enabledIds],
     cooldowns: {},
     acceptedKeys: [],
@@ -126,21 +130,32 @@ function cooldownKey(id: StrategyId): string {
   return [id, def.pairedWith].sort().join('+')
 }
 
+/** Post-win pause is always per strategy — never shared with siblings. */
+function postWinCooldownKey(id: StrategyId): string {
+  return `win:${id}`
+}
+
 function onCooldown(state: ExperimentState, id: StrategyId, epoch: number): boolean {
-  const until = state.cooldowns[cooldownKey(id)] ?? 0
-  return epoch < until
+  const entryUntil = state.cooldowns[cooldownKey(id)] ?? 0
+  const winUntil = state.cooldowns[postWinCooldownKey(id)] ?? 0
+  return epoch < entryUntil || epoch < winUntil
 }
 
 function setCooldown(state: ExperimentState, id: StrategyId, fromEpoch: number): void {
-  const until = fromEpoch + STRATEGY_COOLDOWN_SEC
+  const secs = state.contract.entryCooldownSec ?? STRATEGY_COOLDOWN_SEC
+  const until = fromEpoch + secs
   const key = cooldownKey(id)
   state.cooldowns[key] = Math.max(state.cooldowns[key] ?? 0, until)
 }
 
-/** After a confirmed Touch win, block that strategy (and its pair) for 15 minutes. */
+/**
+ * After a confirmed Touch win, only THAT strategy waits (research interval, not live Trade).
+ * Other strategies (including focused B1/C5/C1 peers) keep collecting.
+ */
 function applyPostWinCooldown(state: ExperimentState, id: StrategyId, winEpoch: number): void {
-  const until = winEpoch + POST_WIN_COOLDOWN_SEC
-  const key = cooldownKey(id)
+  const secs = state.contract.postWinCooldownSec ?? POST_WIN_COOLDOWN_SEC
+  const until = winEpoch + secs
+  const key = postWinCooldownKey(id)
   state.cooldowns[key] = Math.max(state.cooldowns[key] ?? 0, until)
 }
 

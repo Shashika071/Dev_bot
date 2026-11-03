@@ -11,8 +11,17 @@ import {
 } from '../lib/research/experimentEngine'
 import { summarizeExperiment, exportObservationsCsv, exportReportMarkdown } from '../lib/research/summarizeExperiment'
 import { STRATEGY_REGISTRY } from '../lib/research/strategies/registry'
+
+const ALL_STRATEGY_IDS = STRATEGY_REGISTRY.map((s) => s.id)
 import { FOCUSED_CONFIRMATION_IDS } from '../lib/research/focusedConfirmation'
 import { loadBrowserResearch, saveBrowserResearch, archiveBrowserResearch } from '../lib/research/browserResearchStore'
+import {
+  contractWithPrefs,
+  loadResearchCooldownPrefs,
+  saveResearchCooldownPrefs,
+  type ResearchCooldownPrefs,
+} from '../lib/research/researchCooldownPrefs'
+import { DEFAULT_FROZEN_CONTRACT } from '../lib/research/contractSettings'
 import type { StrategyId } from '../lib/research/strategies/types'
 
 /**
@@ -22,10 +31,24 @@ import type { StrategyId } from '../lib/research/strategies/types'
 export function useBrowserResearch(market: MarketState | null, enabled = true) {
   const [state, setState] = useState<ExperimentState>(() => interruptResearchFeed(loadBrowserResearch()))
   const [storageError, setStorageError] = useState(false)
+  const [cooldownPrefs, setCooldownPrefs] = useState<ResearchCooldownPrefs>(() => loadResearchCooldownPrefs())
   const stateRef = useRef(state)
   const lastKey = useRef('')
 
   useEffect(() => { stateRef.current = state }, [state])
+
+  function updateCooldownPrefs(next: ResearchCooldownPrefs) {
+    const cleaned = {
+      entryCooldownSec: Math.max(0, Math.floor(Number(next.entryCooldownSec) || 0)),
+      postWinCooldownSec: Math.max(0, Math.floor(Number(next.postWinCooldownSec) || 0)),
+    }
+    setCooldownPrefs(cleaned)
+    saveResearchCooldownPrefs(cleaned)
+  }
+
+  function freshContract() {
+    return contractWithPrefs(DEFAULT_FROZEN_CONTRACT, cooldownPrefs)
+  }
 
   useEffect(() => {
     if (!enabled) return
@@ -68,7 +91,10 @@ export function useBrowserResearch(market: MarketState | null, enabled = true) {
 
   function start() {
     archiveBrowserResearch(stateRef.current)
-    const next = startDiscovery(createInitialState(), Date.now())
+    const next = startDiscovery(
+      createInitialState('discovery', ALL_STRATEGY_IDS, freshContract()),
+      Date.now(),
+    )
     stateRef.current = next
     setState(next)
     saveBrowserResearch(next)
@@ -94,7 +120,10 @@ export function useBrowserResearch(market: MarketState | null, enabled = true) {
   function startConfirmation(ids?: StrategyId[]) {
     archiveBrowserResearch(stateRef.current)
     const enabled = ids ?? stateRef.current.enabledStrategyIds
-    let next = startDiscovery(createInitialState('confirmation', enabled), Date.now())
+    let next = startDiscovery(
+      createInitialState('confirmation', enabled, freshContract()),
+      Date.now(),
+    )
     next = { ...next, mode: 'confirmation' }
     stateRef.current = next
     setState(next)
@@ -110,7 +139,10 @@ export function useBrowserResearch(market: MarketState | null, enabled = true) {
   /** Wipe observations/rejected/cooldowns and start a fresh discovery from zero. */
   function resetAll() {
     archiveBrowserResearch(stateRef.current)
-    const next = startDiscovery(createInitialState(), Date.now())
+    const next = startDiscovery(
+      createInitialState('discovery', ALL_STRATEGY_IDS, freshContract()),
+      Date.now(),
+    )
     stateRef.current = next
     setState(next)
     saveBrowserResearch(next)
@@ -159,6 +191,8 @@ export function useBrowserResearch(market: MarketState | null, enabled = true) {
     startConfirmation,
     startFocusedConfirmation,
     resetAll,
+    cooldownPrefs,
+    updateCooldownPrefs,
     downloadCsv,
     downloadReport,
     downloadSummary,

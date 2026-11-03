@@ -102,7 +102,28 @@ describe('experiment engine', () => {
       true,
     )
     expect(state.observations[0]?.touch?.status).toBe('hit')
-    expect(state.cooldowns.C5).toBe(t0 + 30 + POST_WIN_COOLDOWN_SEC)
+    expect(state.cooldowns['win:C5']).toBe(t0 + 30 + POST_WIN_COOLDOWN_SEC)
+    // Other strategies are not paused by C5's win.
+    expect(state.cooldowns['win:B1']).toBeUndefined()
+    expect(state.cooldowns['win:C1']).toBeUndefined()
+  })
+
+  it('keeps sibling strategies collecting while one strategy is in post-win break', () => {
+    const t0 = 1_700_200_000
+    let state = startDiscovery(
+      createInitialState('confirmation', ['B1', 'C5', 'C1']),
+      t0 * 1000,
+    )
+    state = {
+      ...state,
+      cooldowns: { 'win:C5': t0 + 500 },
+      lastTickEpoch: t0,
+      feedHealthy: true,
+    }
+    // C5 blocked; B1 and C1 must still be allowed by onCooldown rules.
+    expect(state.cooldowns['win:C5']).toBeGreaterThan(t0)
+    expect(state.cooldowns['win:B1']).toBeUndefined()
+    expect(state.cooldowns['win:C1']).toBeUndefined()
   })
 
   it('marks horizons unknown when feed unhealthy', () => {

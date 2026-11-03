@@ -10,6 +10,11 @@ import {
   researchExportUrl,
 } from '../lib/research/researchApi'
 import { FOCUSED_CONFIRMATION_LABELS, isFocusedConfirmation } from '../lib/research/focusedConfirmation'
+import {
+  loadResearchCooldownPrefs,
+  saveResearchCooldownPrefs,
+  type ResearchCooldownPrefs,
+} from '../lib/research/researchCooldownPrefs'
 
 const SERVER_CACHE_KEY = 'v100_research_server_status_v1'
 
@@ -56,10 +61,21 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
   const [expanded, setExpanded] = useState<string | null>(null)
   const [generatedAt, setGeneratedAt] = useState<number | null>(null)
   const [flash, setFlash] = useState<string | null>(null)
+  const [draftCooldownPrefs, setDraftCooldownPrefs] = useState<ResearchCooldownPrefs>(() => loadResearchCooldownPrefs())
 
   function note(msg: string) {
     setFlash(msg)
     window.setTimeout(() => setFlash(null), 4000)
+  }
+
+  function setCooldownDraft(next: ResearchCooldownPrefs) {
+    const cleaned = {
+      entryCooldownSec: Math.max(0, Math.floor(Number(next.entryCooldownSec) || 0)),
+      postWinCooldownSec: Math.max(0, Math.floor(Number(next.postWinCooldownSec) || 0)),
+    }
+    setDraftCooldownPrefs(cleaned)
+    saveResearchCooldownPrefs(cleaned)
+    browser.updateCooldownPrefs(cleaned)
   }
 
   const btn =
@@ -146,7 +162,16 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
   const feedDiagnostics = usingServer ? remote?.feedDiagnostics : null
   const legacy = (summary?.codeVersion ?? st?.codeVersion) !== RESEARCH_CODE_VERSION
   const controlsDisabled = busy || probing || (usingServer && !remoteLive)
-  const contract = (st as { contract?: { contractType: string; barrierAbs: number; duration: number; durationUnit: string; paperStake: number; currency: string } } | undefined)?.contract
+  const contract = (st as { contract?: {
+    contractType: string
+    barrierAbs: number
+    duration: number
+    durationUnit: string
+    paperStake: number
+    currency: string
+    entryCooldownSec?: number
+    postWinCooldownSec?: number
+  } } | undefined)?.contract
   const experimentId = usingServer ? (remote as { experimentId?: string } | null)?.experimentId : null
   const observationCount = usingServer
     ? (remote?.state?.observationCount ?? 0)
@@ -162,6 +187,11 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
     | undefined
   const focusedRun = !!(summary as { focusedConfirmation?: boolean } | undefined)?.focusedConfirmation
     || isFocusedConfirmation(enabledIds)
+  const cooldownForNextRun = usingServer ? draftCooldownPrefs : browser.cooldownPrefs
+  const cooldownBody = {
+    entryCooldownSec: cooldownForNextRun.entryCooldownSec,
+    postWinCooldownSec: cooldownForNextRun.postWinCooldownSec,
+  }
 
   function confirmWipe(action: string): boolean {
     if (observationCount <= 0) return true
@@ -273,9 +303,50 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
           <p className="mt-2 text-[11px] text-slate-500">
             Frozen paper contract: {contract.contractType} barrier±{contract.barrierAbs}{' '}
             {contract.duration}{contract.durationUnit} stake={contract.paperStake} {contract.currency}
-            {' · '}7m entry cooldown · 15m break after each Touch win
+            {' · '}entry cooldown {contract.entryCooldownSec ?? cooldownForNextRun.entryCooldownSec}s
+            {' · '}post-win {contract.postWinCooldownSec ?? cooldownForNextRun.postWinCooldownSec}s (per strategy)
           </p>
         )}
+
+        <div className="mt-3 rounded border border-slate-700 bg-slate-950/40 p-2">
+          <div className="font-medium text-slate-200">Research intervals (separate from live Trade)</div>
+          <p className="mt-1 text-[11px] text-slate-500">
+            These apply to the next research start only. A Touch win pauses that strategy alone —
+            other strategies (e.g. B1 / C5 / C1) keep collecting.
+          </p>
+          <div className="mt-2 flex flex-wrap gap-3">
+            <label className="flex flex-col gap-0.5 text-[11px] text-slate-400">
+              Entry cooldown (sec)
+              <input
+                type="number"
+                min={0}
+                step={1}
+                className="w-28 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-100"
+                value={cooldownForNextRun.entryCooldownSec}
+                disabled={controlsDisabled && usingServer}
+                onChange={(e) => setCooldownDraft({
+                  ...cooldownForNextRun,
+                  entryCooldownSec: Number(e.target.value),
+                })}
+              />
+            </label>
+            <label className="flex flex-col gap-0.5 text-[11px] text-slate-400">
+              Post-win break (sec)
+              <input
+                type="number"
+                min={0}
+                step={1}
+                className="w-28 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-slate-100"
+                value={cooldownForNextRun.postWinCooldownSec}
+                disabled={controlsDisabled && usingServer}
+                onChange={(e) => setCooldownDraft({
+                  ...cooldownForNextRun,
+                  postWinCooldownSec: Number(e.target.value),
+                })}
+              />
+            </label>
+          </div>
+        </div>
 
         <div className="relative z-10 mt-3 flex flex-wrap gap-2">
           {usingServer ? (
@@ -285,7 +356,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
                 disabled={controlsDisabled}
                 onClick={() => {
                   if (!confirmWipe('Start 72h discovery')) return
-                  void runRemote('/control/start-discovery', undefined, 'Discovery started (server)')
+                  void runRemote('/control/start-discovery', cooldownBody, 'Discovery started (server)')
                 }}
                 className={`${btn} bg-emerald-600 text-white hover:bg-emerald-500`}
               >
@@ -314,7 +385,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
                   if (!confirmWipe('Start focused confirmation: B1 / C5 / C1')) return
                   void runRemote(
                     '/control/start-focused-confirmation',
-                    undefined,
+                    cooldownBody,
                     'Focused confirmation started (B1 / C5 / C1)',
                   )
                 }}
@@ -329,7 +400,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
                   if (!confirmWipe('Start confirmation')) return
                   void runRemote(
                     '/control/start-confirmation',
-                    { strategyIds: remote?.state?.enabledStrategyIds },
+                    { strategyIds: remote?.state?.enabledStrategyIds, ...cooldownBody },
                     'Confirmation started',
                   )
                 }}
@@ -342,7 +413,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
                 disabled={controlsDisabled}
                 onClick={() => {
                   if (!confirmWipe('Reset')) return
-                  void runRemote('/control/reset', undefined, 'Previous run archived; new discovery started from 0')
+                  void runRemote('/control/reset', cooldownBody, 'Previous run archived; new discovery started from 0')
                 }}
                 className={`${btn} bg-rose-800 text-rose-100 hover:bg-rose-700`}
               >

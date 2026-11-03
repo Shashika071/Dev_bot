@@ -50,6 +50,8 @@ const { STRATEGY_REGISTRY } =
   await vite.ssrLoadModule('/src/lib/research/strategies/registry.ts')
 const { FOCUSED_CONFIRMATION_IDS } =
   await vite.ssrLoadModule('/src/lib/research/focusedConfirmation.ts')
+const contractHelpers =
+  await vite.ssrLoadModule('/src/lib/research/contractSettings.ts')
 
 const { applyResearchEvent, emptyResearchSession } = await vite.ssrLoadModule('/src/lib/research/researchSession.ts')
 const { ResearchQuoteScheduler } = await vite.ssrLoadModule('/src/lib/research/quoteScheduler.ts')
@@ -140,15 +142,29 @@ function resetQuotes() {
   )
 }
 
-function startRun(mode, ids = state.enabledStrategyIds) {
+function mergeContractFromBody(body = {}) {
+  const { normalizeContractSettings } = contractHelpers
+  return normalizeContractSettings({
+    ...state.contract,
+    ...(Number.isFinite(body.entryCooldownSec) ? { entryCooldownSec: body.entryCooldownSec } : {}),
+    ...(Number.isFinite(body.postWinCooldownSec) ? { postWinCooldownSec: body.postWinCooldownSec } : {}),
+  })
+}
+
+function startRun(mode, ids, contractOverride = null) {
   persist(true)
   quotes?.cancel()
   const seed = candles
-  const contract = state.contract
+  const contract = contractOverride ?? state.contract
+  const enabled = Array.isArray(ids) && ids.length
+    ? ids
+    : (mode === 'discovery'
+      ? STRATEGY_REGISTRY.map((s) => s.id)
+      : state.enabledStrategyIds)
   experimentId = newExperimentId(mode)
   session = emptyResearchSession()
   state = session.state
-  const started = startDiscovery(createInitialState(mode, ids, contract), Date.now())
+  const started = startDiscovery(createInitialState(mode, enabled, contract), Date.now())
   record({ type: 'start', state: started, candles: seed })
   resetQuotes()
   persist(true)
@@ -254,8 +270,15 @@ const api = createHttpServer(async (req, res) => {
       return json(res, 200, summarizeExperiment(state))
     }
     if (req.method === 'POST' && url.pathname === '/control/start-discovery') {
-      startRun('discovery')
-      return json(res, 200, { ok: true, experimentId, stage: state.stage, endsAt: state.endsAt })
+      const body = await readBody(req)
+      startRun('discovery', null, mergeContractFromBody(body))
+      return json(res, 200, {
+        ok: true,
+        experimentId,
+        stage: state.stage,
+        endsAt: state.endsAt,
+        contract: state.contract,
+      })
     }
     if (req.method === 'POST' && url.pathname === '/control/resume') {
       if (state.codeVersion !== RESEARCH_CODE_VERSION) return json(res, 409, { error: 'Pre-fix experiment is read-only. Export it and start a new discovery.' })
@@ -273,30 +296,40 @@ const api = createHttpServer(async (req, res) => {
       const body = await readBody(req)
       const ids = Array.isArray(body.strategyIds) ? body.strategyIds : state.enabledStrategyIds
       if (!ids.length || ids.some((id) => !STRATEGY_REGISTRY.some((s) => s.id === id)) || new Set(ids).size !== ids.length) return json(res, 400, { error: 'Invalid strategy IDs' })
-      startRun('confirmation', ids)
-      return json(res, 200, { ok: true, experimentId, mode: 'confirmation', enabledStrategyIds: ids })
+      startRun('confirmation', ids, mergeContractFromBody(body))
+      return json(res, 200, {
+        ok: true,
+        experimentId,
+        mode: 'confirmation',
+        enabledStrategyIds: ids,
+        contract: state.contract,
+      })
     }
     if (req.method === 'POST' && url.pathname === '/control/start-focused-confirmation') {
       // Paper-only B1 / C5 / C1 comparison. Does not enable live trading.
+      const body = await readBody(req)
       const ids = [...FOCUSED_CONFIRMATION_IDS]
-      startRun('confirmation', ids)
+      startRun('confirmation', ids, mergeContractFromBody(body))
       return json(res, 200, {
         ok: true,
         experimentId,
         mode: 'confirmation',
         focused: true,
         enabledStrategyIds: ids,
+        contract: state.contract,
       })
     }
     if (req.method === 'POST' && url.pathname === '/control/reset') {
       // Clear all live records and begin a fresh discovery from zero.
-      startRun('discovery')
+      const body = await readBody(req)
+      startRun('discovery', null, mergeContractFromBody(body))
       return json(res, 200, {
         ok: true,
         experimentId,
         stage: state.stage,
         observationCount: state.observations.length,
         endsAt: state.endsAt,
+        contract: state.contract,
       })
     }
     if (req.method === 'POST' && url.pathname === '/control/load-experiment') {
