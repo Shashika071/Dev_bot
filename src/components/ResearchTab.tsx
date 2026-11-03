@@ -9,6 +9,7 @@ import {
   postResearchControl,
   researchExportUrl,
 } from '../lib/research/researchApi'
+import { FOCUSED_CONFIRMATION_LABELS, isFocusedConfirmation } from '../lib/research/focusedConfirmation'
 
 const SERVER_CACHE_KEY = 'v100_research_server_status_v1'
 
@@ -156,6 +157,11 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
       .filter((r) => r.id !== experimentId && r.observationCount > 0)
       .slice(0, 8))
     : []
+  const enabledIds = (st as { enabledStrategyIds?: string[] } | undefined)?.enabledStrategyIds as
+    | import('../lib/research/strategies/types').StrategyId[]
+    | undefined
+  const focusedRun = !!(summary as { focusedConfirmation?: boolean } | undefined)?.focusedConfirmation
+    || isFocusedConfirmation(enabledIds)
 
   function confirmWipe(action: string): boolean {
     if (observationCount <= 0) return true
@@ -170,7 +176,8 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
         <div>
           <h1 className="text-lg font-semibold text-slate-100">Research</h1>
           <p className="mt-1 max-w-2xl text-[12px] text-slate-400">
-            Paper-only 22-strategy experiment. Does not trade and does not use your token.
+            Paper-only research. Does not trade and does not use your token.
+            Use discovery for all 22 strategies, or focused confirmation for B1 / C5 / C1.
           </p>
         </div>
         <div className="text-right text-[11px]">
@@ -234,7 +241,14 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
             <span className="font-semibold text-emerald-300">{st?.stage ?? '—'}</span>
           </div>
           <div>Mode: <span className="text-slate-100">{(st as { mode?: string } | undefined)?.mode ?? '—'}</span></div>
-          <div>Registry: <span className="text-slate-100">{registryCount}/22</span></div>
+          <div>
+            Strategies:{' '}
+            <span className="text-slate-100">
+              {focusedRun
+                ? `focused ${enabledIds?.length ?? 3} (B1/C5/C1)`
+                : `${enabledIds?.length ?? registryCount}/${registryCount}`}
+            </span>
+          </div>
           <div>Start: {ago((st as { startedAt?: number | null } | undefined)?.startedAt)}</div>
           <div>Ends: {ago((st as { endsAt?: number | null } | undefined)?.endsAt)}</div>
           <div>Finished: {ago((st as { finishedAt?: number | null } | undefined)?.finishedAt)}</div>
@@ -291,6 +305,21 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
                 className={`${btn} bg-slate-600 text-slate-100 hover:bg-slate-500`}
               >
                 Stop new entries
+              </button>
+              <button
+                type="button"
+                disabled={controlsDisabled}
+                onClick={() => {
+                  if (!confirmWipe('Start focused confirmation: B1 / C5 / C1')) return
+                  void runRemote(
+                    '/control/start-focused-confirmation',
+                    undefined,
+                    'Focused confirmation started (B1 / C5 / C1)',
+                  )
+                }}
+                className={`${btn} bg-sky-700 text-white hover:bg-sky-600`}
+              >
+                Start focused confirmation: B1 / C5 / C1
               </button>
               <button
                 type="button"
@@ -357,6 +386,21 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
               <button
                 type="button"
                 onClick={() => {
+                  if (!confirmWipe('Start focused confirmation: B1 / C5 / C1')) return
+                  try {
+                    const next = browser.startFocusedConfirmation()
+                    note(`Focused confirmation started (B1 / C5 / C1) — stage: ${next.stage}`)
+                  } catch {
+                    note('Could not archive the existing run. Export it before starting another run.')
+                  }
+                }}
+                className={`${btn} bg-sky-700 text-white hover:bg-sky-600`}
+              >
+                Start focused confirmation: B1 / C5 / C1
+              </button>
+              <button
+                type="button"
+                onClick={() => {
                   if (!confirmWipe('Start confirmation')) return
                   try { const next = browser.startConfirmation(); note(`Confirmation started — stage: ${next.stage}`) }
                   catch { note('Could not archive the existing run. Export it before starting another run.') }
@@ -383,6 +427,20 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
             </>
           )}
         </div>
+
+        {focusedRun && (
+          <div className="mt-3 rounded border border-sky-800/60 bg-sky-950/30 p-3 text-[11px] text-sky-100">
+            <div className="font-medium text-sky-200">Focused paper comparison (not live trading)</div>
+            <ul className="mt-1 list-inside list-disc space-y-0.5 text-sky-100/90">
+              <li><span className="font-mono">B1</span>: {FOCUSED_CONFIRMATION_LABELS.B1}</li>
+              <li><span className="font-mono">C5</span>: {FOCUSED_CONFIRMATION_LABELS.C5}</li>
+              <li><span className="font-mono">C1</span>: {FOCUSED_CONFIRMATION_LABELS.C1}</li>
+            </ul>
+            <p className="mt-2 text-sky-200/80">
+              Compare Touch performance first. A small sample or a 100% observed win rate is not a proven best strategy.
+            </p>
+          </div>
+        )}
 
         {flash && (
           <p className="mt-2 rounded border border-emerald-700/60 bg-emerald-950/50 px-2 py-1.5 text-[11px] text-emerald-200">
@@ -459,7 +517,8 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
         <p className="mt-2 text-[11px] text-slate-400">
           H/M/U/P = hit / miss / unknown / pending. Signal Touch starts at the signal tick; quoted Touch starts after quote receipt.
           Win% = hits / (hits + misses); unknown and pending results are excluded. P&amp;L uses settled quoted results only.
-          * Fewer than 20 settled results; all comparisons remain exploratory.
+          Quote cov% = quoted / accepted. Median TTT = median seconds to first touch among signal-reference hits.
+          * Fewer than 20 settled results; all comparisons remain exploratory — not a proven ranking.
         </p>
         {observationCount > 0 && (
           <div role={quality.unknown > 0 || quality.quoteUnknown > 0 ? 'alert' : 'status'}
@@ -475,7 +534,7 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
           </div>
         )}
         <div className="mt-2 overflow-auto">
-          <table className="w-full min-w-[1400px] text-left text-[11px]">
+          <table className="w-full min-w-[1600px] text-left text-[11px]">
             <thead className="text-slate-500">
               <tr>
                 <th className="px-2 py-1">ID</th>
@@ -483,6 +542,9 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
                 <th className="px-2 py-1">n</th>
                 <th className="px-2 py-1">Signal Touch win%</th>
                 <th className="px-2 py-1">Signal H/M/U/P</th>
+                <th className="px-2 py-1">Quote cov%</th>
+                <th className="px-2 py-1">Sig/day</th>
+                <th className="px-2 py-1">Median TTT</th>
                 <th className="px-2 py-1">Quotes/n</th>
                 <th className="px-2 py-1">Quoted Touch win%</th>
                 <th className="px-2 py-1">Quoted H/M/U/P</th>
@@ -495,6 +557,9 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
             <tbody>
               {strategies.map((s: StrategySummary) => {
                 const h7 = s.horizons.find((h) => h.minutes === 7)
+                const label = s.id === 'B1' || s.id === 'C5' || s.id === 'C1'
+                  ? FOCUSED_CONFIRMATION_LABELS[s.id]
+                  : null
                 return (
                   <Fragment key={s.id}>
                     <tr
@@ -502,10 +567,16 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
                       onClick={() => setExpanded(expanded === s.id ? null : s.id)}
                     >
                       <td className="px-2 py-1 font-mono text-slate-200">{s.id}</td>
-                      <td className="px-2 py-1">{s.name}</td>
+                      <td className="px-2 py-1">
+                        {s.name}
+                        {label && <div className="text-[10px] text-slate-500">{label}</div>}
+                      </td>
                       <td className="px-2 py-1 tabular-nums">{s.candidatesAccepted}</td>
                       <td className="px-2 py-1 tabular-nums">{touchRate(s.touchHits, s.touchMisses)}</td>
                       <td className="px-2 py-1 tabular-nums">{s.touchHits}/{s.touchMisses}/{s.touchUnknown}/{s.touchPending ?? 0}</td>
+                      <td className="px-2 py-1 tabular-nums">{pct(s.quoteCoverageRate)}</td>
+                      <td className="px-2 py-1 tabular-nums">{s.signalsPerDay == null ? '—' : s.signalsPerDay.toFixed(2)}</td>
+                      <td className="px-2 py-1 tabular-nums">{s.medianTimeToTouchSec == null ? '—' : `${Math.round(s.medianTimeToTouchSec)}s`}</td>
                       <td className="px-2 py-1">{s.quotesAvailable}/{s.candidatesAccepted}</td>
                       <td className="px-2 py-1 tabular-nums">{legacy ? '—' : touchRate(s.quotedHits, s.quotedMisses)}</td>
                       <td className="px-2 py-1">{legacy ? "—" : `${s.quotedHits}/${s.quotedMisses}/${s.quotedUnknown}/${s.quotedPending}`}</td>
@@ -516,8 +587,9 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
                     </tr>
                     {expanded === s.id && (
                       <tr className="border-t border-slate-900/50 bg-[#121820]">
-                        <td colSpan={12} className="px-3 py-2 text-[11px] text-slate-400 whitespace-pre-wrap">{s.rules}{'\n\n'}
+                        <td colSpan={15} className="px-3 py-2 text-[11px] text-slate-400 whitespace-pre-wrap">{s.rules}{'\n\n'}
                           Quoted results include only simulations entered after quote receipt. Unquoted observations do not contribute to P&amp;L.
+                          Signal-reference Touch and quoted-paper Touch are counted separately; endpoint unknowns never mix into Touch H/M/U/P.
                           <details className="mt-2">
                             <summary className="cursor-pointer">Optional endpoint diagnostics (not Touch wins)</summary>
                             <p className="mt-1">Direction at minute 7: {h7?.continuation ?? 0} continuation / {h7?.reversal ?? 0} reversal / {h7?.unchanged ?? 0} unchanged / {h7?.unknown ?? 0} unknown / {h7?.pending ?? 0} pending.</p>

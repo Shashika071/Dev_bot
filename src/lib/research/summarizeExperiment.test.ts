@@ -63,6 +63,8 @@ describe('research outcome coverage', () => {
     const state = { ...createInitialState('discovery', ['S6']), observations: [row(1, 'unknown')] }
     const csv = exportObservationsCsv(state)
     expect(csv).toContain('h7Reason,h7TargetEpoch,h7ObservedEpoch')
+    expect(csv).toContain('flagUt,flagSupertrend,flagSma,flagAo,flagRsi')
+    expect(csv).toContain('frozenBarrierAbs')
     expect(csv).toContain('"Test, with ""quoted"" text"')
     expect(csv).toContain('"Incomplete tick coverage during contract window"')
     const summary = summarizeExperiment(state)

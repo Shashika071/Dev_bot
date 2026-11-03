@@ -11,6 +11,7 @@ import {
 } from '../lib/research/experimentEngine'
 import { summarizeExperiment, exportObservationsCsv, exportReportMarkdown } from '../lib/research/summarizeExperiment'
 import { STRATEGY_REGISTRY } from '../lib/research/strategies/registry'
+import { FOCUSED_CONFIRMATION_IDS } from '../lib/research/focusedConfirmation'
 import { loadBrowserResearch, saveBrowserResearch, archiveBrowserResearch } from '../lib/research/browserResearchStore'
 import type { StrategyId } from '../lib/research/strategies/types'
 
@@ -101,6 +102,11 @@ export function useBrowserResearch(market: MarketState | null, enabled = true) {
     return next
   }
 
+  /** B1 baseline / C5 main candidate / C1 AO-required — separate paper experiment. */
+  function startFocusedConfirmation() {
+    return startConfirmation([...FOCUSED_CONFIRMATION_IDS])
+  }
+
   /** Wipe observations/rejected/cooldowns and start a fresh discovery from zero. */
   function resetAll() {
     archiveBrowserResearch(stateRef.current)
@@ -151,6 +157,7 @@ export function useBrowserResearch(market: MarketState | null, enabled = true) {
     resume,
     stopEntries,
     startConfirmation,
+    startFocusedConfirmation,
     resetAll,
     downloadCsv,
     downloadReport,

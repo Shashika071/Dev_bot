@@ -48,6 +48,8 @@ const { proposeOneTouchOnly } =
   await vite.ssrLoadModule('/src/lib/research/proposeOnly.ts')
 const { STRATEGY_REGISTRY } =
   await vite.ssrLoadModule('/src/lib/research/strategies/registry.ts')
+const { FOCUSED_CONFIRMATION_IDS } =
+  await vite.ssrLoadModule('/src/lib/research/focusedConfirmation.ts')
 
 const { applyResearchEvent, emptyResearchSession } = await vite.ssrLoadModule('/src/lib/research/researchSession.ts')
 const { ResearchQuoteScheduler } = await vite.ssrLoadModule('/src/lib/research/quoteScheduler.ts')
@@ -273,6 +275,18 @@ const api = createHttpServer(async (req, res) => {
       if (!ids.length || ids.some((id) => !STRATEGY_REGISTRY.some((s) => s.id === id)) || new Set(ids).size !== ids.length) return json(res, 400, { error: 'Invalid strategy IDs' })
       startRun('confirmation', ids)
       return json(res, 200, { ok: true, experimentId, mode: 'confirmation', enabledStrategyIds: ids })
+    }
+    if (req.method === 'POST' && url.pathname === '/control/start-focused-confirmation') {
+      // Paper-only B1 / C5 / C1 comparison. Does not enable live trading.
+      const ids = [...FOCUSED_CONFIRMATION_IDS]
+      startRun('confirmation', ids)
+      return json(res, 200, {
+        ok: true,
+        experimentId,
+        mode: 'confirmation',
+        focused: true,
+        enabledStrategyIds: ids,
+      })
     }
     if (req.method === 'POST' && url.pathname === '/control/reset') {
       // Clear all live records and begin a fresh discovery from zero.

@@ -2,6 +2,7 @@ import { wilsonInterval } from './statistics'
 import { STRATEGY_REGISTRY } from './strategies/registry'
 import type { ExperimentState } from './experimentEngine'
 import { RESEARCH_CODE_VERSION } from './experimentEngine'
+import { isFocusedConfirmation } from './focusedConfirmation'
 import type { HorizonMin, ResearchObservation, StrategyId } from './strategies/types'
 import { HORIZON_MINUTES } from './horizons'
 
@@ -37,6 +38,10 @@ export interface StrategySummary {
   touchUnknown: number
   touchPending: number
   touchWinRate: number | null
+  quoteCoverageRate: number | null
+  signalsPerDay: number | null
+  /** Median seconds from signal epoch to first touch among reference hits. */
+  medianTimeToTouchSec: number | null
   quotesAvailable: number
   quotedSettled: number
   quotedHits: number
@@ -57,6 +62,15 @@ export interface StrategySummary {
 function mean(xs: number[]): number | null {
   if (!xs.length) return null
   return xs.reduce((a, b) => a + b, 0) / xs.length
+}
+
+function median(xs: number[]): number | null {
+  if (!xs.length) return null
+  const sorted = [...xs].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1]! + sorted[mid]!) / 2
+    : sorted[mid]!
 }
 
 function horizonSummary(rows: ResearchObservation[], minutes: HorizonMin): StrategyHorizonSummary {
@@ -112,6 +126,7 @@ export function summarizeExperiment(state: ExperimentState): {
   lastTickEpoch: number | null
   observationCount: number
   rejectedCount: number
+  focusedConfirmation: boolean
   strategies: StrategySummary[]
   notes: string[]
 } {
@@ -122,6 +137,14 @@ export function summarizeExperiment(state: ExperimentState): {
     byId.set(o.strategyId, list)
   }
 
+  const focused = isFocusedConfirmation(state.enabledStrategyIds)
+  const runSpanSec = (() => {
+    if (state.startedAt == null) return null
+    const end = state.finishedAt ?? state.lastTickEpoch ?? Math.floor(Date.now() / 1000)
+    const span = end - state.startedAt
+    return span > 0 ? span : null
+  })()
+
   const strategies: StrategySummary[] = STRATEGY_REGISTRY
     .filter((d) => state.enabledStrategyIds.includes(d.id))
     .map((d) => {
@@ -130,6 +153,10 @@ export function summarizeExperiment(state: ExperimentState): {
       const touchMisses = rows.filter((r) => r.touch?.status === 'miss').length
       const touchUnknown = rows.filter((r) => r.touch?.status === 'unknown').length
       const quoted = rows.filter((r) => r.touch?.quoteAvailable)
+      const hitTimes = rows
+        .filter((r) => r.touch?.status === 'hit' && r.touch.firstTouchEpoch != null)
+        .map((r) => r.touch!.firstTouchEpoch! - r.signalEpoch)
+        .filter((sec) => Number.isFinite(sec) && sec >= 0)
       const settled = state.codeVersion === RESEARCH_CODE_VERSION ? quoted.filter((r) =>
         (r.touch?.quotedPath?.status === 'hit' || r.touch?.quotedPath?.status === 'miss')
         && Number.isFinite(r.touch.paperPnl) && r.touch.proposalAsk != null && r.touch.proposalAsk > 0) : []
@@ -158,6 +185,11 @@ export function summarizeExperiment(state: ExperimentState): {
         touchUnknown,
         touchPending: rows.filter((r) => r.touch?.status === 'pending').length,
         touchWinRate: touchHits + touchMisses > 0 ? touchHits / (touchHits + touchMisses) : null,
+        quoteCoverageRate: rows.length ? quoted.length / rows.length : null,
+        signalsPerDay: runSpanSec != null && rows.length
+          ? rows.length / (runSpanSec / 86400)
+          : null,
+        medianTimeToTouchSec: median(hitTimes),
         quotesAvailable: quoted.length,
         quotedSettled: settled.length,
         quotedHits: settled.filter((r) => r.touch?.quotedPath?.status === 'hit').length,
@@ -190,10 +222,16 @@ export function summarizeExperiment(state: ExperimentState): {
     lastTickEpoch: state.lastTickEpoch,
     observationCount: state.observations.length,
     rejectedCount: state.rejected.length,
+    focusedConfirmation: focused,
     strategies,
     notes: [
       ...(state.codeVersion !== RESEARCH_CODE_VERSION ? ['PRE-FIX RUN: preserved read-only. Paired entries, quote coverage and expiry were affected by known bugs; legacy P&L is not comparable. Start a new v2 run.'] : []),
+      ...(focused ? [
+        'Focused confirmation: B1 = baseline (≥4/5 closed), C5 = main candidate (AO optional), C1 = full confirmation (AO required).',
+        'Compare C5 to B1 for lift; compare C1 to C5 to see whether requiring AO improves the candidate.',
+      ] : []),
       'Rankings are descriptive/exploratory; observations can overlap and correlate.',
+      'Do not label a small sample or a 100% observed Touch win rate as a proven best strategy.',
       '80% baseline score means 4/5 conditions — not an 80% win probability.',
       'B0 uses forming-candle timing; compare completed strategies primarily to B1.',
       `Primary result: Touch within ${state.contract.duration} minutes of entry. A hit wins immediately when observed, including at expiry. It remains a win if price reverses or the feed disconnects later.`,
@@ -213,9 +251,13 @@ export function summarizeExperiment(state: ExperimentState): {
 }
 
 export function exportObservationsCsv(state: ExperimentState): string {
+  const c = state.contract
   const header = [
     'id', 'strategyId', 'side', 'candleTime', 'signalEpoch', 'entryPrice', 'forming', 'reason',
-    'atr14', 'h1', 'h3', 'h5', 'h7', 'referenceTouchStatus', 'quotePnl', 'quoteAvailable',
+    'flagUt', 'flagSupertrend', 'flagSma', 'flagAo', 'flagRsi', 'passed', 'total',
+    'close', 'sma20', 'smaRising', 'smaFalling', 'ao', 'aoPrev', 'rsi', 'utBuy', 'utSell', 'stDir',
+    'frozenBarrierAbs', 'frozenDurationMin', 'frozenStake', 'frozenCurrency', 'mode',
+    'atr14', 'h1', 'h3', 'h5', 'h7', 'referenceTouchStatus', 'referenceFirstTouchEpoch', 'quotePnl', 'quoteAvailable',
     'quoteStatus', 'quoteReason', 'quoteRequestEpoch', 'quoteResponseEpoch', 'quoteEntryEpoch',
     'quoteEntryPrice', 'quoteBarrier', 'quoteTouchStatus', 'quoteFirstTouchEpoch', 'ask', 'payout', 'codeVersion',
     'h1Reason', 'h3Reason', 'h5Reason', 'h7Reason', 'h7TargetEpoch', 'h7ObservedEpoch',
@@ -224,18 +266,24 @@ export function exportObservationsCsv(state: ExperimentState): string {
   const lines = [header.join(',')]
   for (const o of state.observations) {
     const hs = Object.fromEntries(o.horizons.map((h) => [h.minutes, h.status]))
+    const m = o.metrics ?? {}
     lines.push([
       o.id, o.strategyId, o.side, o.candleTime, o.signalEpoch, o.entryReferencePrice, o.forming,
       o.reason,
+      o.flags?.ut ?? '', o.flags?.supertrend ?? '', o.flags?.sma ?? '', o.flags?.ao ?? '', o.flags?.rsi ?? '',
+      o.passed ?? '', o.total ?? '',
+      m.close ?? '', m.sma20 ?? '', m.smaRising ?? '', m.smaFalling ?? '', m.ao ?? '', m.aoPrev ?? '',
+      m.rsi ?? '', m.utBuy ?? '', m.utSell ?? '', m.stDir ?? '',
+      c.barrierAbs, c.duration, c.paperStake, c.currency, state.mode,
       o.atr.atr14 ?? '',
       hs[1] ?? '', hs[3] ?? '', hs[5] ?? '', hs[7] ?? '',
-      o.touch?.status ?? '', o.touch?.paperPnl ?? '', o.touch?.quoteAvailable ?? '',
+      o.touch?.status ?? '', o.touch?.firstTouchEpoch ?? '', o.touch?.paperPnl ?? '', o.touch?.quoteAvailable ?? '',
       o.touch?.quoteStatus ?? '', o.touch?.quoteReason ?? '', o.touch?.quoteRequestEpoch ?? '',
       o.touch?.quoteResponseEpoch ?? '', o.touch?.quotedPath?.paperEntryEpoch ?? '',
       o.touch?.quotedPath?.paperEntryPrice ?? '', o.touch?.quotedPath?.absoluteBarrier ?? '',
       o.touch?.quotedPath?.status ?? '', o.touch?.quotedPath?.firstTouchEpoch ?? '',
       o.touch?.proposalAsk ?? '', o.touch?.proposalPayout ?? '', state.codeVersion,
-      ...([1, 3, 5, 7] as const).map((m) => o.horizons.find((h) => h.minutes === m)?.reason ?? ''),
+      ...([1, 3, 5, 7] as const).map((mins) => o.horizons.find((h) => h.minutes === mins)?.reason ?? ''),
       o.horizons.find((h) => h.minutes === 7)?.targetEpoch ?? '',
       o.horizons.find((h) => h.minutes === 7)?.observedEpoch ?? '',
       o.touch?.reason ?? '', o.touch?.quotedPath?.reason ?? '', o.touch?.quotedPath?.coverageLost ?? '',
@@ -257,15 +305,22 @@ export function exportReportMarkdown(summary: ReturnType<typeof summarizeExperim
     '',
     `Code version: ${summary.codeVersion}${summary.legacy ? ' (pre-fix, read-only)' : ''}`,
     '',
-    '| ID | Name | n | Signal Touch win% | Signal H/M/U/P | Quotes/n | Quoted Touch win% | Quoted H/M/U/P | Settled cost | Settled P&L | Settled return | Matured quoted P&L range |',
-    '|----|------|---|-------------------|----------------|----------|-------------------|----------------|--------------|-------------|----------------|--------------------------|',
+    summary.focusedConfirmation
+      ? 'Focused paper comparison: B1 baseline · C5 main candidate (AO optional) · C1 full confirmation (AO required).'
+      : '',
+    '',
+    '| ID | Name | n | Signal Touch win% | Signal H/M/U/P | Quote cov% | Sig/day | Median TTT s | Quotes/n | Quoted Touch win% | Quoted H/M/U/P | Settled cost | Settled P&L | Settled return | Matured quoted P&L range |',
+    '|----|------|---|-------------------|----------------|------------|---------|--------------|----------|-------------------|----------------|--------------|-------------|----------------|--------------------------|',
   ]
   for (const s of summary.strategies) {
     const touchRate = s.touchWinRate == null ? '—' : `${(100 * s.touchWinRate).toFixed(1)}%`
     const quotedRate = s.quotedWinRate == null ? '—' : `${(100 * s.quotedWinRate).toFixed(1)}%`
     const pnl = s.pnlUnavailable ? 'UNAVAILABLE' : (s.paperPnl?.toFixed(4) ?? '—')
+    const cov = s.quoteCoverageRate == null ? '—' : `${(100 * s.quoteCoverageRate).toFixed(0)}%`
+    const spd = s.signalsPerDay == null ? '—' : s.signalsPerDay.toFixed(2)
+    const ttt = s.medianTimeToTouchSec == null ? '—' : s.medianTimeToTouchSec.toFixed(0)
     lines.push(
-      `| ${s.id} | ${s.name} | ${s.candidatesAccepted} | ${touchRate} | ${s.touchHits}/${s.touchMisses}/${s.touchUnknown}/${s.touchPending} | ${s.quotesAvailable}/${s.candidatesAccepted} | ${quotedRate} | ${s.quotedHits}/${s.quotedMisses}/${s.quotedUnknown}/${s.quotedPending} | ${s.paperCost?.toFixed(4) ?? '—'} | ${pnl} | ${s.paperReturn == null ? '—' : (s.paperReturn * 100).toFixed(2) + '%'} | ${s.paperPnlLower?.toFixed(4) ?? '—'} to ${s.paperPnlUpper?.toFixed(4) ?? '—'} |`,
+      `| ${s.id} | ${s.name} | ${s.candidatesAccepted} | ${touchRate} | ${s.touchHits}/${s.touchMisses}/${s.touchUnknown}/${s.touchPending} | ${cov} | ${spd} | ${ttt} | ${s.quotesAvailable}/${s.candidatesAccepted} | ${quotedRate} | ${s.quotedHits}/${s.quotedMisses}/${s.quotedUnknown}/${s.quotedPending} | ${s.paperCost?.toFixed(4) ?? '—'} | ${pnl} | ${s.paperReturn == null ? '—' : (s.paperReturn * 100).toFixed(2) + '%'} | ${s.paperPnlLower?.toFixed(4) ?? '—'} to ${s.paperPnlUpper?.toFixed(4) ?? '—'} |`,
     )
   }
   lines.push('', '## Optional endpoint diagnostics', '',
