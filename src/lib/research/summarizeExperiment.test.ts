@@ -80,6 +80,78 @@ describe('research outcome coverage', () => {
     expect(legacy.strategies[0]?.paperPnl).toBeNull()
   })
 
+  it('keeps every CSV row aligned and maps T1 z into the t1z column', () => {
+    function colCount(line: string): number {
+      let n = 0
+      let inQ = false
+      for (let i = 0; i <= line.length; i++) {
+        const ch = line[i]
+        if (ch === '"') inQ = !inQ
+        if ((ch === ',' && !inQ) || i === line.length) n += 1
+      }
+      return n
+    }
+    const state = createInitialState('confirmation', ['T1', 'H1'])
+    state.observations = [{
+      ...row(1, 'hit'),
+      id: 'T1:1:RISE',
+      strategyId: 'T1',
+      reason: 'Return-shock reversal',
+      metrics: { z: -3.25 },
+    }]
+    state.rejected = [{
+      strategyId: 'H1',
+      candleTime: 960,
+      signalEpoch: 1000,
+      reason: 'H1 cooldown active',
+      side: 'RISE',
+      flags: { ut: true, supertrend: true, sma: true, ao: false, rsi: true },
+      metrics: { z: -3.25, t1z: -3.25, c5Side: 'RISE', t1Side: 'RISE', agreementKind: 'agree' },
+    }]
+    state.h1Skips = [{
+      id: 'H1:960:oppose',
+      candleTime: 960,
+      signalEpoch: 1000,
+      kind: 'oppose',
+      reason: 'H1 skip: C5 RISE vs T1 FALL',
+      c5Side: 'RISE',
+      t1Side: 'FALL',
+      flags: { ut: true, supertrend: true, sma: true, ao: false, rsi: true },
+      metrics: { z: 2.4, close: 100, agreementKind: 'oppose' },
+    }]
+    const lines = exportObservationsCsv(state).split('\n')
+    const width = colCount(lines[0]!)
+    expect(width).toBeGreaterThan(60)
+    for (const line of lines) expect(colCount(line)).toBe(width)
+    const t1 = lines.find((l) => l.includes('T1:1:RISE'))!
+    const headers = lines[0]!.split(',')
+    const t1zIdx = headers.indexOf('t1z')
+    const cells: string[] = []
+    let cur = ''
+    let inQ = false
+    for (let i = 0; i <= t1.length; i++) {
+      const ch = t1[i]
+      if (ch === '"') { inQ = !inQ; continue }
+      if ((ch === ',' && !inQ) || i === t1.length) { cells.push(cur); cur = ''; continue }
+      cur += ch ?? ''
+    }
+    expect(cells[t1zIdx]).toBe('-3.25')
+    const codeIdx = headers.indexOf('codeVersion')
+    const rejected = lines.find((l) => l.includes('H1 cooldown active'))!
+    const rCells: string[] = []
+    cur = ''
+    inQ = false
+    for (let i = 0; i <= rejected.length; i++) {
+      const ch = rejected[i]
+      if (ch === '"') { inQ = !inQ; continue }
+      if ((ch === ',' && !inQ) || i === rejected.length) { rCells.push(cur); cur = ''; continue }
+      cur += ch ?? ''
+    }
+    expect(rCells[codeIdx]).toBe(state.codeVersion)
+    expect(rCells[headers.indexOf('ask')]).toBe('')
+    expect(lines.some((l) => l.includes('h1_skip'))).toBe(true)
+  })
+
   it('reports a Touch win while every direction diagnostic is still pending', () => {
     const obs = { ...row(1, 'hit'), horizons: makeHorizons(1000), pendingHorizons: true }
     const s = summarizeExperiment({ ...createInitialState('discovery', ['S6']), observations: [obs] }).strategies[0]!

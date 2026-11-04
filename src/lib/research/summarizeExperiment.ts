@@ -265,26 +265,47 @@ export function summarizeExperiment(state: ExperimentState): {
   }
 }
 
+const CSV_HEADER = [
+  'rowType', 'id', 'strategyId', 'side', 'candleTime', 'signalEpoch', 'entryPrice', 'forming', 'reason', 'rejectionReason',
+  'flagUt', 'flagSupertrend', 'flagSma', 'flagAo', 'flagRsi', 'passed', 'total',
+  'close', 'sma20', 'smaRising', 'smaFalling', 'ao', 'aoPrev', 'rsi', 'utBuy', 'utSell', 'stDir',
+  'frozenBarrierAbs', 'frozenDurationMin', 'frozenStake', 'frozenCurrency',
+  'frozenEntryCooldownSec', 'frozenPostWinCooldownSec', 'mode',
+  'c5Side', 't1Side', 't1z', 'agreement', 'agreementKind',
+  'atr14', 'h1', 'h3', 'h5', 'h7', 'referenceTouchStatus', 'referenceFirstTouchEpoch', 'quotePnl', 'quoteAvailable',
+  'quoteStatus', 'quoteReason', 'quoteRequestEpoch', 'quoteResponseEpoch', 'quoteEntryEpoch',
+  'quoteEntryPrice', 'quoteBarrier', 'quoteTouchStatus', 'quoteFirstTouchEpoch', 'ask', 'payout', 'codeVersion',
+  'h1Reason', 'h3Reason', 'h5Reason', 'h7Reason', 'h7TargetEpoch', 'h7ObservedEpoch',
+  'referenceTouchReason', 'quoteTouchReason', 'quoteCoverageLost',
+] as const
+
+function csvCell(v: unknown): string {
+  return `"${String(v ?? '').replaceAll('"', '""')}"`
+}
+
+/** Always emit exactly header.length columns so rejected/skip rows cannot shift fields. */
+function csvRow(values: unknown[]): string {
+  const width = CSV_HEADER.length
+  const row = values.slice(0, width)
+  while (row.length < width) row.push('')
+  return row.map(csvCell).join(',')
+}
+
+function exportedT1z(metrics: Record<string, number | boolean | string | null> | undefined): unknown {
+  if (!metrics) return ''
+  // H1 stores t1z; T1 stores z — export both into the t1z column.
+  if (metrics.t1z != null && metrics.t1z !== '') return metrics.t1z
+  if (metrics.z != null && metrics.z !== '') return metrics.z
+  return ''
+}
+
 export function exportObservationsCsv(state: ExperimentState): string {
   const c = state.contract
-  const header = [
-    'rowType', 'id', 'strategyId', 'side', 'candleTime', 'signalEpoch', 'entryPrice', 'forming', 'reason', 'rejectionReason',
-    'flagUt', 'flagSupertrend', 'flagSma', 'flagAo', 'flagRsi', 'passed', 'total',
-    'close', 'sma20', 'smaRising', 'smaFalling', 'ao', 'aoPrev', 'rsi', 'utBuy', 'utSell', 'stDir',
-    'frozenBarrierAbs', 'frozenDurationMin', 'frozenStake', 'frozenCurrency',
-    'frozenEntryCooldownSec', 'frozenPostWinCooldownSec', 'mode',
-    'c5Side', 't1Side', 't1z', 'agreement', 'agreementKind',
-    'atr14', 'h1', 'h3', 'h5', 'h7', 'referenceTouchStatus', 'referenceFirstTouchEpoch', 'quotePnl', 'quoteAvailable',
-    'quoteStatus', 'quoteReason', 'quoteRequestEpoch', 'quoteResponseEpoch', 'quoteEntryEpoch',
-    'quoteEntryPrice', 'quoteBarrier', 'quoteTouchStatus', 'quoteFirstTouchEpoch', 'ask', 'payout', 'codeVersion',
-    'h1Reason', 'h3Reason', 'h5Reason', 'h7Reason', 'h7TargetEpoch', 'h7ObservedEpoch',
-    'referenceTouchReason', 'quoteTouchReason', 'quoteCoverageLost',
-  ]
-  const lines = [header.join(',')]
+  const lines = [CSV_HEADER.join(',')]
   for (const o of state.observations) {
     const hs = Object.fromEntries(o.horizons.map((h) => [h.minutes, h.status]))
     const m = o.metrics ?? {}
-    lines.push([
+    lines.push(csvRow([
       'observation', o.id, o.strategyId, o.side, o.candleTime, o.signalEpoch, o.entryReferencePrice, o.forming,
       o.reason, '',
       o.flags?.ut ?? '', o.flags?.supertrend ?? '', o.flags?.sma ?? '', o.flags?.ao ?? '', o.flags?.rsi ?? '',
@@ -293,7 +314,7 @@ export function exportObservationsCsv(state: ExperimentState): string {
       m.rsi ?? '', m.utBuy ?? '', m.utSell ?? '', m.stDir ?? '',
       c.barrierAbs, c.duration, c.paperStake, c.currency,
       c.entryCooldownSec ?? '', c.postWinCooldownSec ?? '', state.mode,
-      m.c5Side ?? '', m.t1Side ?? '', m.t1z ?? '', m.agreement ?? '', m.agreementKind ?? '',
+      m.c5Side ?? '', m.t1Side ?? '', exportedT1z(m), m.agreement ?? '', m.agreementKind ?? '',
       o.atr.atr14 ?? '',
       hs[1] ?? '', hs[3] ?? '', hs[5] ?? '', hs[7] ?? '',
       o.touch?.status ?? '', o.touch?.firstTouchEpoch ?? '', o.touch?.paperPnl ?? '', o.touch?.quoteAvailable ?? '',
@@ -306,21 +327,42 @@ export function exportObservationsCsv(state: ExperimentState): string {
       o.horizons.find((h) => h.minutes === 7)?.targetEpoch ?? '',
       o.horizons.find((h) => h.minutes === 7)?.observedEpoch ?? '',
       o.touch?.reason ?? '', o.touch?.quotedPath?.reason ?? '', o.touch?.quotedPath?.coverageLost ?? '',
-    ].map((v) => `"${String(v).replaceAll('"', '""')}"`).join(','))
+    ]))
   }
   for (const r of state.rejected) {
-    lines.push([
+    const m = r.metrics ?? {}
+    lines.push(csvRow([
       'rejected', `${r.strategyId}:${r.candleTime}:rejected`, r.strategyId, r.side ?? '', r.candleTime,
-      r.signalEpoch, '', '', '', r.reason,
-      '', '', '', '', '', '', '',
-      '', '', '', '', '', '', '', '', '', '',
+      r.signalEpoch, '', false, '', r.reason,
+      r.flags?.ut ?? '', r.flags?.supertrend ?? '', r.flags?.sma ?? '', r.flags?.ao ?? '', r.flags?.rsi ?? '',
+      r.passed ?? '', r.total ?? '',
+      m.close ?? '', m.sma20 ?? '', m.smaRising ?? '', m.smaFalling ?? '', m.ao ?? '', m.aoPrev ?? '',
+      m.rsi ?? '', m.utBuy ?? '', m.utSell ?? '', m.stDir ?? '',
       c.barrierAbs, c.duration, c.paperStake, c.currency,
       c.entryCooldownSec ?? '', c.postWinCooldownSec ?? '', state.mode,
-      '', '', '', '', '',
-      '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '',
-      state.codeVersion,
+      m.c5Side ?? '', m.t1Side ?? '', exportedT1z(m), m.agreement ?? '', m.agreementKind ?? '',
       '', '', '', '', '', '', '', '', '',
-    ].map((v) => `"${String(v).replaceAll('"', '""')}"`).join(','))
+      '', '', '', '', '', '', '', '', '',
+      '', '', state.codeVersion,
+      '', '', '', '', '', '', '', '', '',
+    ]))
+  }
+  for (const s of state.h1Skips ?? []) {
+    const m = s.metrics ?? {}
+    lines.push(csvRow([
+      'h1_skip', s.id, 'H1', '', s.candleTime, s.signalEpoch, '', false, s.reason, s.kind,
+      s.flags?.ut ?? '', s.flags?.supertrend ?? '', s.flags?.sma ?? '', s.flags?.ao ?? '', s.flags?.rsi ?? '',
+      s.passed ?? '', s.total ?? '',
+      m.close ?? '', m.sma20 ?? '', m.smaRising ?? '', m.smaFalling ?? '', m.ao ?? '', m.aoPrev ?? '',
+      m.rsi ?? '', m.utBuy ?? '', m.utSell ?? '', m.stDir ?? '',
+      c.barrierAbs, c.duration, c.paperStake, c.currency,
+      c.entryCooldownSec ?? '', c.postWinCooldownSec ?? '', state.mode,
+      s.c5Side ?? '', s.t1Side ?? '', exportedT1z(m), false, s.kind,
+      '', '', '', '', '', '', '', '', '',
+      '', '', '', '', '', '', '', '', '',
+      '', '', state.codeVersion,
+      '', '', '', '', '', '', '', '', '',
+    ]))
   }
   return lines.join('\n')
 }

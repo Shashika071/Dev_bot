@@ -171,4 +171,8 @@ export interface RejectedCandidate {
   signalEpoch: number
   reason: string
   side?: ResearchSide
+  flags?: ConfirmationFlags
+  passed?: number
+  total?: number
+  metrics?: Record<string, number | boolean | string | null>
 }

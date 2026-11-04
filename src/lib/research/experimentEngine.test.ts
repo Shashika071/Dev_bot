@@ -6,6 +6,7 @@ import {
   onTick,
   listEnabledCandidates,
   DISCOVERY_HOURS,
+  interruptResearchFeed,
 } from './experimentEngine'
 import { makeHorizons, POST_WIN_COOLDOWN_SEC, STRATEGY_COOLDOWN_SEC } from './horizons'
 import { maybeStartTouchPaper } from './touchPaper'
@@ -219,5 +220,18 @@ describe('experiment engine', () => {
     const h7 = summary.strategies[0]!.horizons.find((h) => h.minutes === 7)!
     expect(h7.contRate).toBe(1)
     expect(h7.randomContRate).toBe(0.5)
+  })
+
+  it('does not invent h1Diagnostics on older states during tick/interrupt', () => {
+    const legacy = createInitialState('discovery', ['S6'])
+    delete legacy.h1Diagnostics
+    delete legacy.h1Skips
+    const tick = { epoch: 1_700_000_060, quote: 100, symbol: 'R_100' }
+    const next = onTick(legacy, tick, closedFixtures(80), tick.epoch, true)
+    expect(next.h1Diagnostics).toBeUndefined()
+    expect(next.h1Skips).toBeUndefined()
+    const interrupted = interruptResearchFeed(next)
+    expect(interrupted.h1Diagnostics).toBeUndefined()
+    expect(JSON.stringify(interrupted).includes('h1Diagnostics')).toBe(false)
   })
 })

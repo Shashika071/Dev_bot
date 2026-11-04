@@ -27,8 +27,16 @@ import {
   normalizeContractSettings,
   type FrozenContractSettings,
 } from './contractSettings'
-import { classifyC5T1Agreement } from './strategies/hybridStrategies'
-import { emptyH1Diagnostics, type H1Diagnostics } from './hybridComparison'
+import {
+  classifyC5T1Agreement,
+  h1SkipReason,
+  snapshotMetricsFromAgreement,
+} from './strategies/hybridStrategies'
+import {
+  emptyH1Diagnostics,
+  type H1Diagnostics,
+  type H1SkipRecord,
+} from './hybridComparison'
 
 export { DEFAULT_FROZEN_CONTRACT, type FrozenContractSettings }
 export const RESEARCH_CODE_VERSION = 'v100-research-engine-2'
@@ -60,8 +68,13 @@ export interface ExperimentState {
   b0Fired: string[]
   observations: ResearchObservation[]
   rejected: RejectedCandidate[]
-  /** Pre-cooldown C5/T1 agreement counts for H1 diagnostics (closed candles only). */
-  h1Diagnostics: H1Diagnostics
+  /**
+   * Pre-cooldown C5/T1 agreement counts for H1 diagnostics (closed candles only).
+   * Optional so older saved runs / replay checkpoints without this field stay byte-stable.
+   */
+  h1Diagnostics?: H1Diagnostics
+  /** Detailed H1 skip snapshots (oppose / only-C5 / only-T1). Absent on legacy runs. */
+  h1Skips?: H1SkipRecord[]
   downtimeSec: number
   lastTickEpoch: number | null
   feedHealthy: boolean
@@ -258,9 +271,13 @@ export function onTick(
     b0Fired: [...state.b0Fired],
     observations: state.observations.map((o) => ({ ...o, horizons: o.horizons.map((h) => ({ ...h })) })),
     rejected: [...state.rejected],
-    h1Diagnostics: { ...(state.h1Diagnostics ?? emptyH1Diagnostics()) },
     awaitingCloseEntry: [...state.awaitingCloseEntry],
   }
+  // Preserve absence of optional diagnostic fields for exact replay of older checkpoints.
+  if (state.h1Diagnostics != null) next.h1Diagnostics = { ...state.h1Diagnostics }
+  else delete next.h1Diagnostics
+  if (state.h1Skips != null) next.h1Skips = state.h1Skips.map((s) => ({ ...s, metrics: s.metrics ? { ...s.metrics } : undefined }))
+  else delete next.h1Skips
   // Every member of a pair sees cooldowns from BEFORE this tick's batch.
   const admissionState = { ...next, cooldowns: { ...next.cooldowns } }
 
@@ -380,14 +397,34 @@ export function onTick(
       nowEpoch: tick.epoch,
     }
     // Pre-cooldown C5/T1 agreement diagnostics whenever H1 is in the experiment.
+    let h1Snap: ReturnType<typeof classifyC5T1Agreement> | null = null
     if (next.enabledStrategyIds.includes('H1')) {
-      const snap = classifyC5T1Agreement(ctxBase)
+      if (next.h1Diagnostics == null) next.h1Diagnostics = emptyH1Diagnostics()
+      if (next.h1Skips == null) next.h1Skips = []
+      h1Snap = classifyC5T1Agreement(ctxBase)
       const d = next.h1Diagnostics
-      if (snap.kind === 'agree') d.agree += 1
-      else if (snap.kind === 'oppose') d.oppose += 1
-      else if (snap.kind === 'only_c5') d.onlyC5 += 1
-      else if (snap.kind === 'only_t1') d.onlyT1 += 1
+      if (h1Snap.kind === 'agree') d.agree += 1
+      else if (h1Snap.kind === 'oppose') d.oppose += 1
+      else if (h1Snap.kind === 'only_c5') d.onlyC5 += 1
+      else if (h1Snap.kind === 'only_t1') d.onlyT1 += 1
       else d.neither += 1
+      // Persist individual skip snapshots when at least one parent qualifies (not every quiet bar).
+      if (h1Snap.kind === 'oppose' || h1Snap.kind === 'only_c5' || h1Snap.kind === 'only_t1') {
+        const flags = h1Snap.c5?.flags
+        next.h1Skips.push({
+          id: `H1:${lastClosed.time}:${h1Snap.kind}`,
+          candleTime: lastClosed.time,
+          signalEpoch: tick.epoch,
+          kind: h1Snap.kind,
+          reason: h1SkipReason(h1Snap),
+          c5Side: h1Snap.c5Side,
+          t1Side: h1Snap.t1Side,
+          flags,
+          passed: h1Snap.c5?.passed,
+          total: h1Snap.c5?.total,
+          metrics: snapshotMetricsFromAgreement(h1Snap),
+        })
+      }
     }
     for (const def of STRATEGY_REGISTRY) {
       if (!next.enabledStrategyIds.includes(def.id)) continue
@@ -402,13 +439,20 @@ export function onTick(
       }
       if (onCooldown(admissionState, def.id, tick.epoch)) {
         const reason = def.id === 'H1' ? 'H1 cooldown active' : 'Cooldown active'
-        if (def.id === 'H1') next.h1Diagnostics.h1CooldownBlocked += 1
+        if (def.id === 'H1') {
+          if (next.h1Diagnostics == null) next.h1Diagnostics = emptyH1Diagnostics()
+          next.h1Diagnostics.h1CooldownBlocked += 1
+        }
         next.rejected.push({
           strategyId: def.id,
           candleTime: lastClosed.time,
           signalEpoch: tick.epoch,
           reason,
           side: hit.side,
+          flags: hit.flags,
+          passed: hit.passed,
+          total: hit.total,
+          metrics: hit.metrics ?? (def.id === 'H1' && h1Snap ? snapshotMetricsFromAgreement(h1Snap) : undefined),
         })
         continue
       }

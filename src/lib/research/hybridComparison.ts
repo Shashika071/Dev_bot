@@ -1,4 +1,6 @@
-import type { StrategyId } from './strategies/types'
+import type { ConfirmationFlags } from '../types'
+import type { ResearchSide, StrategyId } from './strategies/types'
+import type { C5T1AgreementKind } from './strategies/hybridStrategies'
 
 /** Paper comparison: C5, T1, and experimental H1 agreement. */
 export const HYBRID_COMPARISON_IDS: StrategyId[] = ['C5', 'T1', 'H1']
@@ -25,6 +27,21 @@ export interface H1Diagnostics {
   neither: number
   /** H1 would have entered but its own cooldown blocked it. */
   h1CooldownBlocked: number
+}
+
+/** Per-candle H1 skip detail (oppose / only-C5 / only-T1) with indicator snapshot. */
+export interface H1SkipRecord {
+  id: string
+  candleTime: number
+  signalEpoch: number
+  kind: Exclude<C5T1AgreementKind, 'agree' | 'neither'>
+  reason: string
+  c5Side: ResearchSide | null
+  t1Side: ResearchSide | null
+  flags?: ConfirmationFlags
+  passed?: number
+  total?: number
+  metrics?: Record<string, number | boolean | string | null>
 }
 
 export function emptyH1Diagnostics(): H1Diagnostics {

@@ -37,24 +37,40 @@ export function classifyC5T1Agreement(ctx: StrategyContext): C5T1AgreementSnapsh
   return { kind: 'neither', c5Side: null, t1Side: null, c5, t1 }
 }
 
+export function snapshotMetricsFromAgreement(snap: C5T1AgreementSnapshot) {
+  const z = snap.t1?.metrics?.z
+  return {
+    ...(snap.c5?.metrics ?? {}),
+    ...(snap.t1?.metrics ?? {}),
+    t1z: typeof z === 'number' ? z : (typeof snap.t1?.metrics?.z === 'number' ? snap.t1.metrics.z : null),
+    z: typeof z === 'number' ? z : null,
+    c5Side: snap.c5Side,
+    t1Side: snap.t1Side,
+    agreement: snap.kind === 'agree',
+    agreementKind: snap.kind,
+  }
+}
+
+export function h1SkipReason(snap: C5T1AgreementSnapshot): string {
+  if (snap.kind === 'oppose') {
+    return `H1 skip: C5 ${snap.c5Side} vs T1 ${snap.t1Side}`
+  }
+  if (snap.kind === 'only_c5') return `H1 skip: only C5 ${snap.c5Side}`
+  if (snap.kind === 'only_t1') return `H1 skip: only T1 ${snap.t1Side}`
+  if (snap.kind === 'neither') return 'H1 skip: neither C5 nor T1'
+  return 'H1 skip'
+}
+
 /** H1 — C5 + T1 same-direction agreement on the same completed M1 candle. */
 export function evalH1(ctx: StrategyContext): StrategyHit | null {
   const snap = classifyC5T1Agreement(ctx)
   if (snap.kind !== 'agree' || !snap.c5 || !snap.t1 || !snap.c5Side) return null
-  const z = snap.t1.metrics?.z ?? null
   return {
     side: snap.c5Side,
     reason: `H1 C5+T1 agreement (${snap.c5Side})`,
     flags: snap.c5.flags,
     passed: snap.c5.passed,
     total: snap.c5.total,
-    metrics: {
-      ...(snap.c5.metrics ?? {}),
-      t1z: typeof z === 'number' ? z : null,
-      c5Side: snap.c5Side,
-      t1Side: snap.t1Side,
-      agreement: true,
-      agreementKind: 'agree',
-    },
+    metrics: snapshotMetricsFromAgreement(snap),
   }
 }
