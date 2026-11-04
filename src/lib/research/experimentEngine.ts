@@ -27,6 +27,8 @@ import {
   normalizeContractSettings,
   type FrozenContractSettings,
 } from './contractSettings'
+import { classifyC5T1Agreement } from './strategies/hybridStrategies'
+import { emptyH1Diagnostics, type H1Diagnostics } from './hybridComparison'
 
 export { DEFAULT_FROZEN_CONTRACT, type FrozenContractSettings }
 export const RESEARCH_CODE_VERSION = 'v100-research-engine-2'
@@ -58,6 +60,8 @@ export interface ExperimentState {
   b0Fired: string[]
   observations: ResearchObservation[]
   rejected: RejectedCandidate[]
+  /** Pre-cooldown C5/T1 agreement counts for H1 diagnostics (closed candles only). */
+  h1Diagnostics: H1Diagnostics
   downtimeSec: number
   lastTickEpoch: number | null
   feedHealthy: boolean
@@ -94,6 +98,7 @@ export function createInitialState(
     b0Fired: [],
     observations: [],
     rejected: [],
+    h1Diagnostics: emptyH1Diagnostics(),
     downtimeSec: 0,
     lastTickEpoch: null,
     feedHealthy: false,
@@ -253,6 +258,7 @@ export function onTick(
     b0Fired: [...state.b0Fired],
     observations: state.observations.map((o) => ({ ...o, horizons: o.horizons.map((h) => ({ ...h })) })),
     rejected: [...state.rejected],
+    h1Diagnostics: { ...(state.h1Diagnostics ?? emptyH1Diagnostics()) },
     awaitingCloseEntry: [...state.awaitingCloseEntry],
   }
   // Every member of a pair sees cooldowns from BEFORE this tick's batch.
@@ -373,9 +379,20 @@ export function onTick(
       feedHealthy: true,
       nowEpoch: tick.epoch,
     }
+    // Pre-cooldown C5/T1 agreement diagnostics whenever H1 is in the experiment.
+    if (next.enabledStrategyIds.includes('H1')) {
+      const snap = classifyC5T1Agreement(ctxBase)
+      const d = next.h1Diagnostics
+      if (snap.kind === 'agree') d.agree += 1
+      else if (snap.kind === 'oppose') d.oppose += 1
+      else if (snap.kind === 'only_c5') d.onlyC5 += 1
+      else if (snap.kind === 'only_t1') d.onlyT1 += 1
+      else d.neither += 1
+    }
     for (const def of STRATEGY_REGISTRY) {
       if (!next.enabledStrategyIds.includes(def.id)) continue
       if (def.usesFormingCandle) continue
+      // H1 evaluates raw C5/T1 conditions (not accepted parent observations).
       const hit = def.evaluate(ctxBase)
       if (!hit) continue
       const key = `${def.id}:${lastClosed.time}:${hit.side}`
@@ -384,11 +401,13 @@ export function onTick(
         continue
       }
       if (onCooldown(admissionState, def.id, tick.epoch)) {
+        const reason = def.id === 'H1' ? 'H1 cooldown active' : 'Cooldown active'
+        if (def.id === 'H1') next.h1Diagnostics.h1CooldownBlocked += 1
         next.rejected.push({
           strategyId: def.id,
           candleTime: lastClosed.time,
           signalEpoch: tick.epoch,
-          reason: 'Cooldown active',
+          reason,
           side: hit.side,
         })
         continue

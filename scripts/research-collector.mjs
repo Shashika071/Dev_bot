@@ -50,6 +50,8 @@ const { STRATEGY_REGISTRY } =
   await vite.ssrLoadModule('/src/lib/research/strategies/registry.ts')
 const { FOCUSED_CONFIRMATION_IDS } =
   await vite.ssrLoadModule('/src/lib/research/focusedConfirmation.ts')
+const { HYBRID_COMPARISON_IDS } =
+  await vite.ssrLoadModule('/src/lib/research/hybridComparison.ts')
 const contractHelpers =
   await vite.ssrLoadModule('/src/lib/research/contractSettings.ts')
 
@@ -315,6 +317,20 @@ const api = createHttpServer(async (req, res) => {
         experimentId,
         mode: 'confirmation',
         focused: true,
+        enabledStrategyIds: ids,
+        contract: state.contract,
+      })
+    }
+    if (req.method === 'POST' && url.pathname === '/control/start-hybrid-comparison') {
+      // Paper-only C5 / T1 / H1 comparison. Does not enable live trading.
+      const body = await readBody(req)
+      const ids = [...HYBRID_COMPARISON_IDS]
+      startRun('confirmation', ids, mergeContractFromBody(body))
+      return json(res, 200, {
+        ok: true,
+        experimentId,
+        mode: 'confirmation',
+        hybrid: true,
         enabledStrategyIds: ids,
         contract: state.contract,
       })

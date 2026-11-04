@@ -10,6 +10,7 @@ import {
   researchExportUrl,
 } from '../lib/research/researchApi'
 import { FOCUSED_CONFIRMATION_LABELS, isFocusedConfirmation } from '../lib/research/focusedConfirmation'
+import { HYBRID_COMPARISON_LABELS, isHybridComparison } from '../lib/research/hybridComparison'
 import {
   loadResearchCooldownPrefs,
   saveResearchCooldownPrefs,
@@ -187,6 +188,11 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
     | undefined
   const focusedRun = !!(summary as { focusedConfirmation?: boolean } | undefined)?.focusedConfirmation
     || isFocusedConfirmation(enabledIds)
+  const hybridRun = !!(summary as { hybridComparison?: boolean } | undefined)?.hybridComparison
+    || isHybridComparison(enabledIds)
+  const h1Diagnostics = (summary as { h1Diagnostics?: {
+    agree: number; oppose: number; onlyC5: number; onlyT1: number; neither: number; h1CooldownBlocked: number
+  } } | undefined)?.h1Diagnostics
   const cooldownForNextRun = usingServer ? draftCooldownPrefs : browser.cooldownPrefs
   const cooldownBody = {
     entryCooldownSec: cooldownForNextRun.entryCooldownSec,
@@ -207,7 +213,8 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
           <h1 className="text-lg font-semibold text-slate-100">Research</h1>
           <p className="mt-1 max-w-2xl text-[12px] text-slate-400">
             Paper-only research. Does not trade and does not use your token.
-            Use discovery for all 22 strategies, or focused confirmation for B1 / C5 / C1.
+            Use discovery for all strategies, focused confirmation for B1 / C5 / C1,
+            or C5 / T1 / H1 for the experimental agreement comparison.
           </p>
         </div>
         <div className="text-right text-[11px]">
@@ -276,7 +283,9 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
             <span className="text-slate-100">
               {focusedRun
                 ? `focused ${enabledIds?.length ?? 3} (B1/C5/C1)`
-                : `${enabledIds?.length ?? registryCount}/${registryCount}`}
+                : hybridRun
+                  ? `hybrid ${enabledIds?.length ?? 3} (C5/T1/H1)`
+                  : `${enabledIds?.length ?? registryCount}/${registryCount}`}
             </span>
           </div>
           <div>Start: {ago((st as { startedAt?: number | null } | undefined)?.startedAt)}</div>
@@ -397,6 +406,21 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
                 type="button"
                 disabled={controlsDisabled}
                 onClick={() => {
+                  if (!confirmWipe('Start C5 / T1 / H1 comparison')) return
+                  void runRemote(
+                    '/control/start-hybrid-comparison',
+                    cooldownBody,
+                    'C5 / T1 / H1 comparison started',
+                  )
+                }}
+                className={`${btn} bg-violet-700 text-white hover:bg-violet-600`}
+              >
+                Start C5 / T1 / H1 comparison
+              </button>
+              <button
+                type="button"
+                disabled={controlsDisabled}
+                onClick={() => {
                   if (!confirmWipe('Start confirmation')) return
                   void runRemote(
                     '/control/start-confirmation',
@@ -473,6 +497,21 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
               <button
                 type="button"
                 onClick={() => {
+                  if (!confirmWipe('Start C5 / T1 / H1 comparison')) return
+                  try {
+                    const next = browser.startHybridComparison()
+                    note(`C5 / T1 / H1 comparison started — stage: ${next.stage}`)
+                  } catch {
+                    note('Could not archive the existing run. Export it before starting another run.')
+                  }
+                }}
+                className={`${btn} bg-violet-700 text-white hover:bg-violet-600`}
+              >
+                Start C5 / T1 / H1 comparison
+              </button>
+              <button
+                type="button"
+                onClick={() => {
                   if (!confirmWipe('Start confirmation')) return
                   try { const next = browser.startConfirmation(); note(`Confirmation started — stage: ${next.stage}`) }
                   catch { note('Could not archive the existing run. Export it before starting another run.') }
@@ -510,6 +549,32 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
             </ul>
             <p className="mt-2 text-sky-200/80">
               Compare Touch performance first. A small sample or a 100% observed win rate is not a proven best strategy.
+            </p>
+          </div>
+        )}
+
+        {hybridRun && (
+          <div className="mt-3 rounded border border-violet-800/60 bg-violet-950/30 p-3 text-[11px] text-violet-100">
+            <div className="font-medium text-violet-200">C5 / T1 / H1 paper comparison (not live trading)</div>
+            <ul className="mt-1 list-inside list-disc space-y-0.5 text-violet-100/90">
+              <li><span className="font-mono">C5</span>: {HYBRID_COMPARISON_LABELS.C5}</li>
+              <li><span className="font-mono">T1</span>: {HYBRID_COMPARISON_LABELS.T1}</li>
+              <li><span className="font-mono">H1</span>: {HYBRID_COMPARISON_LABELS.H1}</li>
+            </ul>
+            {h1Diagnostics && (
+              <div className="mt-2 space-y-0.5 text-violet-100/90">
+                <div className="font-medium text-violet-200">Pre-cooldown diagnostics (raw C5/T1 eligibility)</div>
+                <p>Agree: {h1Diagnostics.agree} · Oppose: {h1Diagnostics.oppose} · Only C5: {h1Diagnostics.onlyC5} · Only T1: {h1Diagnostics.onlyT1} · Neither: {h1Diagnostics.neither}</p>
+                <p>H1 entries blocked by H1’s own cooldown: {h1Diagnostics.h1CooldownBlocked}</p>
+                {(strategies.find((s: StrategySummary) => s.id === 'H1')?.candidatesAccepted ?? 0) === 0 && (
+                  <p className="text-amber-200">
+                    H1 has no accepted entries yet — shown as “—” not 100%. Agreement may be rare, or H1 may be cooling down.
+                  </p>
+                )}
+              </div>
+            )}
+            <p className="mt-2 text-violet-200/80">
+              H1 is experimental. A small sample or empty Touch rate is not a proven result.
             </p>
           </div>
         )}
@@ -629,9 +694,13 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
             <tbody>
               {strategies.map((s: StrategySummary) => {
                 const h7 = s.horizons.find((h) => h.minutes === 7)
-                const label = s.id === 'B1' || s.id === 'C5' || s.id === 'C1'
+                const label = focusedRun && (s.id === 'B1' || s.id === 'C5' || s.id === 'C1')
                   ? FOCUSED_CONFIRMATION_LABELS[s.id]
-                  : null
+                  : hybridRun && (s.id === 'C5' || s.id === 'T1' || s.id === 'H1')
+                    ? HYBRID_COMPARISON_LABELS[s.id]
+                    : s.id === 'H1'
+                      ? HYBRID_COMPARISON_LABELS.H1
+                      : null
                 return (
                   <Fragment key={s.id}>
                     <tr

@@ -3,6 +3,7 @@ import { STRATEGY_REGISTRY } from './strategies/registry'
 import type { ExperimentState } from './experimentEngine'
 import { RESEARCH_CODE_VERSION } from './experimentEngine'
 import { isFocusedConfirmation } from './focusedConfirmation'
+import { emptyH1Diagnostics, isHybridComparison, type H1Diagnostics } from './hybridComparison'
 import type { HorizonMin, ResearchObservation, StrategyId } from './strategies/types'
 import { HORIZON_MINUTES } from './horizons'
 
@@ -127,6 +128,8 @@ export function summarizeExperiment(state: ExperimentState): {
   observationCount: number
   rejectedCount: number
   focusedConfirmation: boolean
+  hybridComparison: boolean
+  h1Diagnostics: H1Diagnostics
   strategies: StrategySummary[]
   notes: string[]
 } {
@@ -138,6 +141,8 @@ export function summarizeExperiment(state: ExperimentState): {
   }
 
   const focused = isFocusedConfirmation(state.enabledStrategyIds)
+  const hybrid = isHybridComparison(state.enabledStrategyIds)
+  const h1Diagnostics = state.h1Diagnostics ?? emptyH1Diagnostics()
   const runSpanSec = (() => {
     if (state.startedAt == null) return null
     const end = state.finishedAt ?? state.lastTickEpoch ?? Math.floor(Date.now() / 1000)
@@ -223,6 +228,8 @@ export function summarizeExperiment(state: ExperimentState): {
     observationCount: state.observations.length,
     rejectedCount: state.rejected.length,
     focusedConfirmation: focused,
+    hybridComparison: hybrid,
+    h1Diagnostics,
     strategies,
     notes: [
       ...(state.codeVersion !== RESEARCH_CODE_VERSION ? ['PRE-FIX RUN: preserved read-only. Paired entries, quote coverage and expiry were affected by known bugs; legacy P&L is not comparable. Start a new v2 run.'] : []),
@@ -230,8 +237,14 @@ export function summarizeExperiment(state: ExperimentState): {
         'Focused confirmation: B1 = baseline (≥4/5 closed), C5 = main candidate (AO optional), C1 = full confirmation (AO required).',
         'Compare C5 to B1 for lift; compare C1 to C5 to see whether requiring AO improves the candidate.',
       ] : []),
+      ...(hybrid ? [
+        'Hybrid comparison: C5 (AO optional), T1 (return-shock reversal), H1 (experimental C5+T1 agreement).',
+        'H1 agreement diagnostics count raw C5/T1 eligibility before cooldowns. An empty H1 sample is not a 100% win rate.',
+        `H1 diagnostics — agree ${h1Diagnostics.agree}, oppose ${h1Diagnostics.oppose}, only C5 ${h1Diagnostics.onlyC5}, only T1 ${h1Diagnostics.onlyT1}, neither ${h1Diagnostics.neither}, H1 cooldown blocked ${h1Diagnostics.h1CooldownBlocked}.`,
+      ] : []),
       'Rankings are descriptive/exploratory; observations can overlap and correlate.',
       'Do not label a small sample or a 100% observed Touch win rate as a proven best strategy.',
+      'Never display an empty Touch sample as 100%.',
       'Research entry/post-win intervals are separate from the live Trade cooldown and freeze at experiment start.',
       'After a Touch HIT, only that strategy takes the research post-win break; sibling strategies keep collecting.',
       '80% baseline score means 4/5 conditions — not an 80% win probability.',
@@ -255,11 +268,12 @@ export function summarizeExperiment(state: ExperimentState): {
 export function exportObservationsCsv(state: ExperimentState): string {
   const c = state.contract
   const header = [
-    'id', 'strategyId', 'side', 'candleTime', 'signalEpoch', 'entryPrice', 'forming', 'reason',
+    'rowType', 'id', 'strategyId', 'side', 'candleTime', 'signalEpoch', 'entryPrice', 'forming', 'reason', 'rejectionReason',
     'flagUt', 'flagSupertrend', 'flagSma', 'flagAo', 'flagRsi', 'passed', 'total',
     'close', 'sma20', 'smaRising', 'smaFalling', 'ao', 'aoPrev', 'rsi', 'utBuy', 'utSell', 'stDir',
     'frozenBarrierAbs', 'frozenDurationMin', 'frozenStake', 'frozenCurrency',
     'frozenEntryCooldownSec', 'frozenPostWinCooldownSec', 'mode',
+    'c5Side', 't1Side', 't1z', 'agreement', 'agreementKind',
     'atr14', 'h1', 'h3', 'h5', 'h7', 'referenceTouchStatus', 'referenceFirstTouchEpoch', 'quotePnl', 'quoteAvailable',
     'quoteStatus', 'quoteReason', 'quoteRequestEpoch', 'quoteResponseEpoch', 'quoteEntryEpoch',
     'quoteEntryPrice', 'quoteBarrier', 'quoteTouchStatus', 'quoteFirstTouchEpoch', 'ask', 'payout', 'codeVersion',
@@ -271,14 +285,15 @@ export function exportObservationsCsv(state: ExperimentState): string {
     const hs = Object.fromEntries(o.horizons.map((h) => [h.minutes, h.status]))
     const m = o.metrics ?? {}
     lines.push([
-      o.id, o.strategyId, o.side, o.candleTime, o.signalEpoch, o.entryReferencePrice, o.forming,
-      o.reason,
+      'observation', o.id, o.strategyId, o.side, o.candleTime, o.signalEpoch, o.entryReferencePrice, o.forming,
+      o.reason, '',
       o.flags?.ut ?? '', o.flags?.supertrend ?? '', o.flags?.sma ?? '', o.flags?.ao ?? '', o.flags?.rsi ?? '',
       o.passed ?? '', o.total ?? '',
       m.close ?? '', m.sma20 ?? '', m.smaRising ?? '', m.smaFalling ?? '', m.ao ?? '', m.aoPrev ?? '',
       m.rsi ?? '', m.utBuy ?? '', m.utSell ?? '', m.stDir ?? '',
       c.barrierAbs, c.duration, c.paperStake, c.currency,
       c.entryCooldownSec ?? '', c.postWinCooldownSec ?? '', state.mode,
+      m.c5Side ?? '', m.t1Side ?? '', m.t1z ?? '', m.agreement ?? '', m.agreementKind ?? '',
       o.atr.atr14 ?? '',
       hs[1] ?? '', hs[3] ?? '', hs[5] ?? '', hs[7] ?? '',
       o.touch?.status ?? '', o.touch?.firstTouchEpoch ?? '', o.touch?.paperPnl ?? '', o.touch?.quoteAvailable ?? '',
@@ -291,6 +306,20 @@ export function exportObservationsCsv(state: ExperimentState): string {
       o.horizons.find((h) => h.minutes === 7)?.targetEpoch ?? '',
       o.horizons.find((h) => h.minutes === 7)?.observedEpoch ?? '',
       o.touch?.reason ?? '', o.touch?.quotedPath?.reason ?? '', o.touch?.quotedPath?.coverageLost ?? '',
+    ].map((v) => `"${String(v).replaceAll('"', '""')}"`).join(','))
+  }
+  for (const r of state.rejected) {
+    lines.push([
+      'rejected', `${r.strategyId}:${r.candleTime}:rejected`, r.strategyId, r.side ?? '', r.candleTime,
+      r.signalEpoch, '', '', '', r.reason,
+      '', '', '', '', '', '', '',
+      '', '', '', '', '', '', '', '', '', '',
+      c.barrierAbs, c.duration, c.paperStake, c.currency,
+      c.entryCooldownSec ?? '', c.postWinCooldownSec ?? '', state.mode,
+      '', '', '', '', '',
+      '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '',
+      state.codeVersion,
+      '', '', '', '', '', '', '', '', '',
     ].map((v) => `"${String(v).replaceAll('"', '""')}"`).join(','))
   }
   return lines.join('\n')
@@ -311,6 +340,9 @@ export function exportReportMarkdown(summary: ReturnType<typeof summarizeExperim
     '',
     summary.focusedConfirmation
       ? 'Focused paper comparison: B1 baseline · C5 main candidate (AO optional) · C1 full confirmation (AO required).'
+      : '',
+    summary.hybridComparison
+      ? `Hybrid paper comparison: C5 · T1 · H1 (experimental). Pre-cooldown agree=${summary.h1Diagnostics.agree} oppose=${summary.h1Diagnostics.oppose} onlyC5=${summary.h1Diagnostics.onlyC5} onlyT1=${summary.h1Diagnostics.onlyT1} H1cooldownBlocked=${summary.h1Diagnostics.h1CooldownBlocked}.`
       : '',
     '',
     '| ID | Name | n | Signal Touch win% | Signal H/M/U/P | Quote cov% | Sig/day | Median TTT s | Quotes/n | Quoted Touch win% | Quoted H/M/U/P | Settled cost | Settled P&L | Settled return | Matured quoted P&L range |',

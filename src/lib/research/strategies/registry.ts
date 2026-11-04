@@ -4,6 +4,7 @@ import {
 } from './patternStrategies'
 import { evalT1, evalT2, evalT3 } from './statStrategies'
 import { evalN1, evalN2, evalO1, evalO2 } from './oscillatorStrategies'
+import { evalH1 } from './hybridStrategies'
 import type { StrategyDefinition, StrategyId } from './types'
 
 export const STRATEGY_REGISTRY_VERSION = 'research-strategies-v1'
@@ -211,6 +212,15 @@ export const STRATEGY_REGISTRY: StrategyDefinition[] = [
     rules: 'Wilder +DI/−DI cross with ADX≥25. ADX is strength only, not direction alone.',
     evaluate: evalN2,
   },
+  {
+    id: 'H1',
+    name: 'Experimental — C5 + T1 agreement',
+    family: 'hybrid',
+    version: STRATEGY_REGISTRY_VERSION,
+    usesFormingCandle: false,
+    rules: 'Completed M1 only: C5 and T1 must both signal the SAME side on the SAME candle. Reuses C5 (UT/ST/SMA/RSI; AO recorded only) and T1 (z≤-2 RISE / z≥+2 FALL). Opposite, single-parent, or missing signals skip. Forming candles never trigger H1. Experimental — not a proven live strategy.',
+    evaluate: evalH1,
+  },
 ]
 
 export function getStrategy(id: StrategyId): StrategyDefinition {
@@ -220,9 +230,9 @@ export function getStrategy(id: StrategyId): StrategyDefinition {
 }
 
 export function assertRegistryComplete(): void {
-  if (STRATEGY_REGISTRY.length !== 22) {
-    throw new Error(`Expected 22 strategies, got ${STRATEGY_REGISTRY.length}`)
+  if (STRATEGY_REGISTRY.length !== 23) {
+    throw new Error(`Expected 23 strategies, got ${STRATEGY_REGISTRY.length}`)
   }
   const ids = new Set(STRATEGY_REGISTRY.map((s) => s.id))
-  if (ids.size !== 22) throw new Error('Duplicate strategy IDs')
+  if (ids.size !== 23) throw new Error('Duplicate strategy IDs')
 }

@@ -8,6 +8,7 @@ export type StrategyId =
   | 'T1' | 'T2' | 'T3'
   | 'O1' | 'O2'
   | 'N1' | 'N2'
+  | 'H1'
 
 export type StrategyFamily =
   | 'baseline_live'
@@ -17,6 +18,7 @@ export type StrategyFamily =
   | 'statistical'
   | 'stochastic'
   | 'cci_dmi'
+  | 'hybrid'
 
 export type ResearchSide = 'RISE' | 'FALL'
 

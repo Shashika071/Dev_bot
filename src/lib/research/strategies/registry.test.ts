@@ -7,11 +7,12 @@ import { buildResearchExtras } from './buildExtras'
 import type { StrategyContext } from './types'
 
 describe('strategy registry', () => {
-  it('has exactly 22 unique IDs covering B0..N2', () => {
+  it('has exactly 23 unique IDs covering B0..N2 and H1', () => {
     assertRegistryComplete()
     expect(STRATEGY_REGISTRY.map((s) => s.id).sort()).toEqual([
       'B0', 'B1',
       'C1', 'C2', 'C3', 'C4', 'C5', 'C6',
+      'H1',
       'N1', 'N2',
       'O1', 'O2',
       'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7',
