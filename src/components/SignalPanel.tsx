@@ -136,7 +136,7 @@ export function SignalPanel({
 
       <label className="flex cursor-pointer items-center justify-center gap-2 text-sm text-slate-300">
         <input type="checkbox" checked={sound} onChange={onToggleSound} />
-        Sound on qualified C5 (completed candle only)
+        Sound on qualified C5 (completed candle only — not forming)
       </label>
     </aside>
   )

@@ -7,19 +7,44 @@ import type { AutoTradeSignal } from './useAutoTrade'
 
 const SYMBOL = import.meta.env.VITE_DERIV_SYMBOL || 'R_100'
 
+/** Shared AudioContext — browsers block beep until unlocked by a user click. */
+let alertAudioCtx: AudioContext | null = null
+
+function getAlertAudioCtx(): AudioContext | null {
+  try {
+    const AC = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+    if (!AC) return null
+    if (!alertAudioCtx || alertAudioCtx.state === 'closed') alertAudioCtx = new AC()
+    return alertAudioCtx
+  } catch {
+    return null
+  }
+}
+
+/** Call from a click (sound checkbox) so later C5 alerts are allowed to beep. */
+export async function unlockC5AlertSound(): Promise<void> {
+  const ctx = getAlertAudioCtx()
+  if (!ctx) return
+  try {
+    if (ctx.state === 'suspended') await ctx.resume()
+  } catch { /* ignore */ }
+}
+
 /** Soft beep for qualified C5 completed-candle alerts. */
 function playBeep() {
   try {
-    const ctx = new AudioContext()
-    const oscillator = ctx.createOscillator()
-    const gain = ctx.createGain()
-    oscillator.connect(gain)
-    gain.connect(ctx.destination)
-    oscillator.frequency.value = 880
-    gain.gain.value = 0.05
-    oscillator.onended = () => { void ctx.close() }
-    oscillator.start()
-    oscillator.stop(ctx.currentTime + 0.15)
+    const ctx = getAlertAudioCtx()
+    if (!ctx) return
+    void ctx.resume().then(() => {
+      const oscillator = ctx.createOscillator()
+      const gain = ctx.createGain()
+      oscillator.connect(gain)
+      gain.connect(ctx.destination)
+      oscillator.frequency.value = 880
+      gain.gain.value = 0.05
+      oscillator.start()
+      oscillator.stop(ctx.currentTime + 0.15)
+    }).catch(() => { /* autoplay still blocked */ })
   } catch { /* Sound may require a browser interaction. */ }
 }
 
@@ -38,6 +63,11 @@ export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => vo
 
   useEffect(() => { soundRef.current = sound }, [sound])
   useEffect(() => { onTradeRef.current = onTradeSignal }, [onTradeSignal])
+
+  const setSoundSafe = (on: boolean) => {
+    setSound(on)
+    if (on) void unlockC5AlertSound()
+  }
 
   useEffect(() => {
     const feed = new MarketFeed()
@@ -132,7 +162,7 @@ export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => vo
     liveSignal,
     signalMeta,
     sound,
-    setSound,
+    setSound: setSoundSafe,
     liveSetup,
     readyAlert: null as null,
   }

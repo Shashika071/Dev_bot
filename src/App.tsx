@@ -127,7 +127,7 @@ export default function App() {
               liveSetup={liveSetup}
               signalMeta={signalMeta}
               sound={sound}
-              onToggleSound={() => setSound((v) => !v)}
+              onToggleSound={() => setSound(!sound)}
             />
           </div>
           <ManualTradeBar trade={trade} />

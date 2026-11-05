@@ -105,7 +105,7 @@ it('does not alert on bootstrap history, alerts once on a live close, and expire
   act(() => fake.listener!(state, { type: 'candle_close', candle: candles[i]! }))
   expect(trades).toHaveLength(1)
 
-  act(() => result.current.setSound(true))
+  act(() => { result.current.setSound(true) })
   expect(fake.starts).toBe(1)
 
   vi.setSystemTime((signal.time + 66) * 1000)
