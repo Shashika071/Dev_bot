@@ -291,7 +291,7 @@ async function executeC5(side, expiresAt, dedupeKey) {
         barrier: r.barrier,
         ok: true,
         contractId: r.contractId,
-        message: `VPS C5 AUTO · Bought ONETOUCH · stake≈${r.buyPrice ?? tradeStake}`,
+        message: `VPS C5 AUTO · Bought ONETOUCH · barrier ${r.barrier} · stake≈${r.buyPrice ?? tradeStake}`,
       })
     }
     if (!results.length) setCooldownUntil(0)

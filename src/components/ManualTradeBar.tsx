@@ -21,6 +21,11 @@ export function ManualTradeBar({ trade }: { trade: AutoTrade }) {
 
   return (
     <div className="relative z-20 shrink-0 border-t border-slate-800 bg-[#0c1118] px-3 py-3">
+      {cooling && (
+        <div className="mb-2 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-center text-xs font-bold tabular-nums text-amber-200">
+          Cooldown · wait {trade.cooldownLeft}s · Auto and Manual blocked
+        </div>
+      )}
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
         <span className="font-semibold uppercase tracking-wide text-slate-400">Manual trade</span>
         <span className="tabular-nums">
@@ -32,10 +37,7 @@ export function ManualTradeBar({ trade }: { trade: AutoTrade }) {
           {' · '}
           {stakeLabel}
           {' · '}
-          ±{barrier} · {dur}
-          {cooling ? (
-            <span className="font-semibold text-amber-300"> · wait {trade.cooldownLeft}s</span>
-          ) : null}
+          barrier ±{barrier} · {dur}
         </span>
       </div>
       <div className="grid grid-cols-2 gap-3">

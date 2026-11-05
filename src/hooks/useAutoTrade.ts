@@ -523,7 +523,16 @@ export function useAutoTrade(symbol: string) {
     void syncVpsFromBrowser(on)
   }, [syncVpsFromBrowser])
 
-  // Keep VPS ownership flag fresh; if worker dies, browser Auto can buy again.
+  /** Sync Wait-after-trade lock from VPS so manual buttons also block. */
+  const applyRemoteCooldown = useCallback((untilMs: number) => {
+    if (!(untilMs > Date.now())) return
+    if (untilMs <= cooldownUntilRef.current) return
+    cooldownUntilRef.current = untilMs
+    setCooldownUntil(untilMs)
+    persistCooldownUntil(untilMs)
+  }, [])
+
+  // Keep VPS ownership + cooldown fresh; if worker dies, browser Auto can buy again.
   useEffect(() => {
     let cancelled = false
     const tick = async () => {
@@ -531,13 +540,24 @@ export function useAutoTrade(symbol: string) {
         vpsOwnsAutoRef.current = false
         return
       }
-      const ok = await fetchVpsAutoHealth()
-      if (!cancelled) vpsOwnsAutoRef.current = ok
+      try {
+        const { fetchVpsAutoStatus } = await import('../lib/autoTrade/autoApi')
+        const st = await fetchVpsAutoStatus()
+        if (cancelled) return
+        vpsOwnsAutoRef.current = !!st?.ok
+        const left = st?.cooldownLeftSec ?? 0
+        if (left > 0) applyRemoteCooldown(Date.now() + left * 1000)
+      } catch {
+        if (!cancelled) {
+          const ok = await fetchVpsAutoHealth()
+          if (!cancelled) vpsOwnsAutoRef.current = ok
+        }
+      }
     }
     void tick()
-    const id = setInterval(() => { void tick() }, 5000)
+    const id = setInterval(() => { void tick() }, 3000)
     return () => { cancelled = true; clearInterval(id) }
-  }, [autoEnabled])
+  }, [autoEnabled, applyRemoteCooldown])
 
   const executeTrade = useCallback(async (
     side: 'RISE' | 'FALL',
@@ -765,11 +785,12 @@ export function useAutoTrade(symbol: string) {
 
     // When VPS worker is handling Auto, skip browser buys (avoids double orders).
     if (s.autoEnabled && vpsOwnsAutoRef.current) {
+      const barrier = side === 'RISE' ? `+${s.barrierAbs}` : side === 'FALL' ? `-${s.barrierAbs}` : '—'
       logSignal({
         signal: side,
-        barrier: '—',
+        barrier,
         ok: true,
-        message: 'C5 · VPS worker handles this trade (browser tab optional)',
+        message: `C5 · VPS worker handles buy · barrier ${barrier} (browser optional)`,
       })
       return
     }
@@ -824,8 +845,24 @@ export function useAutoTrade(symbol: string) {
   }, [executeTrade, pushLog])
 
   const placeManualTrade = useCallback(async (side: 'RISE' | 'FALL') => {
+    // Re-read stored cooldown (incl. VPS-synced) before manual click.
+    const storedUntil = readStoredCooldownUntil()
+    if (storedUntil > cooldownUntilRef.current) {
+      cooldownUntilRef.current = storedUntil
+      setCooldownUntil(storedUntil)
+    }
+    const waitLeft = Math.max(0, Math.ceil((cooldownUntilRef.current - Date.now()) / 1000))
+    if (waitLeft > 0) {
+      pushLog({
+        signal: side,
+        barrier: '—',
+        ok: false,
+        message: `Manual skipped · cooldown ${waitLeft}s left`,
+      })
+      return
+    }
     await executeTrade(side, { source: 'manual' })
-  }, [executeTrade])
+  }, [executeTrade, pushLog])
 
   return {
     appId, setAppId,
@@ -841,6 +878,7 @@ export function useAutoTrade(symbol: string) {
     cooldownSec, setCooldownSec,
     minConfidencePct, setMinConfidencePct,
     cooldownLeft, cooldownUntil,
+    applyRemoteCooldown,
     autoEnabled, setAutoEnabled: setAutoEnabledSafe,
     status, busy, error, balance, currency, log,
     clearTradeHistory,
