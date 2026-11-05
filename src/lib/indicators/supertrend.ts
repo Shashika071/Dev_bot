@@ -1,5 +1,7 @@
 /**
  * KivancOzbilgic SuperTrend — ATR 7, Mult 2, HL2, Wilder ATR
+ * https://www.tradingview.com/script/r6dAP7yi/
+ * Reversals use the previous bands; direction is tracked explicitly.
  */
 import type { Candle, TrendDir } from '../types'
 import { atrRma } from './atr'
@@ -24,6 +26,7 @@ export function computeSupertrend(
   const dir: TrendDir[] = new Array(n).fill(0)
   const finalUb: (number | null)[] = new Array(n).fill(null)
   const finalLb: (number | null)[] = new Array(n).fill(null)
+  let trend: TrendDir = 1
 
   for (let i = 0; i < n; i++) {
     if (atr[i] == null) continue
@@ -31,40 +34,20 @@ export function computeSupertrend(
     const basicUb = hl2 + multiplier * (atr[i] as number)
     const basicLb = hl2 - multiplier * (atr[i] as number)
 
-    if (i === 0 || finalUb[i - 1] == null) {
-      finalUb[i] = basicUb
-      finalLb[i] = basicLb
-    } else {
-      finalUb[i] =
-        basicUb < (finalUb[i - 1] as number) || closes[i - 1] > (finalUb[i - 1] as number)
-          ? basicUb
-          : (finalUb[i - 1] as number)
-      finalLb[i] =
-        basicLb > (finalLb[i - 1] as number) || closes[i - 1] < (finalLb[i - 1] as number)
-          ? basicLb
-          : (finalLb[i - 1] as number)
-    }
+    // The first valid ATR bar falls back to its basic bands (Pine's nz).
+    const prevUb = finalUb[i - 1] ?? basicUb
+    const prevLb = finalLb[i - 1] ?? basicLb
+    finalUb[i] = i > 0 && closes[i - 1] < prevUb
+      ? Math.min(basicUb, prevUb)
+      : basicUb
+    finalLb[i] = i > 0 && closes[i - 1] > prevLb
+      ? Math.max(basicLb, prevLb)
+      : basicLb
 
-    if (i === 0 || line[i - 1] == null) {
-      dir[i] = 1
-      line[i] = finalLb[i]
-    } else if (line[i - 1] === finalUb[i - 1]) {
-      if (closes[i] > (finalUb[i] as number)) {
-        dir[i] = 1
-        line[i] = finalLb[i]
-      } else {
-        dir[i] = -1
-        line[i] = finalUb[i]
-      }
-    } else {
-      if (closes[i] < (finalLb[i] as number)) {
-        dir[i] = -1
-        line[i] = finalUb[i]
-      } else {
-        dir[i] = 1
-        line[i] = finalLb[i]
-      }
-    }
+    if (trend === -1 && closes[i] > prevUb) trend = 1
+    else if (trend === 1 && closes[i] < prevLb) trend = -1
+    dir[i] = trend
+    line[i] = trend === 1 ? finalLb[i] : finalUb[i]
   }
 
   return { line, dir }
