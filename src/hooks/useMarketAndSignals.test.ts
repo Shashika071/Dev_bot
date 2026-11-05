@@ -6,16 +6,19 @@ import { enrich } from '../lib/strategy/signalEngine'
 import { evaluateC5Index, evaluateC5LiveBar } from '../lib/strategy/c5Strategy'
 import type { MarketState } from '../lib/deriv/marketFeed'
 import type { Candle, SignalEvaluation } from '../lib/types'
+import type { AutoTradeSignal } from './useAutoTrade'
+import { authorizeC5AutoTrade } from '../lib/strategy/c5AutoAuth'
 
 const fake = vi.hoisted(() => ({
   listener: null as null | ((state: MarketState, event?: { type: 'candle_close'; candle: Candle }) => void),
   starts: 0,
   forcedClosed: null as SignalEvaluation | null,
   forcedLive: null as SignalEvaluation | null,
+  historyDelayMs: 0,
 }))
 
-vi.mock('../lib/deriv/marketFeed', () => ({
-  SIGNAL_WINDOW_SECONDS: 5,
+vi.mock('../lib/deriv/marketFeed', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../lib/deriv/marketFeed')>(),
   MarketFeed: class {
     subscribe(fn: NonNullable<typeof fake.listener>) { fake.listener = fn; return () => {} }
     start() { fake.starts++ }
@@ -38,6 +41,7 @@ vi.mock('../lib/strategy/c5Strategy', async (importOriginal) => {
       return actual.evaluateC5LiveBar(candles)
     },
     evaluateC5All: (candles: Candle[]) => {
+      if (fake.historyDelayMs) vi.setSystemTime(Date.now() + fake.historyDelayMs)
       const base = actual.evaluateC5All(candles)
       if (fake.forcedClosed && !base.some((e) => e.time === fake.forcedClosed!.time)) {
         return [...base, fake.forcedClosed]
@@ -76,6 +80,7 @@ beforeEach(() => {
   fake.starts = 0
   fake.forcedClosed = null
   fake.forcedLive = null
+  fake.historyDelayMs = 0
 })
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllEnvs() })
 
@@ -109,6 +114,7 @@ it('does not alert on bootstrap history, alerts once on a live close, and expire
   act(() => fake.listener!(state, { type: 'candle_close', candle: candles[i]! }))
   expect(result.current.liveSignal?.final).toBe('RISE')
   expect(trades).toHaveLength(1)
+  expect(result.current.signalMeta?.expiresAt).toBe(signal.time + 70)
 
   act(() => fake.listener!(state, { type: 'candle_close', candle: candles[i]! }))
   expect(trades).toHaveLength(1)
@@ -116,7 +122,7 @@ it('does not alert on bootstrap history, alerts once on a live close, and expire
   act(() => { result.current.setSound(true) })
   expect(fake.starts).toBe(1)
 
-  vi.setSystemTime((signal.time + 66) * 1000)
+  vi.setSystemTime((signal.time + 71) * 1000)
   act(() => fake.listener!(state))
   expect(result.current.liveSignal).toBeNull()
 })
@@ -148,9 +154,18 @@ it('fires immediately when forming candle first hits 4/4 (not waiting for close)
   act(() => fake.listener!({ ...base, lastTickEpoch: t0 + 20, lastPrice: candles.at(-1)!.close + 0.01 }))
   expect(result.current.liveSignal?.final).toBe('RISE')
   expect(trades).toHaveLength(1)
+  expect(result.current.signalMeta?.expiresAt).toBe(t0 + 30)
 
   // More ticks same minute must not duplicate.
+  vi.setSystemTime((t0 + 25) * 1000)
   act(() => fake.listener!({ ...base, lastTickEpoch: t0 + 25 }))
+  expect(trades).toHaveLength(1)
+  expect(result.current.signalMeta?.expiresAt).toBe(t0 + 30)
+  expect(result.current.signalMeta?.remainingSec).toBe(5)
+
+  vi.setSystemTime((t0 + 31) * 1000)
+  act(() => fake.listener!({ ...base, lastTickEpoch: t0 + 31 }))
+  expect(result.current.liveSignal).toBeNull()
   expect(trades).toHaveLength(1)
 })
 
@@ -160,4 +175,42 @@ it('evaluateC5LiveBar qualifies a forming bar when rules pass', () => {
   // Without forced indicators this may or may not qualify; just ensure it returns an evaluation shape.
   const ev = evaluateC5LiveBar(candles)
   expect(ev == null || typeof ev.time === 'number').toBe(true)
+})
+
+it.each([
+  ['late receipt', 71, 61],
+  ['late tick with device clock behind', 62, 71],
+] as const)('forwards %s for skip logging without displaying an actionable signal', (_, receipt, tick) => {
+  const { candles, signal } = buildForcedRise(false)
+  fake.forcedClosed = signal
+  vi.setSystemTime((signal.time + receipt) * 1000)
+  const state: MarketState = {
+    status: 'CONNECTED', ready: true, symbol: 'R_100', candles,
+    lastPrice: candles.at(-1)!.close, lastTickEpoch: signal.time + tick,
+    lastConfirmedCandleTime: signal.time, error: null,
+  }
+  const received: AutoTradeSignal[] = []
+  const { result } = renderHook(() => useMarketAndSignals((sig) => received.push(sig)))
+  act(() => fake.listener!(state, { type: 'candle_close', candle: candles.at(-1)! }))
+  expect(received).toHaveLength(1)
+  expect(result.current.liveSignal).toBeNull()
+  expect(authorizeC5AutoTrade(received[0]!, {
+    autoEnabled: true, nowSec: Date.now() / 1000, alreadyTraded: false,
+  })).toEqual({ ok: false, reason: 'expired' })
+})
+
+it('hands a fresh signal to Auto before a slow historical chart rebuild', () => {
+  const { candles, signal } = buildForcedRise(false)
+  fake.forcedClosed = signal
+  fake.historyDelayMs = 6000
+  vi.setSystemTime((signal.time + 61) * 1000)
+  const state: MarketState = {
+    status: 'CONNECTED', ready: true, symbol: 'R_100', candles,
+    lastPrice: candles.at(-1)!.close, lastTickEpoch: signal.time + 61,
+    lastConfirmedCandleTime: signal.time, error: null,
+  }
+  let deliveredAt = 0
+  renderHook(() => useMarketAndSignals(() => { deliveredAt = Date.now() / 1000 }))
+  act(() => fake.listener!(state, { type: 'candle_close', candle: candles.at(-1)! }))
+  expect(deliveredAt).toBe(signal.time + 61)
 })

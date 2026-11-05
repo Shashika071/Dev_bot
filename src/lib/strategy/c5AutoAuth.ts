@@ -13,6 +13,8 @@ export type C5AutoAuthInput = {
   flags: ConfirmationFlags
   candleTime: number
   expiresAt: number
+  /** Tick time also bounds entry when the device clock is slightly behind. */
+  receivedTickEpoch?: number
   /** Display-only; ignored for authorization */
   confidence?: number
 }
@@ -54,7 +56,9 @@ export function authorizeC5AutoTrade(
     return { ok: false, reason: 'required_count' }
   }
   if (!c5RequiredFlagsOk(sig.flags)) return { ok: false, reason: 'required_flags' }
-  if (isC5EntryExpired(sig.expiresAt, opts.nowSec)) return { ok: false, reason: 'expired' }
+  if (isC5EntryExpired(sig.expiresAt, Math.max(opts.nowSec, sig.receivedTickEpoch ?? opts.nowSec))) {
+    return { ok: false, reason: 'expired' }
+  }
   if (opts.alreadyTraded) return { ok: false, reason: 'duplicate' }
   return {
     ok: true,

@@ -98,16 +98,16 @@ describe('history synchronization and signal timing', () => {
     expect(feed.getSnapshot().ready).toBe(true)
     expect(closes).toEqual([])
   })
-  it('suppresses an otherwise valid close received outside the five-second window', () => {
+  it('reports late live closes so Auto can record an expired-signal skip', () => {
     ready(); tick(59); tick(66)
     expect(feed.getSnapshot().ready).toBe(true)
-    expect(closes).toEqual([])
+    expect(closes).toEqual([minute])
   })
-  it('also checks delivery time, not just the timestamp inside the tick', () => {
+  it('reports a close delivered late even when its tick timestamp was timely', () => {
     ready(); tick(58)
     vi.setSystemTime((minute + 69) * 1000)
     client.handler({ tick: { epoch: minute + 61, quote: 1001 } })
-    expect(closes).toEqual([])
+    expect(closes).toEqual([minute])
   })
   it('blocks on disconnect and ignores old history after reconnect', () => {
     ready()

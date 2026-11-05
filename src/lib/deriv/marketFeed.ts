@@ -10,7 +10,8 @@ const HISTORY = Number.isFinite(configuredHistory) ? Math.max(120, Math.min(5000
 const HISTORY_BATCH = 1000
 /** Live trailing streak needed for signals (warmup is 60). */
 const MIN_HISTORY = WARMUP_BARS + 5
-export const SIGNAL_WINDOW_SECONDS = 5
+/** Live C5 deadline, including balance/proposal preparation before buy. */
+export const SIGNAL_WINDOW_SECONDS = 10
 export const MAX_TICK_GAP_SECONDS = 10
 
 export interface MarketState {
@@ -342,9 +343,11 @@ export class MarketFeed {
       ready,
       error: ready ? null : this.state.error,
     }
-    if (closedCandle && tick.epoch - (closedCandle.time + 60) <= SIGNAL_WINDOW_SECONDS
-      && this.now() / 1000 - (closedCandle.time + 60) <= SIGNAL_WINDOW_SECONDS) {
-      this.emit({ type: 'candle_close', candle: closedCandle })
-    } else this.emit()
+    // A live close is an observation, not permission to buy. Always deliver it
+    // so the Auto handler can record why a qualified signal was skipped.
+    // History synchronization still emits no closes; expiry is checked by Auto
+    // against both receipt time and tick time, and again immediately before buy.
+    if (closedCandle) this.emit({ type: 'candle_close', candle: closedCandle })
+    else this.emit()
   }
 }

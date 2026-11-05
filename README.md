@@ -24,7 +24,7 @@ Data checks also have to pass:
 - Only R_100, valid OHLC data and consecutive M1 candles; 60 completed candles for warmup before evaluating the next candle.
 - Synchronize history after the first live tick; history ends before that tick and buffered ticks are replayed in order. Recovery does not emit historical alerts.
 - Reject older and duplicate ticks. Pause and recover when ticks are missing for over 10 seconds, or when disconnected. Device clock and tick timestamp must agree within 10 seconds.
-- Only alert within five seconds of candle close, checking both the tick timestamp and local delivery time. The live signal disappears when this window expires. Historical chart arrows are not fresh alerts.
+- Live C5 entry window: 10 seconds from the first forming-candle 4/4 detection, or from candle close for a closed-candle signal. Balance and proposal requests must finish before the deadline; expiry is checked again immediately before sending the buy request. Closed entries check both tick time and local delivery time. The live signal disappears when this window expires. Historical chart arrows are not fresh alerts. Paper research retains its separate 5-second post-close entry rule.
 - Request up to 5,000 candles and retain at most that many in memory. The server may return fewer (the verification run returned 1,000 per request). Recursive indicator seeds can differ with the loaded history window.
 
 ## Run

@@ -57,7 +57,7 @@ function playBeep() {
 function toAutoSignal(
   ev: SignalEvaluation,
   state: MarketState,
-  opts: { candleCloseEpoch: number; expiresAt: number; feedReady: boolean },
+  opts: { candleCloseEpoch: number; expiresAt: number; feedReady: boolean; forming?: boolean },
 ): AutoTradeSignal {
   const side = ev.final as 'RISE' | 'FALL'
   return {
@@ -68,6 +68,9 @@ function toAutoSignal(
     time: ev.time,
     candleCloseEpoch: opts.candleCloseEpoch,
     expiresAt: opts.expiresAt,
+    // Closed entries expire on the candle clock; forming entries get the entry
+    // window from detection, so their deadline is in local receipt time.
+    receivedTickEpoch: opts.forming ? undefined : state.lastTickEpoch ?? undefined,
     isQualified: true,
     requiredPassed: ev.requiredPassed ?? 4,
     requiredTotal: ev.requiredTotal ?? 4,
@@ -117,7 +120,7 @@ export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => vo
     const emitQualified = (
       state: MarketState,
       ev: SignalEvaluation,
-      opts: { candleCloseEpoch: number; expiresAt: number; playSound: boolean },
+      opts: { candleCloseEpoch: number; expiresAt: number; playSound: boolean; forming?: boolean },
     ) => {
       if (ev.final !== 'RISE' && ev.final !== 'FALL') return
       const id = `${C5_STRATEGY_ID}:${ev.time}:${ev.final}`
@@ -125,7 +128,8 @@ export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => vo
       notified.add(id)
 
       const nowSec = Date.now() / 1000
-      const inWindow = state.ready && nowSec <= opts.expiresAt
+      const entryTime = opts.forming ? nowSec : Math.max(nowSec, state.lastTickEpoch ?? nowSec)
+      const inWindow = state.ready && entryTime <= opts.expiresAt
       if (inWindow) {
         expiresAt = opts.expiresAt
         setLiveSignal(ev)
@@ -140,6 +144,7 @@ export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => vo
         candleCloseEpoch: opts.candleCloseEpoch,
         expiresAt: opts.expiresAt,
         feedReady: state.ready,
+        forming: opts.forming,
       }))
     }
 
@@ -154,12 +159,6 @@ export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => vo
           ? { ...prev, remainingSec: Math.max(0, expiresAt - nowSec) }
           : prev)
       }
-
-      const key = `${state.ready}:${state.lastConfirmedCandleTime}:${state.candles[0]?.time}`
-      if (state.ready && key !== evaluationKey) {
-        setEvaluations(evaluateC5All(state.candles.filter((c) => c.isClosed)))
-      }
-      evaluationKey = key
 
       // Completed-candle path (backup if 4/4 only appears at the close).
       if (event?.type === 'candle_close') {
@@ -188,10 +187,18 @@ export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => vo
               candleCloseEpoch: nowSec,
               expiresAt: nowSec + SIGNAL_WINDOW_SECONDS,
               playSound: true,
+              forming: true,
             })
           }
         }
       }
+
+      // Deliver fresh signals before the more expensive historical chart scan.
+      const key = `${state.ready}:${state.lastConfirmedCandleTime}:${state.candles[0]?.time}`
+      if (state.ready && key !== evaluationKey) {
+        setEvaluations(evaluateC5All(state.candles.filter((c) => c.isClosed)))
+      }
+      evaluationKey = key
     })
     feed.start()
     return () => { unsubscribe(); feed.stop() }

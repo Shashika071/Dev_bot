@@ -1,4 +1,4 @@
-import type { MarketState } from '../lib/deriv/marketFeed'
+import { SIGNAL_WINDOW_SECONDS, type MarketState } from '../lib/deriv/marketFeed'
 import type { LiveSetupConfidence, SideSetup } from '../lib/strategy/liveConfidence'
 import { C5_STRATEGY_LABEL } from '../lib/strategy/c5Strategy'
 import type { SignalEvaluation } from '../lib/types'
@@ -59,7 +59,7 @@ export function SignalPanel({
       <div className={`rounded-xl border-2 px-3 py-5 text-center ${finalCls}`}>
         <div className="text-[10px] uppercase tracking-widest opacity-70">
           {actionable
-            ? 'C5 qualified · 4/4 · 5-second entry window'
+            ? `C5 qualified · 4/4 · ${SIGNAL_WINDOW_SECONDS}-second entry window`
             : 'No actionable C5 signal'}
         </div>
         <div className="mt-1 text-3xl font-black tracking-wide">
@@ -96,7 +96,7 @@ export function SignalPanel({
           <p className="mt-1 text-[11px] text-slate-400">
             {previewSide.side} {previewSide.passed}/{previewSide.total} required on the open minute.
             {previewSide.passed >= 4
-              ? ' First 4/4 this minute triggers sound + Auto (5s to buy).'
+              ? ` First 4/4 this minute triggers sound + Auto (${SIGNAL_WINDOW_SECONDS}s to buy).`
               : ' Trade triggers as soon as all 4 required conditions pass.'}
           </p>
         </div>
@@ -116,7 +116,7 @@ export function SignalPanel({
           <SetupCard setup={liveSetup.fall} active={liveSetup.lean === 'FALL'} />
         </div>
         <p className="mt-2 text-[10px] leading-snug text-slate-500">
-          Live Auto: first time this minute hits 4/4 (forming or close) → entry within 5s. AO optional.
+          Live Auto: first time this minute hits 4/4 (forming or close) → entry within {SIGNAL_WINDOW_SECONDS}s. AO optional.
         </p>
       </div>
 

@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import type { useAutoTrade } from '../hooks/useAutoTrade'
 import { TradeHistory } from './TradeHistory'
+import { SIGNAL_WINDOW_SECONDS } from '../lib/deriv/marketFeed'
 
 type AutoTrade = ReturnType<typeof useAutoTrade>
 
@@ -51,7 +52,7 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
         <span className="text-slate-300">first time</span> this minute hits{' '}
         <span className="text-slate-300">4/4</span> — including on a{' '}
         <span className="text-slate-300">forming</span> candle (AO optional). Then{' '}
-        <span className="text-slate-300">5 seconds</span> to place the order.
+        <span className="text-slate-300">{SIGNAL_WINDOW_SECONDS} seconds</span> to place the order.
         Barriers: <span className="text-emerald-400">RISE → + only</span>,{' '}
         <span className="text-rose-400">FALL → − only</span>. Auto starts OFF after migration.
         Not a guaranteed winner.
@@ -214,7 +215,7 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
         <ul className="mt-1 list-disc space-y-0.5 pl-4">
           <li>Chart must show <span className="text-emerald-400">READY</span> (not “Recovering / signals paused”).</li>
           <li>C5 must hit 4/4 (fresh UT required) — live Auto fires on forming or close, once per minute.</li>
-          <li>Auto trade ON + trade socket connected; 5s entry window and cooldown may still be blocking.</li>
+          <li>Auto trade ON + trade socket connected; {SIGNAL_WINDOW_SECONDS}s entry window and cooldown may still be blocking.</li>
           <li>
             <span className="text-amber-200">Research C5 is still paper / completed-candle.</span>{' '}
             Live Auto can buy earlier on forming 4/4. Chart arrows are history markers.

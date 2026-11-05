@@ -59,6 +59,7 @@ export function TradeHistory({
             <thead className="sticky top-0 bg-[#121820] text-slate-500">
               <tr>
                 <th className="px-2 py-1.5">Time (UTC)</th>
+                <th className="px-2 py-1.5">Signal candle (UTC)</th>
                 <th className="px-2 py-1.5">Side</th>
                 <th className="px-2 py-1.5">Barrier</th>
                 <th className="px-2 py-1.5">Status</th>
@@ -71,6 +72,9 @@ export function TradeHistory({
                 <tr key={r.id} className="border-t border-slate-900/80 text-slate-300">
                   <td className="whitespace-nowrap px-2 py-1.5 tabular-nums text-slate-400">
                     {new Date(r.at).toISOString().replace('.000Z', 'Z')}
+                  </td>
+                  <td className="whitespace-nowrap px-2 py-1.5 tabular-nums text-slate-400">
+                    {r.candleTime != null ? new Date(r.candleTime * 1000).toISOString().replace('.000Z', 'Z') : '—'}
                   </td>
                   <td
                     className={`px-2 py-1.5 font-semibold ${

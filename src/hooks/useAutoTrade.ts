@@ -25,6 +25,8 @@ export type TradeLogRow = {
   ok: boolean
   message: string
   contractId?: number | null
+  /** Candle open time in epoch seconds, matching the chart marker. */
+  candleTime?: number
 }
 
 function loadTradeHistory(): TradeLogRow[] {
@@ -51,11 +53,12 @@ function saveTradeHistory(rows: TradeLogRow[]) {
 }
 
 export function exportTradeHistoryCsv(rows: TradeLogRow[]): string {
-  const header = 'utc,signal,barrier,ok,contract_id,message'
+  const header = 'utc,signal,barrier,ok,contract_id,message,signal_candle_utc'
   const lines = rows.map((r) => {
     const utc = new Date(r.at).toISOString()
     const msg = `"${r.message.replaceAll('"', '""')}"`
-    return [utc, r.signal, r.barrier, r.ok ? '1' : '0', r.contractId ?? '', msg].join(',')
+    const candleUtc = r.candleTime != null ? new Date(r.candleTime * 1000).toISOString() : ''
+    return [utc, r.signal, r.barrier, r.ok ? '1' : '0', r.contractId ?? '', msg, candleUtc].join(',')
   })
   return [header, ...lines].join('\n')
 }
@@ -99,6 +102,7 @@ export type AutoTradeSignal = {
   time: number
   candleCloseEpoch: number
   expiresAt: number
+  receivedTickEpoch?: number
   isQualified: boolean
   requiredPassed: number
   requiredTotal: number
@@ -452,6 +456,7 @@ export function useAutoTrade(symbol: string) {
 
   const setAutoEnabledSafe = useCallback((on: boolean) => {
     pendingAuto.current = on
+    settingsRef.current.autoEnabled = on
     setAutoEnabled(on)
     // Persist immediately so refresh never loses Auto trade ON.
     try {
@@ -469,19 +474,24 @@ export function useAutoTrade(symbol: string) {
       dedupeKey?: string
       expiresAt?: number
       strategyId?: 'C5'
+      candleTime?: number
     },
   ) => {
     const s = settingsRef.current
+    const logTrade = (row: Omit<TradeLogRow, 'id' | 'at'>) => pushLog({
+      ...row, candleTime: opts.candleTime,
+    })
     if (tradeLockRef.current) {
-      if (opts.source === 'manual') {
-        pushLog({ signal: side, barrier: '—', ok: false, message: 'Manual skipped · trade already in progress' })
-      }
+      logTrade({
+        signal: side, barrier: '—', ok: false,
+        message: `${opts.source === 'manual' ? 'Manual' : 'C5'} skipped · trade already in progress`,
+      })
       return
     }
 
     const client = clientRef.current
     if (!client || client.connectionStatus !== 'CONNECTED') {
-      pushLog({
+      logTrade({
         signal: side,
         barrier: '—',
         ok: false,
@@ -493,7 +503,7 @@ export function useAutoTrade(symbol: string) {
     }
 
     if (opts.source === 'auto' && opts.expiresAt != null && isC5EntryExpired(opts.expiresAt, Date.now() / 1000)) {
-      pushLog({
+      logTrade({
         signal: side,
         barrier: '—',
         ok: false,
@@ -513,7 +523,7 @@ export function useAutoTrade(symbol: string) {
       const cdKey = `cd:${opts.source}:${opts.dedupeKey ?? side}`
       if (!tradedSignals.current.has(cdKey)) {
         tradedSignals.current.add(cdKey)
-        pushLog({
+        logTrade({
           signal: side,
           barrier: '—',
           ok: false,
@@ -534,7 +544,7 @@ export function useAutoTrade(symbol: string) {
       cooldownUntilRef.current = until
       setCooldownUntil(until)
       persistCooldownUntil(until)
-      pushLog({
+      logTrade({
         signal: side,
         barrier: '—',
         ok: true,
@@ -548,7 +558,7 @@ export function useAutoTrade(symbol: string) {
       if (s.useFullStake) {
         const balMsg = await client.request({ balance: 1 })
         if (opts.source === 'auto' && opts.expiresAt != null && isC5EntryExpired(opts.expiresAt, Date.now() / 1000)) {
-          pushLog({
+          logTrade({
             signal: side,
             barrier: '—',
             ok: false,
@@ -574,7 +584,7 @@ export function useAutoTrade(symbol: string) {
           throw new Error(`Full stake: balance ${tradeStake} below minimum ${MIN_STAKE}`)
         }
         setStake(tradeStake)
-        pushLog({
+        logTrade({
           signal: side,
           barrier: '—',
           ok: true,
@@ -584,7 +594,7 @@ export function useAutoTrade(symbol: string) {
 
       // Recheck expiry and connection before starting the proposal (fail-fast).
       if (opts.source === 'auto' && opts.expiresAt != null && isC5EntryExpired(opts.expiresAt, Date.now() / 1000)) {
-        pushLog({
+        logTrade({
           signal: side,
           barrier: '—',
           ok: false,
@@ -613,6 +623,9 @@ export function useAutoTrade(symbol: string) {
       }, side, {
         // Critical: recheck after proposal response — a slow quote must not buy past the window.
         beforeBuy: () => {
+          if (opts.source === 'auto' && !settingsRef.current.autoEnabled) {
+            throw new Error('C5 skipped · Auto trade OFF before buy')
+          }
           if (opts.source === 'auto' && opts.expiresAt != null
             && isC5EntryExpired(opts.expiresAt, Date.now() / 1000)) {
             throw new Error('C5 skipped · entry window expired after proposal')
@@ -626,7 +639,7 @@ export function useAutoTrade(symbol: string) {
       const confLabel = opts.source === 'auto' ? ' · C5 4/4' : ''
       const srcLabel = opts.source === 'manual' ? 'MANUAL · ' : 'C5 AUTO · '
       for (const r of results) {
-        pushLog({
+        logTrade({
           signal: side,
           barrier: r.barrier,
           ok: true,
@@ -652,7 +665,7 @@ export function useAutoTrade(symbol: string) {
         const prefixed = raw.startsWith('C5 skipped') || raw.startsWith('Manual')
           ? raw
           : `${opts.source === 'manual' ? 'Manual · ' : 'C5 · '}${raw}`
-        pushLog({
+        logTrade({
           signal: side,
           barrier: '—',
           ok: false,
@@ -669,12 +682,19 @@ export function useAutoTrade(symbol: string) {
     const s = settingsRef.current
     const side = sig.side === 'RISE' || sig.side === 'FALL' ? sig.side : 'NO_TRADE'
     const key = c5DedupeKey(sig.candleTime, sig.side)
+    const logSignal = (row: Omit<TradeLogRow, 'id' | 'at'>) => pushLog({
+      ...row, candleTime: sig.candleTime,
+    })
+    logSignal({
+      signal: side, barrier: '—', ok: true,
+      message: `C5 signal received · ${sig.requiredPassed}/${sig.requiredTotal} required`,
+    })
 
     // Chart/Research can show the same C5 bar later; live Auto only acts on READY closes.
     if (sig.feedReady === false) {
       if (!tradedSignals.current.has(`feed:${key}`)) {
         tradedSignals.current.add(`feed:${key}`)
-        pushLog({
+        logSignal({
           signal: side,
           barrier: '—',
           ok: false,
@@ -701,7 +721,7 @@ export function useAutoTrade(symbol: string) {
                 : auth.reason === 'not_qualified' || auth.reason === 'required_count' || auth.reason === 'required_flags'
                   ? 'C5 4/4 requirements not met'
                   : auth.reason
-      pushLog({
+      logSignal({
         signal: side,
         barrier: '—',
         ok: false,
@@ -715,6 +735,7 @@ export function useAutoTrade(symbol: string) {
       dedupeKey: auth.dedupeKey,
       expiresAt: sig.expiresAt,
       strategyId: C5_STRATEGY_ID,
+      candleTime: sig.candleTime,
     })
   }, [executeTrade, pushLog])
 
