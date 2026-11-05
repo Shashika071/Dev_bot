@@ -105,6 +105,8 @@ export type AutoTradeSignal = {
   flags: ConfirmationFlags
   /** Display-only fraction requiredPassed/requiredTotal — never authorizes alone */
   confidence: number
+  /** Market feed READY at candle_close; false → log skip, never buy */
+  feedReady?: boolean
   indicators: {
     close: number
     smaRising: boolean
@@ -665,22 +667,46 @@ export function useAutoTrade(symbol: string) {
 
   const onTradeSignal = useCallback(async (sig: AutoTradeSignal) => {
     const s = settingsRef.current
+    const side = sig.side === 'RISE' || sig.side === 'FALL' ? sig.side : 'NO_TRADE'
+    const key = c5DedupeKey(sig.candleTime, sig.side)
+
+    // Chart/Research can show the same C5 bar later; live Auto only acts on READY closes.
+    if (sig.feedReady === false) {
+      if (!tradedSignals.current.has(`feed:${key}`)) {
+        tradedSignals.current.add(`feed:${key}`)
+        pushLog({
+          signal: side,
+          barrier: '—',
+          ok: false,
+          message: 'C5 skipped · market feed not READY at candle close (chart may still show the arrow)',
+        })
+      }
+      return
+    }
+
     const auth = authorizeC5AutoTrade(sig, {
       autoEnabled: s.autoEnabled,
       nowSec: Date.now() / 1000,
-      alreadyTraded: tradedSignals.current.has(c5DedupeKey(sig.candleTime, sig.side)),
+      alreadyTraded: tradedSignals.current.has(key),
       // Saved threshold must never weaken the four mandatory C5 requirements.
       minConfidencePct: s.minConfidencePct,
     })
     if (!auth.ok) {
-      if (auth.reason === 'expired') {
-        pushLog({
-          signal: sig.side === 'RISE' || sig.side === 'FALL' ? sig.side : 'NO_TRADE',
-          barrier: '—',
-          ok: false,
-          message: 'C5 skipped · signal expired before auto handler',
-        })
-      }
+      // Always log live C5 misses — silent skips made Research/chart signals look like Auto failures.
+      const reason =
+        auth.reason === 'auto_disabled' ? 'Auto trade OFF (Research/chart markers are not real orders)'
+          : auth.reason === 'expired' ? 'signal expired before auto handler'
+            : auth.reason === 'duplicate' ? 'duplicate signal (already handled)'
+              : auth.reason === 'wrong_strategy' ? 'wrong strategy id'
+                : auth.reason === 'not_qualified' || auth.reason === 'required_count' || auth.reason === 'required_flags'
+                  ? 'C5 4/4 requirements not met'
+                  : auth.reason
+      pushLog({
+        signal: side,
+        barrier: '—',
+        ok: false,
+        message: `C5 skipped · ${reason}`,
+      })
       return
     }
     await executeTrade(sig.side, {

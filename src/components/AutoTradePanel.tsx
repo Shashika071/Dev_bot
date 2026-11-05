@@ -213,6 +213,10 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
           <li>Chart must show <span className="text-emerald-400">READY</span> (not “Recovering / signals paused”).</li>
           <li>C5 must qualify 4/4 on a completed candle (fresh UT required); forming preview does not trade.</li>
           <li>Auto trade ON + trade socket connected; 5s entry window and cooldown may still be blocking.</li>
+          <li>
+            <span className="text-amber-200">Research C5 count ≠ real buys.</span> Research is paper-only.
+            Chart arrows are history. Real Auto only logs buys/skips here when a <span className="text-slate-300">live</span> candle just closed.
+          </li>
         </ul>
       </div>
 

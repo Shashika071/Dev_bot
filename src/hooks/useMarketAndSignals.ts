@@ -65,23 +65,28 @@ export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => vo
       }
       evaluationKey = key
 
-      // Actionable C5 only on a fresh completed-candle event — never bootstrap/reconnect/forming.
-      if (state.ready && event?.type === 'candle_close') {
+      // Fresh completed-candle C5 only — never bootstrap/reconnect/forming history redraw.
+      // Always forward qualified closes to Auto (even if not READY / past 5s) so Trade history
+      // logs the skip; chart arrows alone previously looked like "Auto failed".
+      if (event?.type === 'candle_close') {
         const ev = evaluateC5LatestClosed(state.candles)
         if (ev && ev.time === event.candle.time && ev.isQualified && (ev.final === 'RISE' || ev.final === 'FALL')) {
           const candleCloseEpoch = ev.time + 60
           const signalExpiresAt = candleCloseEpoch + SIGNAL_WINDOW_SECONDS
           const id = `${C5_STRATEGY_ID}:${ev.time}:${ev.final}`
-          if (!notified.has(id) && nowSec <= signalExpiresAt) {
+          if (!notified.has(id)) {
             notified.add(id)
-            expiresAt = signalExpiresAt
-            setLiveSignal(ev)
-            setSignalMeta({
-              candleCloseEpoch,
-              expiresAt: signalExpiresAt,
-              remainingSec: Math.max(0, signalExpiresAt - nowSec),
-            })
-            if (soundRef.current) playBeep()
+            const inWindow = state.ready && nowSec <= signalExpiresAt
+            if (inWindow) {
+              expiresAt = signalExpiresAt
+              setLiveSignal(ev)
+              setSignalMeta({
+                candleCloseEpoch,
+                expiresAt: signalExpiresAt,
+                remainingSec: Math.max(0, signalExpiresAt - nowSec),
+              })
+              if (soundRef.current) playBeep()
+            }
             const flags = ev.confirmations
             onTradeRef.current?.({
               strategyId: C5_STRATEGY_ID,
@@ -96,6 +101,7 @@ export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => vo
               requiredTotal: ev.requiredTotal ?? 4,
               flags,
               confidence: (ev.requiredPassed ?? 4) / 4,
+              feedReady: state.ready,
               indicators: {
                 close: ev.close,
                 smaRising: ev.smaRising,
