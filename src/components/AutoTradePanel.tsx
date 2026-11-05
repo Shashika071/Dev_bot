@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import type { useAutoTrade } from '../hooks/useAutoTrade'
 import { TradeHistory } from './TradeHistory'
+import { VpsAutoPanel } from './VpsAutoPanel'
 import { SIGNAL_WINDOW_SECONDS } from '../lib/deriv/marketFeed'
 
 type AutoTrade = ReturnType<typeof useAutoTrade>
@@ -222,6 +223,8 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
           </li>
         </ul>
       </div>
+
+      <VpsAutoPanel trade={trade} />
 
       <TradeHistory rows={trade.log} onClear={trade.clearTradeHistory} />
 

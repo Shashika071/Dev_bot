@@ -77,11 +77,13 @@ Data endpoint: `wss://api.derivws.com/trading/v1/options/ws/public`. [Deriv cand
 
 The **Research** tab compares 22 locked paper strategies (B0 live forming baseline, B1/C1–C6 closed confirmations, S1–S7 patterns, T1–T3 stats, O1–O2 stochastic, N1–N2 CCI/DMI) on public R_100 data. It does **not** place trades, use your API token, or change Chart/Trade settings.
 
-**Always-on after deploy (close tab OK):** redeploy with the `research` container. Edge proxies `/research-api/` to it. Then open Research → **Start 72h discovery**. You can close the browser; collection continues on the VPS.
+**Always-on after deploy (close tab OK):** redeploy with the `research` and `autotrade` containers. Edge proxies `/research-api/` and `/auto-api/`. Research continues paper collection; VPS Auto can place real C5 ONETOUCH orders after you enable it in **Trade settings → VPS Auto**.
 
 ```powershell
-docker compose -p deriv -f docker-compose.prod.yml -f docker-compose.ssl-ports.yml --env-file .env.prod up -d --build --force-recreate frontend research edge
+docker compose -p deriv -f docker-compose.prod.yml -f docker-compose.ssl-ports.yml --env-file .env.prod up -d --build --force-recreate frontend research autotrade edge
 ```
+
+**VPS Auto (real trades, browser closed OK):** after deploy, open Trade settings → **Push credentials from form** → **Enable VPS Auto**. Leave browser **Auto trade ON** unchecked to avoid double buys. Worker starts OFF for safety. Local test: `npm run autotrade:worker` then UI at `/auto-api` if proxied, or `http://127.0.0.1:8788/status`.
 
 **Browser fallback:** if the research container is down, Research still works in the open tab only (stops when the tab closes).
 

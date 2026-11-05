@@ -17,6 +17,7 @@ services:
     depends_on:
       - frontend
       - research
+      - autotrade
     ports:
       - "${DERIV_HTTPS_PORT:-8443}:8443"
     volumes:

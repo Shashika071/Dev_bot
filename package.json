@@ -13,7 +13,8 @@
     "backtest": "node scripts/backtest.mjs",
     "research:collector": "node scripts/research-collector.mjs",
     "research:report": "node scripts/research-report.mjs",
-    "research:replay": "node scripts/research-replay.mjs"
+    "research:replay": "node scripts/research-replay.mjs",
+    "autotrade:worker": "node scripts/auto-trade-worker.mjs"
   },
   "dependencies": {
     "lightweight-charts": "^5.2.1",

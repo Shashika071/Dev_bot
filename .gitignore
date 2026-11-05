@@ -8,6 +8,7 @@ dist-ssr
 coverage
 research-output
 research-data
+auto-trade-data
 *.log
 .vscode/*
 !.vscode/extensions.json
