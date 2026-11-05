@@ -59,7 +59,7 @@ export function SignalPanel({
       <div className={`rounded-xl border-2 px-3 py-5 text-center ${finalCls}`}>
         <div className="text-[10px] uppercase tracking-widest opacity-70">
           {actionable
-            ? 'C5 qualified · 4/4 required · 5-second entry window'
+            ? 'C5 qualified · 4/4 · 5-second entry window'
             : 'No actionable C5 signal'}
         </div>
         <div className="mt-1 text-3xl font-black tracking-wide">
@@ -67,7 +67,7 @@ export function SignalPanel({
         </div>
         {actionable && signalMeta && (
           <div className="mt-2 space-y-0.5 text-[10px] font-normal opacity-90">
-            <div>Candle close {new Date(signalMeta.candleCloseEpoch * 1000).toISOString().slice(11, 19)} UTC</div>
+            <div>Signal {new Date(signalMeta.candleCloseEpoch * 1000).toISOString().slice(11, 19)} UTC</div>
             <div>
               Entry window {signalMeta.remainingSec.toFixed(1)}s left
               {signalMeta.remainingSec <= 0 ? ' · expired' : ''}
@@ -76,19 +76,28 @@ export function SignalPanel({
         )}
         {actionable && (
           <div className="mt-1 text-[10px] opacity-80">
-            4/4 required conditions met — not a 100% win probability
+            4/4 met — fires on forming or close · not a 100% win probability
           </div>
         )}
       </div>
 
       {liveSetup.forming && previewSide && (
-        <div className="rounded-lg border border-dashed border-slate-600 bg-slate-900/40 p-3">
+        <div className={`rounded-lg border border-dashed p-3 ${
+          previewSide.passed >= 4
+            ? 'border-emerald-500/50 bg-emerald-500/10'
+            : 'border-slate-600 bg-slate-900/40'
+        }`}
+        >
           <div className="text-[10px] uppercase tracking-widest text-amber-200/90">
-            Forming-candle preview · not actionable
+            {previewSide.passed >= 4
+              ? 'Forming 4/4 · Auto may fire immediately'
+              : 'Forming candle · building toward 4/4'}
           </div>
           <p className="mt-1 text-[11px] text-slate-400">
             {previewSide.side} {previewSide.passed}/{previewSide.total} required on the open minute.
-            Preview never triggers sound or auto-entry.
+            {previewSide.passed >= 4
+              ? ' First 4/4 this minute triggers sound + Auto (5s to buy).'
+              : ' Trade triggers as soon as all 4 required conditions pass.'}
           </p>
         </div>
       )}
@@ -107,7 +116,7 @@ export function SignalPanel({
           <SetupCard setup={liveSetup.fall} active={liveSetup.lean === 'FALL'} />
         </div>
         <p className="mt-2 text-[10px] leading-snug text-slate-500">
-          Qualification = all 4 required conditions on a completed candle. AO is optional and informational.
+          Live Auto: first time this minute hits 4/4 (forming or close) → entry within 5s. AO optional.
         </p>
       </div>
 
@@ -136,7 +145,7 @@ export function SignalPanel({
 
       <label className="flex cursor-pointer items-center justify-center gap-2 text-sm text-slate-300">
         <input type="checkbox" checked={sound} onChange={onToggleSound} />
-        Sound on qualified C5 (completed candle only — not forming)
+        Sound on qualified C5 (first 4/4 this minute)
       </label>
     </aside>
   )

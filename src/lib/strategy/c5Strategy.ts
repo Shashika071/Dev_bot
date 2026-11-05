@@ -176,3 +176,19 @@ export function evaluateC5LatestClosed(candles: Candle[]): SignalEvaluation | nu
   const series = enrich(win)
   return evaluateC5Index(series, win.length - 1)
 }
+
+/**
+ * Live C5 on the latest bar, including a still-forming minute (treated closed for rules).
+ * Used for immediate Auto entry when 4/4 appears mid-candle.
+ */
+export function evaluateC5LiveBar(candles: Candle[]): SignalEvaluation | null {
+  if (candles.length <= WARMUP_BARS) return null
+  const window = sliceC5Window(candles)
+  const preview = window.map((c, i) =>
+    i === window.length - 1 && !c.isClosed ? { ...c, isClosed: true } : c,
+  )
+  const segment = closedSegments(preview).at(-1)
+  if (!segment || segment.length <= WARMUP_BARS) return null
+  const series = enrich(segment)
+  return evaluateC5Index(series, segment.length - 1)
+}

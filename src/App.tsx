@@ -98,15 +98,17 @@ export default function App() {
             liveSignal.final === 'FALL' ? 'bg-rose-600' : 'bg-emerald-600'
           }`}
         >
-          C5 {liveSignal.final} · 4/4 required on completed candle
+          C5 {liveSignal.final} · 4/4 · entry window
           {signalMeta ? ` · ${signalMeta.remainingSec.toFixed(0)}s left` : ''}
           {trade.autoEnabled ? ' · auto Touch firing' : ''}
         </div>
       )}
       {!liveSignal && liveSetup.forming && liveSetup.lean !== 'NONE' && (
         <div className="shrink-0 bg-slate-800 px-3 py-1 text-center text-xs font-semibold text-slate-300">
-          Forming preview · {liveSetup.lean} {liveSetup.lean === 'RISE' ? liveSetup.rise.passed : liveSetup.fall.passed}/4
-          {' '}required — not actionable
+          Forming · {liveSetup.lean} {liveSetup.lean === 'RISE' ? liveSetup.rise.passed : liveSetup.fall.passed}/4
+          {((liveSetup.lean === 'RISE' ? liveSetup.rise.passed : liveSetup.fall.passed) >= 4)
+            ? ' · waiting / already signaled'
+            : ' required'}
         </div>
       )}
 

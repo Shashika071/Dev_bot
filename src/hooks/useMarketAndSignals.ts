@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { MarketFeed, SIGNAL_WINDOW_SECONDS, type MarketState } from '../lib/deriv/marketFeed'
-import { evaluateC5All, evaluateC5LatestClosed, C5_STRATEGY_ID } from '../lib/strategy/c5Strategy'
+import {
+  evaluateC5All,
+  evaluateC5LatestClosed,
+  evaluateC5LiveBar,
+  C5_STRATEGY_ID,
+} from '../lib/strategy/c5Strategy'
 import { computeLiveSetupConfidence } from '../lib/strategy/liveConfidence'
 import type { SignalEvaluation } from '../lib/types'
 import type { AutoTradeSignal } from './useAutoTrade'
@@ -12,7 +17,8 @@ let alertAudioCtx: AudioContext | null = null
 
 function getAlertAudioCtx(): AudioContext | null {
   try {
-    const AC = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+    const AC = window.AudioContext
+      || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
     if (!AC) return null
     if (!alertAudioCtx || alertAudioCtx.state === 'closed') alertAudioCtx = new AC()
     return alertAudioCtx
@@ -30,7 +36,7 @@ export async function unlockC5AlertSound(): Promise<void> {
   } catch { /* ignore */ }
 }
 
-/** Soft beep for qualified C5 completed-candle alerts. */
+/** Soft beep for qualified C5 alerts. */
 function playBeep() {
   try {
     const ctx = getAlertAudioCtx()
@@ -46,6 +52,38 @@ function playBeep() {
       oscillator.stop(ctx.currentTime + 0.15)
     }).catch(() => { /* autoplay still blocked */ })
   } catch { /* Sound may require a browser interaction. */ }
+}
+
+function toAutoSignal(
+  ev: SignalEvaluation,
+  state: MarketState,
+  opts: { candleCloseEpoch: number; expiresAt: number; feedReady: boolean },
+): AutoTradeSignal {
+  const side = ev.final as 'RISE' | 'FALL'
+  return {
+    strategyId: C5_STRATEGY_ID,
+    side,
+    symbol: state.symbol || SYMBOL,
+    candleTime: ev.time,
+    time: ev.time,
+    candleCloseEpoch: opts.candleCloseEpoch,
+    expiresAt: opts.expiresAt,
+    isQualified: true,
+    requiredPassed: ev.requiredPassed ?? 4,
+    requiredTotal: ev.requiredTotal ?? 4,
+    flags: ev.confirmations,
+    confidence: (ev.requiredPassed ?? 4) / 4,
+    feedReady: opts.feedReady,
+    indicators: {
+      close: ev.close,
+      smaRising: ev.smaRising,
+      smaFalling: ev.smaFalling,
+      ao: ev.ao,
+      rsi: ev.rsi,
+      stDir: ev.stDir,
+      rawUt: ev.rawUt,
+    },
+  }
 }
 
 export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => void) {
@@ -72,9 +110,39 @@ export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => vo
   useEffect(() => {
     const feed = new MarketFeed()
     let evaluationKey = ''
-    let currentEvals: SignalEvaluation[] = []
     let expiresAt = 0
+    let lastTickSeen: number | null = null
     const notified = new Set<string>()
+
+    const emitQualified = (
+      state: MarketState,
+      ev: SignalEvaluation,
+      opts: { candleCloseEpoch: number; expiresAt: number; playSound: boolean },
+    ) => {
+      if (ev.final !== 'RISE' && ev.final !== 'FALL') return
+      const id = `${C5_STRATEGY_ID}:${ev.time}:${ev.final}`
+      if (notified.has(id)) return
+      notified.add(id)
+
+      const nowSec = Date.now() / 1000
+      const inWindow = state.ready && nowSec <= opts.expiresAt
+      if (inWindow) {
+        expiresAt = opts.expiresAt
+        setLiveSignal(ev)
+        setSignalMeta({
+          candleCloseEpoch: opts.candleCloseEpoch,
+          expiresAt: opts.expiresAt,
+          remainingSec: Math.max(0, opts.expiresAt - nowSec),
+        })
+        if (opts.playSound && soundRef.current) playBeep()
+      }
+      onTradeRef.current?.(toAutoSignal(ev, state, {
+        candleCloseEpoch: opts.candleCloseEpoch,
+        expiresAt: opts.expiresAt,
+        feedReady: state.ready,
+      }))
+    }
+
     const unsubscribe = feed.subscribe((state, event) => {
       setMarket({ ...state })
       const nowSec = Date.now() / 1000
@@ -89,58 +157,37 @@ export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => vo
 
       const key = `${state.ready}:${state.lastConfirmedCandleTime}:${state.candles[0]?.time}`
       if (state.ready && key !== evaluationKey) {
-        const closed = state.candles.filter((c) => c.isClosed)
-        currentEvals = evaluateC5All(closed)
-        setEvaluations(currentEvals)
+        setEvaluations(evaluateC5All(state.candles.filter((c) => c.isClosed)))
       }
       evaluationKey = key
 
-      // Fresh completed-candle C5 only — never bootstrap/reconnect/forming history redraw.
-      // Always forward qualified closes to Auto (even if not READY / past 5s) so Trade history
-      // logs the skip; chart arrows alone previously looked like "Auto failed".
+      // Completed-candle path (backup if 4/4 only appears at the close).
       if (event?.type === 'candle_close') {
         const ev = evaluateC5LatestClosed(state.candles)
-        if (ev && ev.time === event.candle.time && ev.isQualified && (ev.final === 'RISE' || ev.final === 'FALL')) {
+        if (ev && ev.time === event.candle.time && ev.isQualified) {
           const candleCloseEpoch = ev.time + 60
-          const signalExpiresAt = candleCloseEpoch + SIGNAL_WINDOW_SECONDS
-          const id = `${C5_STRATEGY_ID}:${ev.time}:${ev.final}`
-          if (!notified.has(id)) {
-            notified.add(id)
-            const inWindow = state.ready && nowSec <= signalExpiresAt
-            if (inWindow) {
-              expiresAt = signalExpiresAt
-              setLiveSignal(ev)
-              setSignalMeta({
-                candleCloseEpoch,
-                expiresAt: signalExpiresAt,
-                remainingSec: Math.max(0, signalExpiresAt - nowSec),
-              })
-              if (soundRef.current) playBeep()
-            }
-            const flags = ev.confirmations
-            onTradeRef.current?.({
-              strategyId: C5_STRATEGY_ID,
-              side: ev.final,
-              symbol: state.symbol || SYMBOL,
-              candleTime: ev.time,
-              time: ev.time,
-              candleCloseEpoch,
-              expiresAt: signalExpiresAt,
-              isQualified: true,
-              requiredPassed: ev.requiredPassed ?? 4,
-              requiredTotal: ev.requiredTotal ?? 4,
-              flags,
-              confidence: (ev.requiredPassed ?? 4) / 4,
-              feedReady: state.ready,
-              indicators: {
-                close: ev.close,
-                smaRising: ev.smaRising,
-                smaFalling: ev.smaFalling,
-                ao: ev.ao,
-                rsi: ev.rsi,
-                stDir: ev.stDir,
-                rawUt: ev.rawUt,
-              },
+          emitQualified(state, ev, {
+            candleCloseEpoch,
+            expiresAt: candleCloseEpoch + SIGNAL_WINDOW_SECONDS,
+            playSound: true,
+          })
+        }
+      }
+
+      // Immediate forming path: first time this minute hits C5 4/4 → alert + Auto.
+      // Skip the first tick after history load so reconnect bootstrap cannot buy.
+      const tickEpoch = state.lastTickEpoch
+      if (tickEpoch != null && tickEpoch !== lastTickSeen) {
+        const isFirstTick = lastTickSeen == null
+        lastTickSeen = tickEpoch
+        const last = state.candles.at(-1)
+        if (!isFirstTick && state.ready && last && !last.isClosed) {
+          const ev = evaluateC5LiveBar(state.candles)
+          if (ev && ev.time === last.time && ev.isQualified) {
+            emitQualified(state, ev, {
+              candleCloseEpoch: nowSec,
+              expiresAt: nowSec + SIGNAL_WINDOW_SECONDS,
+              playSound: true,
             })
           }
         }

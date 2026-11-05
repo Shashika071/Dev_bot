@@ -47,12 +47,14 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
 
       <p className="mb-3 max-w-4xl text-[11px] leading-snug text-slate-500">
         Auto buys Deriv <span className="text-slate-300">ONETOUCH</span> on strategy{' '}
-        <span className="text-sky-300">C5 — UT + Supertrend + SMA20 + RSI14</span> when all{' '}
-        <span className="text-slate-300">4/4 required</span> conditions pass on a{' '}
-        <span className="text-slate-300">completed</span> M1 candle (AO optional / informational).
+        <span className="text-sky-300">C5 — UT + Supertrend + SMA20 + RSI14</span> the{' '}
+        <span className="text-slate-300">first time</span> this minute hits{' '}
+        <span className="text-slate-300">4/4</span> — including on a{' '}
+        <span className="text-slate-300">forming</span> candle (AO optional). Then{' '}
+        <span className="text-slate-300">5 seconds</span> to place the order.
         Barriers: <span className="text-emerald-400">RISE → + only</span>,{' '}
-        <span className="text-rose-400">FALL → − only</span>. After the C5 migration, Auto starts OFF —
-        turn it on here when you want. Not a guaranteed winner.
+        <span className="text-rose-400">FALL → − only</span>. Auto starts OFF after migration.
+        Not a guaranteed winner.
       </p>
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -211,11 +213,11 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
         <p className="font-semibold text-slate-300">Why no trade yet?</p>
         <ul className="mt-1 list-disc space-y-0.5 pl-4">
           <li>Chart must show <span className="text-emerald-400">READY</span> (not “Recovering / signals paused”).</li>
-          <li>C5 must qualify 4/4 on a completed candle (fresh UT required); forming preview does not trade.</li>
+          <li>C5 must hit 4/4 (fresh UT required) — live Auto fires on forming or close, once per minute.</li>
           <li>Auto trade ON + trade socket connected; 5s entry window and cooldown may still be blocking.</li>
           <li>
-            <span className="text-amber-200">Research C5 count ≠ real buys.</span> Research is paper-only.
-            Chart arrows are history. Real Auto only logs buys/skips here when a <span className="text-slate-300">live</span> candle just closed.
+            <span className="text-amber-200">Research C5 is still paper / completed-candle.</span>{' '}
+            Live Auto can buy earlier on forming 4/4. Chart arrows are history markers.
           </li>
         </ul>
       </div>
