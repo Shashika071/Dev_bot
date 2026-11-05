@@ -12,6 +12,8 @@ export type ServerAutoSettings = {
   duration: number
   durationUnit: 's' | 'm' | 'h' | 'd'
   cooldownSec: number
+  /** Epoch ms — no Auto buys until this time (shared with browser when synced). */
+  cooldownUntil: number
   currency: string
   symbol: string
   /** Must be toggled ON via API — never silently true on first boot from env alone unless AUTO_TRADE_ENABLED=true */
@@ -28,6 +30,7 @@ export const DEFAULT_SERVER_AUTO_SETTINGS: ServerAutoSettings = {
   duration: 7,
   durationUnit: 'm',
   cooldownSec: 420,
+  cooldownUntil: 0,
   currency: 'USD',
   symbol: 'R_100',
   autoEnabled: false,
@@ -51,6 +54,8 @@ export function sanitizeServerAutoSettings(
         ? p.durationUnit
         : 'm',
     cooldownSec: typeof p.cooldownSec === 'number' && p.cooldownSec >= 0 ? p.cooldownSec : defaults.cooldownSec,
+    cooldownUntil:
+      typeof p.cooldownUntil === 'number' && p.cooldownUntil > Date.now() ? p.cooldownUntil : 0,
     currency: typeof p.currency === 'string' && p.currency ? p.currency : defaults.currency,
     symbol: typeof p.symbol === 'string' && p.symbol ? p.symbol : defaults.symbol,
     autoEnabled: p.autoEnabled === true,

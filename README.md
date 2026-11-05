@@ -83,7 +83,7 @@ The **Research** tab compares 22 locked paper strategies (B0 live forming baseli
 docker compose -p deriv -f docker-compose.prod.yml -f docker-compose.ssl-ports.yml --env-file .env.prod up -d --build --force-recreate frontend research autotrade edge
 ```
 
-**VPS Auto (real trades, browser closed OK):** after deploy, open Trade settings → **Push credentials from form** → **Enable VPS Auto**. Leave browser **Auto trade ON** unchecked to avoid double buys. Worker starts OFF for safety. Local test: `npm run autotrade:worker` then UI at `/auto-api` if proxied, or `http://127.0.0.1:8788/status`.
+**VPS Auto (real trades, browser closed OK):** after deploy with the `autotrade` container, turn on the normal **Auto trade ON** checkbox (same button). That starts the VPS worker with your form credentials. Close the browser — trading continues. Turn Auto OFF to stop the worker. Local test: `npm run autotrade:worker` → `http://127.0.0.1:8788/status`.
 
 **Browser fallback:** if the research container is down, Research still works in the open tab only (stops when the tab closes).
 

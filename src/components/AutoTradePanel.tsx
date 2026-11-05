@@ -55,7 +55,9 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
         <span className="text-slate-300">forming</span> candle (AO optional). Then{' '}
         <span className="text-slate-300">{SIGNAL_WINDOW_SECONDS} seconds</span> to place the order.
         Barriers: <span className="text-emerald-400">RISE → + only</span>,{' '}
-        <span className="text-rose-400">FALL → − only</span>. Auto starts OFF after migration.
+        <span className="text-rose-400">FALL → − only</span>.{' '}
+        <span className="text-sky-300">Auto trade ON</span> also starts the VPS worker so trading
+        continues after you close the browser (when autotrade is deployed).
         Not a guaranteed winner.
       </p>
 
@@ -224,7 +226,7 @@ export function AutoTradePanel({ trade }: { trade: AutoTrade }) {
         </ul>
       </div>
 
-      <VpsAutoPanel trade={trade} />
+      <VpsAutoPanel />
 
       <TradeHistory rows={trade.log} onClear={trade.clearTradeHistory} />
 

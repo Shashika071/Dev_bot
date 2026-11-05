@@ -10,6 +10,7 @@ import {
   isC5EntryExpired,
   migrateLegacyAutoPrefs,
 } from '../lib/strategy/c5AutoAuth'
+import { fetchVpsAutoHealth, syncBrowserAutoToVps } from '../lib/autoTrade/autoApi'
 
 /** C5 migration storage — legacy v1 Auto ON is never restored. */
 const STORAGE_KEY = 'v100_auto_trade_v2_c5'
@@ -454,6 +455,60 @@ export function useAutoTrade(symbol: string) {
     }
   }, [loadAccounts, connect, prefs0])
 
+  /** When VPS worker is up, it owns real Auto buys (browser stays open or closed). */
+  const vpsOwnsAutoRef = useRef(false)
+
+  const syncVpsFromBrowser = useCallback(async (on: boolean) => {
+    const s = settingsRef.current
+    try {
+      const result = await syncBrowserAutoToVps(on, {
+        appId,
+        token,
+        accountId,
+        stake: s.stake,
+        useFullStake: s.useFullStake,
+        barrierAbs: s.barrierAbs,
+        duration: s.duration,
+        durationUnit: s.durationUnit,
+        cooldownSec: s.cooldownSec,
+        cooldownUntil: Math.max(cooldownUntilRef.current, Date.now()),
+        currency: s.currency,
+      })
+      vpsOwnsAutoRef.current = !!(on && result)
+      if (on && result) {
+        pushLog({
+          signal: 'NO_TRADE',
+          barrier: '—',
+          ok: true,
+          message: 'Auto ON · VPS worker will trade (browser may close)',
+        })
+      } else if (!on && result) {
+        pushLog({
+          signal: 'NO_TRADE',
+          barrier: '—',
+          ok: true,
+          message: 'Auto OFF · VPS worker stopped',
+        })
+      } else if (on && !result) {
+        vpsOwnsAutoRef.current = false
+        pushLog({
+          signal: 'NO_TRADE',
+          barrier: '—',
+          ok: true,
+          message: 'Auto ON · browser only (VPS worker not reachable)',
+        })
+      }
+    } catch (err) {
+      vpsOwnsAutoRef.current = false
+      pushLog({
+        signal: 'NO_TRADE',
+        barrier: '—',
+        ok: false,
+        message: `VPS sync failed · ${err instanceof Error ? err.message : String(err)} · browser Auto still ${on ? 'ON' : 'OFF'}`,
+      })
+    }
+  }, [appId, token, accountId, pushLog])
+
   const setAutoEnabledSafe = useCallback((on: boolean) => {
     pendingAuto.current = on
     settingsRef.current.autoEnabled = on
@@ -464,7 +519,25 @@ export function useAutoTrade(symbol: string) {
       savePrefs({ ...cur, autoEnabled: on, wantConnected: on ? true : cur.wantConnected })
     } catch { /* ignore */ }
     if (on) setWantConnected(true)
-  }, [])
+    // Same button also starts/stops the VPS worker — no separate VPS Auto toggle.
+    void syncVpsFromBrowser(on)
+  }, [syncVpsFromBrowser])
+
+  // Keep VPS ownership flag fresh; if worker dies, browser Auto can buy again.
+  useEffect(() => {
+    let cancelled = false
+    const tick = async () => {
+      if (!autoEnabled) {
+        vpsOwnsAutoRef.current = false
+        return
+      }
+      const ok = await fetchVpsAutoHealth()
+      if (!cancelled) vpsOwnsAutoRef.current = ok
+    }
+    void tick()
+    const id = setInterval(() => { void tick() }, 5000)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [autoEnabled])
 
   const executeTrade = useCallback(async (
     side: 'RISE' | 'FALL',
@@ -689,6 +762,17 @@ export function useAutoTrade(symbol: string) {
       signal: side, barrier: '—', ok: true,
       message: `C5 signal received · ${sig.requiredPassed}/${sig.requiredTotal} required`,
     })
+
+    // When VPS worker is handling Auto, skip browser buys (avoids double orders).
+    if (s.autoEnabled && vpsOwnsAutoRef.current) {
+      logSignal({
+        signal: side,
+        barrier: '—',
+        ok: true,
+        message: 'C5 · VPS worker handles this trade (browser tab optional)',
+      })
+      return
+    }
 
     // Chart/Research can show the same C5 bar later; live Auto only acts on READY closes.
     if (sig.feedReady === false) {

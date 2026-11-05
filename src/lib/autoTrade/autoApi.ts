@@ -75,3 +75,35 @@ export async function postVpsAutoControl(
   if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`)
   return json
 }
+
+export type BrowserTradeSettingsPayload = {
+  appId: string
+  token: string
+  accountId: string
+  stake: number
+  useFullStake: boolean
+  barrierAbs: number
+  duration: number
+  durationUnit: string
+  cooldownSec: number
+  /** Epoch ms — block Auto until this time */
+  cooldownUntil?: number
+  currency: string
+}
+
+/**
+ * One Auto switch: push browser settings and enable/disable the VPS worker.
+ * Returns null if the worker is not deployed / unreachable.
+ */
+export async function syncBrowserAutoToVps(
+  on: boolean,
+  settings: BrowserTradeSettingsPayload,
+): Promise<VpsAutoStatus | null> {
+  const healthy = await fetchVpsAutoHealth()
+  if (!healthy) return null
+  await postVpsAutoControl('/control/settings', {
+    ...settings,
+    autoEnabled: false,
+  })
+  return postVpsAutoControl(on ? '/control/enable' : '/control/disable')
+}

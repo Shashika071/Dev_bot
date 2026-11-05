@@ -82,9 +82,25 @@ function loadSettingsFromDisk() {
   return sanitizeServerAutoSettings(fromEnv, { ...DEFAULT_SERVER_AUTO_SETTINGS, symbol: SYMBOL })
 }
 
+let settings = loadSettingsFromDisk()
+let cooldownUntil = settings.cooldownUntil > Date.now() ? settings.cooldownUntil : 0
+
 function saveSettings(next) {
-  settings = sanitizeServerAutoSettings(next)
+  settings = sanitizeServerAutoSettings({
+    ...next,
+    cooldownUntil: typeof next.cooldownUntil === 'number' ? next.cooldownUntil : cooldownUntil,
+  })
+  if (settings.cooldownUntil > Date.now()) cooldownUntil = settings.cooldownUntil
+  else if (!(settings.cooldownUntil > Date.now())) cooldownUntil = Math.max(0, cooldownUntil)
   writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2))
+}
+
+function setCooldownUntil(until) {
+  cooldownUntil = until
+  settings = { ...settings, cooldownUntil: until }
+  try {
+    writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2))
+  } catch { /* ignore */ }
 }
 
 function appendLog(row) {
@@ -111,7 +127,6 @@ function loadLog() {
   }
 }
 
-let settings = loadSettingsFromDisk()
 saveSettings(settings) // normalize file on disk
 let log = loadLog()
 let candles = []
@@ -119,7 +134,6 @@ let feedHealthy = false
 let tradeStatus = 'DISCONNECTED'
 let lastError = null
 let lastSignal = null
-let cooldownUntil = 0
 let tradeLock = false
 let tradingClient = null
 let reconnectTradeTimer = null
@@ -220,8 +234,9 @@ async function executeC5(side, expiresAt, dedupeKey) {
       return
     }
 
+    // Main Wait-after-trade cooldown — no further Auto buys until it ends.
     if (settings.cooldownSec > 0) {
-      cooldownUntil = Date.now() + settings.cooldownSec * 1000
+      setCooldownUntil(Date.now() + settings.cooldownSec * 1000)
     }
 
     let tradeStake = settings.stake
@@ -236,7 +251,7 @@ async function executeC5(side, expiresAt, dedupeKey) {
           ok: false,
           message: 'VPS Auto skipped · entry window expired during balance request',
         })
-        cooldownUntil = 0
+        setCooldownUntil(0)
         return
       }
       const balObj = balMsg.balance
@@ -279,10 +294,10 @@ async function executeC5(side, expiresAt, dedupeKey) {
         message: `VPS C5 AUTO · Bought ONETOUCH · stake≈${r.buyPrice ?? tradeStake}`,
       })
     }
-    if (!results.length) cooldownUntil = 0
+    if (!results.length) setCooldownUntil(0)
     lastError = null
   } catch (err) {
-    cooldownUntil = 0
+    setCooldownUntil(0)
     const msg = err instanceof Error ? err.message : String(err)
     lastError = msg
     appendLog({
