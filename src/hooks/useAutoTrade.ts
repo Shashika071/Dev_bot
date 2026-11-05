@@ -10,7 +10,7 @@ import {
   isC5EntryExpired,
   migrateLegacyAutoPrefs,
 } from '../lib/strategy/c5AutoAuth'
-import { fetchVpsAutoHealth, syncBrowserAutoToVps } from '../lib/autoTrade/autoApi'
+import { syncBrowserAutoToVps } from '../lib/autoTrade/autoApi'
 
 /** C5 migration storage — legacy v1 Auto ON is never restored. */
 const STORAGE_KEY = 'v100_auto_trade_v2_c5'
@@ -455,11 +455,25 @@ export function useAutoTrade(symbol: string) {
     }
   }, [loadAccounts, connect, prefs0])
 
-  /** When VPS worker is up, it owns real Auto buys (browser stays open or closed). */
-  const vpsOwnsAutoRef = useRef(false)
+  /**
+   * Once the VPS worker successfully takes ownership, keep it until Auto OFF.
+   * Never clear on a failed status poll — that caused browser+server double buys.
+   */
+  const VPS_OWNS_KEY = 'v100_vps_owns_auto_v1'
+  const vpsOwnsAutoRef = useRef((() => {
+    try { return localStorage.getItem(VPS_OWNS_KEY) === '1' } catch { return false }
+  })())
+
+  const setVpsOwnsAuto = useCallback((owns: boolean) => {
+    vpsOwnsAutoRef.current = owns
+    try { localStorage.setItem(VPS_OWNS_KEY, owns ? '1' : '0') } catch { /* ignore */ }
+  }, [])
 
   const syncVpsFromBrowser = useCallback(async (on: boolean) => {
     const s = settingsRef.current
+    // Block browser buys during ON handoff so a signal mid-sync cannot double with VPS.
+    const alreadyOwned = vpsOwnsAutoRef.current
+    if (on) setVpsOwnsAuto(true)
     try {
       const result = await syncBrowserAutoToVps(on, {
         appId,
@@ -474,40 +488,55 @@ export function useAutoTrade(symbol: string) {
         cooldownUntil: Math.max(cooldownUntilRef.current, Date.now()),
         currency: s.currency,
       })
-      vpsOwnsAutoRef.current = !!(on && result)
       if (on && result) {
+        setVpsOwnsAuto(true)
         pushLog({
           signal: 'NO_TRADE',
           barrier: '—',
           ok: true,
-          message: 'Auto ON · VPS worker will trade (browser may close)',
+          message: 'Auto ON · VPS worker owns trades (browser may close; no browser double-buy)',
         })
-      } else if (!on && result) {
+      } else if (!on) {
+        setVpsOwnsAuto(false)
         pushLog({
           signal: 'NO_TRADE',
           barrier: '—',
-          ok: true,
-          message: 'Auto OFF · VPS worker stopped',
+          ok: !!result,
+          message: result
+            ? 'Auto OFF · VPS worker stopped'
+            : 'Auto OFF · VPS unreachable or unauthorized (confirm worker stopped)',
         })
       } else if (on && !result) {
-        vpsOwnsAutoRef.current = false
-        pushLog({
-          signal: 'NO_TRADE',
-          barrier: '—',
-          ok: true,
-          message: 'Auto ON · browser only (VPS worker not reachable)',
-        })
+        if (alreadyOwned) {
+          // Keep ownership — never fall back to browser buys while VPS may still be live.
+          pushLog({
+            signal: 'NO_TRADE',
+            barrier: '—',
+            ok: false,
+            message: 'Auto ON · VPS sync failed · keeping VPS ownership (browser will not buy)',
+          })
+        } else {
+          // Never reached the worker — safe for browser-only Auto.
+          setVpsOwnsAuto(false)
+          pushLog({
+            signal: 'NO_TRADE',
+            barrier: '—',
+            ok: true,
+            message: 'Auto ON · browser only (VPS worker not reachable / auth missing)',
+          })
+        }
       }
     } catch (err) {
-      vpsOwnsAutoRef.current = false
+      if (on && !alreadyOwned) setVpsOwnsAuto(false)
+      if (!on) setVpsOwnsAuto(false)
       pushLog({
         signal: 'NO_TRADE',
         barrier: '—',
         ok: false,
-        message: `VPS sync failed · ${err instanceof Error ? err.message : String(err)} · browser Auto still ${on ? 'ON' : 'OFF'}`,
+        message: `VPS sync failed · ${err instanceof Error ? err.message : String(err)}`,
       })
     }
-  }, [appId, token, accountId, pushLog])
+  }, [appId, token, accountId, pushLog, setVpsOwnsAuto])
 
   const setAutoEnabledSafe = useCallback((on: boolean) => {
     pendingAuto.current = on
@@ -532,32 +561,31 @@ export function useAutoTrade(symbol: string) {
     persistCooldownUntil(untilMs)
   }, [])
 
-  // Keep VPS ownership + cooldown fresh; if worker dies, browser Auto can buy again.
+  // Sync cooldown from VPS. Never clear ownership on a failed poll (avoids double-buy).
   useEffect(() => {
     let cancelled = false
     const tick = async () => {
-      if (!autoEnabled) {
-        vpsOwnsAutoRef.current = false
-        return
-      }
+      if (!autoEnabled) return
+      if (!vpsOwnsAutoRef.current) return
       try {
         const { fetchVpsAutoStatus } = await import('../lib/autoTrade/autoApi')
         const st = await fetchVpsAutoStatus()
-        if (cancelled) return
-        vpsOwnsAutoRef.current = !!st?.ok
-        const left = st?.cooldownLeftSec ?? 0
+        if (cancelled || !st) return
+        // If server says Auto was disabled externally, release ownership.
+        if (st.autoEnabled === false) {
+          setVpsOwnsAuto(false)
+          return
+        }
+        const left = st.cooldownLeftSec ?? 0
         if (left > 0) applyRemoteCooldown(Date.now() + left * 1000)
       } catch {
-        if (!cancelled) {
-          const ok = await fetchVpsAutoHealth()
-          if (!cancelled) vpsOwnsAutoRef.current = ok
-        }
+        // Transient failure: keep vpsOwnsAutoRef true so browser does not also buy.
       }
     }
     void tick()
     const id = setInterval(() => { void tick() }, 3000)
     return () => { cancelled = true; clearInterval(id) }
-  }, [autoEnabled, applyRemoteCooldown])
+  }, [autoEnabled, applyRemoteCooldown, setVpsOwnsAuto])
 
   const executeTrade = useCallback(async (
     side: 'RISE' | 'FALL',

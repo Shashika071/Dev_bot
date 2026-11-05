@@ -25,6 +25,7 @@ services:
         VITE_SOUND_ALERTS: ${VITE_SOUND_ALERTS:-true}
         VITE_RESEARCH_API_URL: ${VITE_RESEARCH_API_URL:-/research-api}
         VITE_AUTO_API_URL: ${VITE_AUTO_API_URL:-/auto-api}
+        VITE_AUTO_API_TOKEN: ${AUTO_TRADE_API_TOKEN:-}
     restart: unless-stopped
     mem_limit: 128m
     networks:
@@ -63,6 +64,7 @@ services:
       AUTO_TRADE_TOKEN: ${AUTO_TRADE_TOKEN:-}
       AUTO_TRADE_ACCOUNT_ID: ${AUTO_TRADE_ACCOUNT_ID:-}
       AUTO_TRADE_ENABLED: ${AUTO_TRADE_ENABLED:-false}
+      AUTO_TRADE_API_TOKEN: ${AUTO_TRADE_API_TOKEN:-}
     volumes:
       - autotrade_data:/app/auto-trade-data
     networks:

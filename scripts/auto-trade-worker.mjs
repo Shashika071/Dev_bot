@@ -22,6 +22,8 @@ const HOST = process.env.AUTO_TRADE_API_HOST || '127.0.0.1'
 const SYMBOL = process.env.VITE_DERIV_SYMBOL || process.env.AUTO_TRADE_SYMBOL || 'R_100'
 const PUBLIC_WS = process.env.VITE_DERIV_PUBLIC_WS || 'wss://api.derivws.com/trading/v1/options/ws/public'
 const DATA_ROOT = process.env.AUTO_TRADE_DATA_ROOT || join(process.cwd(), 'auto-trade-data')
+const API_TOKEN = String(process.env.AUTO_TRADE_API_TOKEN || '').trim()
+const ALLOW_INSECURE = process.env.AUTO_TRADE_ALLOW_INSECURE === 'true'
 const SIGNAL_WINDOW_SECONDS = 5
 const HISTORY = 500
 const MIN_STAKE = 0.35
@@ -42,6 +44,8 @@ const {
   credentialsReady,
   publicServerAutoSettings,
 } = await vite.ssrLoadModule('/src/lib/autoTrade/serverSettings.ts')
+const { authorizeAutoApiRequest, readAutoApiTokenFromHeaders } =
+  await vite.ssrLoadModule('/src/lib/autoTrade/autoApiAuth.ts')
 const { evaluateC5LiveBar, evaluateC5LatestClosed, C5_STRATEGY_ID } =
   await vite.ssrLoadModule('/src/lib/strategy/c5Strategy.ts')
 const { authorizeC5AutoTrade, c5DedupeKey, isC5EntryExpired } =
@@ -462,13 +466,26 @@ function sendJson(res, code, obj) {
   res.end(body)
 }
 
+function requireApiAuth(req, res) {
+  const provided = readAutoApiTokenFromHeaders(req.headers)
+  const auth = authorizeAutoApiRequest(provided, API_TOKEN, ALLOW_INSECURE)
+  if (!auth.ok) {
+    sendJson(res, auth.status, { ok: false, error: auth.error })
+    return false
+  }
+  return true
+}
+
 const server = createHttpServer(async (req, res) => {
   const url = new URL(req.url || '/', `http://${HOST}:${PORT}`)
   const path = url.pathname.replace(/\/$/, '') || '/'
   try {
+    // Liveness only — no credentials or trade state.
     if (req.method === 'GET' && (path === '/health' || path === '/')) {
       return sendJson(res, 200, { ok: true, service: 'autotrade-worker' })
     }
+    if (!requireApiAuth(req, res)) return
+
     if (req.method === 'GET' && path === '/status') {
       return sendJson(res, 200, statusPayload())
     }
@@ -539,6 +556,13 @@ server.listen(PORT, HOST, () => {
   console.log(`[autotrade] API http://${HOST}:${PORT}`)
   console.log(`[autotrade] data ${DATA_ROOT}`)
   console.log(`[autotrade] Auto ${settings.autoEnabled ? 'ON' : 'OFF'} · credentials ${credentialsReady(settings) ? 'ready' : 'missing'}`)
+  if (!API_TOKEN && !ALLOW_INSECURE) {
+    console.warn('[autotrade] AUTO_TRADE_API_TOKEN is empty — status/control will return 503 until set')
+  } else if (!API_TOKEN && ALLOW_INSECURE) {
+    console.warn('[autotrade] INSECURE mode: API auth disabled (AUTO_TRADE_ALLOW_INSECURE=true)')
+  } else {
+    console.log('[autotrade] API auth token required for status/control')
+  }
   connectPublicFeed()
   if (settings.autoEnabled) void maybeConnectTrade()
 })

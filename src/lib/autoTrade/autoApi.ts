@@ -1,7 +1,10 @@
 /**
  * Browser client for the VPS always-on Auto trade worker.
  * On deploy, VITE_AUTO_API_URL=/auto-api (same-origin nginx proxy).
+ * All status/control calls require VITE_AUTO_API_TOKEN.
  */
+import { autoApiAuthHeaders, getAutoApiToken } from './autoApiAuth'
+
 function normalizeBase(raw: string | undefined): string {
   const v = (raw ?? '/auto-api').trim().replace(/\/$/, '')
   return v || '/auto-api'
@@ -45,7 +48,10 @@ export type VpsAutoStatus = {
 
 export async function fetchVpsAutoStatus(signal?: AbortSignal): Promise<VpsAutoStatus | null> {
   try {
-    const res = await fetch(`${AUTO_API_BASE}/status`, { signal })
+    const res = await fetch(`${AUTO_API_BASE}/status`, {
+      signal,
+      headers: autoApiAuthHeaders(false),
+    })
     if (!res.ok) return null
     return await res.json() as VpsAutoStatus
   } catch {
@@ -53,6 +59,7 @@ export async function fetchVpsAutoStatus(signal?: AbortSignal): Promise<VpsAutoS
   }
 }
 
+/** Public liveness only — no secrets. Does not prove control auth. */
 export async function fetchVpsAutoHealth(signal?: AbortSignal): Promise<boolean> {
   try {
     const res = await fetch(`${AUTO_API_BASE}/health`, { signal })
@@ -66,9 +73,12 @@ export async function postVpsAutoControl(
   path: string,
   body?: Record<string, unknown>,
 ): Promise<VpsAutoStatus> {
+  if (!getAutoApiToken()) {
+    throw new Error('VITE_AUTO_API_TOKEN missing — cannot control VPS Auto')
+  }
   const res = await fetch(`${AUTO_API_BASE}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: autoApiAuthHeaders(true),
     body: body ? JSON.stringify(body) : undefined,
   })
   const json = await res.json() as VpsAutoStatus
@@ -86,24 +96,28 @@ export type BrowserTradeSettingsPayload = {
   duration: number
   durationUnit: string
   cooldownSec: number
-  /** Epoch ms — block Auto until this time */
   cooldownUntil?: number
   currency: string
 }
 
 /**
  * One Auto switch: push browser settings and enable/disable the VPS worker.
- * Returns null if the worker is not deployed / unreachable.
+ * Returns null if the worker is not deployed / unreachable / unauthorized.
  */
 export async function syncBrowserAutoToVps(
   on: boolean,
   settings: BrowserTradeSettingsPayload,
 ): Promise<VpsAutoStatus | null> {
+  if (!getAutoApiToken()) return null
   const healthy = await fetchVpsAutoHealth()
   if (!healthy) return null
-  await postVpsAutoControl('/control/settings', {
-    ...settings,
-    autoEnabled: false,
-  })
-  return postVpsAutoControl(on ? '/control/enable' : '/control/disable')
+  try {
+    await postVpsAutoControl('/control/settings', {
+      ...settings,
+      autoEnabled: false,
+    })
+    return await postVpsAutoControl(on ? '/control/enable' : '/control/disable')
+  } catch {
+    return null
+  }
 }

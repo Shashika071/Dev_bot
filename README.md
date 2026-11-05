@@ -83,7 +83,7 @@ The **Research** tab compares 22 locked paper strategies (B0 live forming baseli
 docker compose -p deriv -f docker-compose.prod.yml -f docker-compose.ssl-ports.yml --env-file .env.prod up -d --build --force-recreate frontend research autotrade edge
 ```
 
-**VPS Auto (real trades, browser closed OK):** after deploy with the `autotrade` container, turn on the normal **Auto trade ON** checkbox (same button). That starts the VPS worker with your form credentials. Close the browser — trading continues. Turn Auto OFF to stop the worker. Local test: `npm run autotrade:worker` → `http://127.0.0.1:8788/status`.
+**VPS Auto (real trades, browser closed OK):** set a long random `AUTO_TRADE_API_TOKEN` in `.env.prod` (required for `/auto-api` status/control). Redeploy with the `autotrade` container, then turn on **Auto trade ON**. That starts the VPS worker with your form credentials. Close the browser — trading continues. Turn Auto OFF to stop the worker. Once VPS owns Auto, a failed status poll does **not** fall back to browser buys (prevents double orders). Local: `AUTO_TRADE_API_TOKEN=dev npm run autotrade:worker`.
 
 **Browser fallback:** if the research container is down, Research still works in the open tab only (stops when the tab closes).
 

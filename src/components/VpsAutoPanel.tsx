@@ -35,8 +35,17 @@ export function VpsAutoPanel() {
     )
   }
 
-  const on = status?.autoEnabled === true
-  const lastBuy = status?.log?.find((r) => r.ok && r.message.includes('Bought'))
+  if (!status) {
+    return (
+      <p className="mt-3 text-[11px] text-amber-300/90">
+        Server worker up but status unauthorized — set matching{' '}
+        <span className="text-slate-300">AUTO_TRADE_API_TOKEN</span> / rebuild frontend.
+      </p>
+    )
+  }
+
+  const on = status.autoEnabled === true
+  const lastBuy = status.log?.find((r) => r.ok && r.message.includes('Bought'))
 
   return (
     <p className="mt-3 text-[11px] leading-snug text-slate-500">
