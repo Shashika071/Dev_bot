@@ -1,7 +1,8 @@
 import type { Candle } from '../types'
 import { closedSegments, isValidCandle } from '../deriv/candles'
 import { DEFAULT_FILTER_CONFIG, type FilterConfig } from '../strategy/filters'
-import { enrich, evaluateIndex, WARMUP_BARS } from '../strategy/signalEngine'
+import { evaluateC5All } from '../strategy/c5Strategy'
+import { WARMUP_BARS } from '../strategy/signalEngine'
 import { wilsonInterval } from './statistics'
 
 export interface TouchObservation {
@@ -102,10 +103,10 @@ export function runTouchBacktest(
   const rows: TouchObservation[] = []
   let qualified = 0, missingOutcomes = 0, baselineBars = 0, baselineTouches = 0
   const segments = closedSegments(candles)
+  const byTime = new Map(closed.map((c) => [c.time, c]))
   for (const segment of segments) {
-    const series = enrich(segment)
     for (let i = WARMUP_BARS; i < segment.length; i++) {
-      const c = segment[i]
+      const c = segment[i]!
       const future = segment.slice(i + 1, i + 1 + minutes)
       if (future.length === minutes) {
         const high = Math.max(...future.map((bar) => bar.high))
@@ -113,15 +114,23 @@ export function runTouchBacktest(
         baselineBars++
         baselineTouches += Number(reaches(high - c.close, threshold)) + Number(reaches(c.close - low, threshold))
       }
-      // Preserve the exact shared rules without allocating an evaluation for every idle bar.
-      if (!series.utBuy[i] && !series.utSell[i]) continue
-      const ev = evaluateIndex(series, i)
-      if (ev.final !== 'RISE' && ev.final !== 'FALL') continue
-      qualified++
-      if (future.length !== minutes) { missingOutcomes++; continue }
-      const row = observeTouchWindow(c, future, ev.final, threshold, minutes)
-      if (row) rows.push(row)
     }
+  }
+  // Production C5 signals (same as live evaluateC5All / chart markers).
+  for (const ev of evaluateC5All(candles)) {
+    if (ev.final !== 'RISE' && ev.final !== 'FALL') continue
+    const c = byTime.get(ev.time)
+    if (!c) continue
+    qualified++
+    const future: Candle[] = []
+    for (let m = 1; m <= minutes; m++) {
+      const bar = byTime.get(ev.time + m * 60)
+      if (!bar) break
+      future.push(bar)
+    }
+    if (future.length !== minutes) { missingOutcomes++; continue }
+    const row = observeTouchWindow(c, future, ev.final, threshold, minutes)
+    if (row) rows.push(row)
   }
   const monthly = new Map<string, TouchObservation[]>()
   for (const row of rows) {

@@ -2,9 +2,18 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { listDerivAccounts, type DerivAccount } from '../lib/deriv/tradingAuth'
 import { DerivTradingClient } from '../lib/deriv/tradingClient'
 import { placeTouchTrades, type TouchSideMode } from '../lib/deriv/touchTrade'
-import type { ConnectionStatus, FinalSignal } from '../lib/types'
+import type { ConfirmationFlags, ConnectionStatus, FinalSignal, TrendDir } from '../lib/types'
+import { C5_STRATEGY_ID } from '../lib/strategy/c5Strategy'
+import {
+  authorizeC5AutoTrade,
+  c5DedupeKey,
+  isC5EntryExpired,
+  migrateLegacyAutoPrefs,
+} from '../lib/strategy/c5AutoAuth'
 
-const STORAGE_KEY = 'v100_auto_trade_v1'
+/** C5 migration storage — legacy v1 Auto ON is never restored. */
+const STORAGE_KEY = 'v100_auto_trade_v2_c5'
+const LEGACY_STORAGE_KEY = 'v100_auto_trade_v1'
 const HISTORY_KEY = 'v100_trade_history_v1'
 const HISTORY_MAX = 500
 
@@ -81,10 +90,30 @@ function floorStake(amount: number): number {
 }
 
 export type AutoTradeSignal = {
+  strategyId: 'C5'
   side: 'RISE' | 'FALL'
-  confidence: number
+  symbol: string
+  /** Signal candle open time (epoch sec) */
+  candleTime: number
+  /** Alias of candleTime for dedupe */
   time: number
+  candleCloseEpoch: number
+  expiresAt: number
   isQualified: boolean
+  requiredPassed: number
+  requiredTotal: number
+  flags: ConfirmationFlags
+  /** Display-only fraction requiredPassed/requiredTotal — never authorizes alone */
+  confidence: number
+  indicators: {
+    close: number
+    smaRising: boolean
+    smaFalling: boolean
+    ao: number | null
+    rsi: number | null
+    stDir: TrendDir
+    rawUt: 'BUY' | 'SELL' | 'NONE'
+  }
 }
 
 const DEFAULT_PREFS: StoredPrefs = {
@@ -99,7 +128,8 @@ const DEFAULT_PREFS: StoredPrefs = {
   mode: 'signal',
   barrierPair: 'single',
   cooldownSec: 420,
-  minConfidencePct: 80,
+  /** Unused for C5 authorization (kept for prefs UI compatibility). */
+  minConfidencePct: 100,
   autoEnabled: false,
   wantConnected: false,
   cooldownUntil: 0,
@@ -109,7 +139,33 @@ const DEFAULT_PREFS: StoredPrefs = {
 function loadPrefs(): StoredPrefs {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return { ...DEFAULT_PREFS }
+    if (!raw) {
+      // Migrate credentials from v1 but NEVER restore Auto ON after C5 cutover.
+      const legacyRaw = localStorage.getItem(LEGACY_STORAGE_KEY)
+      if (legacyRaw) {
+        const p = JSON.parse(legacyRaw) as Partial<StoredPrefs>
+        const migrated = migrateLegacyAutoPrefs(p, {
+          ...DEFAULT_PREFS,
+          appId: typeof p.appId === 'string' ? p.appId : '',
+          token: typeof p.token === 'string' ? p.token : '',
+          accountId: typeof p.accountId === 'string' ? p.accountId : '',
+          stake: typeof p.stake === 'number' && p.stake > 0 ? p.stake : 1,
+          useFullStake: p.useFullStake !== false,
+          barrierAbs: typeof p.barrierAbs === 'number' && p.barrierAbs > 0 ? p.barrierAbs : 0.05,
+          duration: typeof p.duration === 'number' && p.duration > 0 ? p.duration : 7,
+          durationUnit: p.durationUnit === 's' || p.durationUnit === 'h' || p.durationUnit === 'd' ? p.durationUnit : 'm',
+          mode: 'signal' as const,
+          barrierPair: 'single' as const,
+          cooldownSec: typeof p.cooldownSec === 'number' && p.cooldownSec >= 0 ? p.cooldownSec : 420,
+          minConfidencePct: 100,
+          cooldownUntil: 0,
+          currency: typeof p.currency === 'string' && p.currency ? p.currency : 'USD',
+        })
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated)) } catch { /* ignore */ }
+        return migrated
+      }
+      return { ...DEFAULT_PREFS }
+    }
     const p = JSON.parse(raw) as Partial<StoredPrefs>
     return {
       appId: typeof p.appId === 'string' ? p.appId : '',
@@ -405,7 +461,13 @@ export function useAutoTrade(symbol: string) {
 
   const executeTrade = useCallback(async (
     side: 'RISE' | 'FALL',
-    opts: { source: 'auto' | 'manual'; confPct?: number; dedupeKey?: string },
+    opts: {
+      source: 'auto' | 'manual'
+      confPct?: number
+      dedupeKey?: string
+      expiresAt?: number
+      strategyId?: 'C5'
+    },
   ) => {
     const s = settingsRef.current
     if (tradeLockRef.current) {
@@ -428,6 +490,16 @@ export function useAutoTrade(symbol: string) {
       return
     }
 
+    if (opts.source === 'auto' && opts.expiresAt != null && isC5EntryExpired(opts.expiresAt, Date.now() / 1000)) {
+      pushLog({
+        signal: side,
+        barrier: '—',
+        ok: false,
+        message: 'C5 skipped · entry window expired before buy prep',
+      })
+      return
+    }
+
     // Cooldown blocks both auto and manual until the wait interval ends.
     const storedUntil = readStoredCooldownUntil()
     if (storedUntil > cooldownUntilRef.current) {
@@ -444,7 +516,7 @@ export function useAutoTrade(symbol: string) {
           barrier: '—',
           ok: false,
           message: `${opts.source === 'manual' ? 'Manual' : 'Auto'} skipped · cooldown ${waitLeft}s left${
-            opts.confPct != null ? ` · conf ${opts.confPct}%` : ''
+            opts.confPct != null ? ` · ${opts.confPct}% required` : ''
           }`,
         })
       }
@@ -473,6 +545,23 @@ export function useAutoTrade(symbol: string) {
       let tradeStake = s.stake
       if (s.useFullStake) {
         const balMsg = await client.request({ balance: 1 })
+        if (opts.source === 'auto' && opts.expiresAt != null && isC5EntryExpired(opts.expiresAt, Date.now() / 1000)) {
+          pushLog({
+            signal: side,
+            barrier: '—',
+            ok: false,
+            message: 'C5 skipped · entry window expired during balance request',
+          })
+          if (s.cooldownSec > 0) {
+            cooldownUntilRef.current = 0
+            setCooldownUntil(0)
+            persistCooldownUntil(0)
+          }
+          return
+        }
+        if (client.connectionStatus !== 'CONNECTED') {
+          throw new Error('C5 skipped · trading socket disconnected during prep')
+        }
         const balObj = balMsg.balance as { balance?: number; currency?: string } | undefined
         const bal = typeof balObj?.balance === 'number' ? balObj.balance : null
         if (typeof balObj?.currency === 'string') setCurrency(balObj.currency)
@@ -491,6 +580,25 @@ export function useAutoTrade(symbol: string) {
         })
       }
 
+      // Recheck expiry and connection before starting the proposal (fail-fast).
+      if (opts.source === 'auto' && opts.expiresAt != null && isC5EntryExpired(opts.expiresAt, Date.now() / 1000)) {
+        pushLog({
+          signal: side,
+          barrier: '—',
+          ok: false,
+          message: 'C5 skipped · entry window expired before buy request',
+        })
+        if (s.cooldownSec > 0) {
+          cooldownUntilRef.current = 0
+          setCooldownUntil(0)
+          persistCooldownUntil(0)
+        }
+        return
+      }
+      if (client.connectionStatus !== 'CONNECTED') {
+        throw new Error('C5 skipped · trading socket not connected before buy')
+      }
+
       const results = await placeTouchTrades(client, {
         symbol: s.symbol,
         currency: s.currency,
@@ -498,12 +606,23 @@ export function useAutoTrade(symbol: string) {
         barrierAbs: s.barrierAbs,
         duration: s.duration,
         durationUnit: s.durationUnit,
-        // Manual buttons always map RISE→+ / FALL→− (one contract).
-        mode: opts.source === 'manual' ? 'signal' : s.mode,
-      }, side)
+        // C5 auto and manual: one contract in signal direction only (never dual).
+        mode: 'signal',
+      }, side, {
+        // Critical: recheck after proposal response — a slow quote must not buy past the window.
+        beforeBuy: () => {
+          if (opts.source === 'auto' && opts.expiresAt != null
+            && isC5EntryExpired(opts.expiresAt, Date.now() / 1000)) {
+            throw new Error('C5 skipped · entry window expired after proposal')
+          }
+          if (client.connectionStatus !== 'CONNECTED') {
+            throw new Error('C5 skipped · trading socket not connected after proposal')
+          }
+        },
+      })
 
-      const confLabel = opts.confPct != null ? ` · conf ${opts.confPct}%` : ''
-      const srcLabel = opts.source === 'manual' ? 'MANUAL · ' : ''
+      const confLabel = opts.source === 'auto' ? ' · C5 4/4' : ''
+      const srcLabel = opts.source === 'manual' ? 'MANUAL · ' : 'C5 AUTO · '
       for (const r of results) {
         pushLog({
           signal: side,
@@ -526,12 +645,18 @@ export function useAutoTrade(symbol: string) {
         setCooldownUntil(0)
         persistCooldownUntil(0)
       }
-      pushLog({
-        signal: side,
-        barrier: '—',
-        ok: false,
-        message: `${opts.source === 'manual' ? 'Manual · ' : ''}${err instanceof Error ? err.message : String(err)}`,
-      })
+      {
+        const raw = err instanceof Error ? err.message : String(err)
+        const prefixed = raw.startsWith('C5 skipped') || raw.startsWith('Manual')
+          ? raw
+          : `${opts.source === 'manual' ? 'Manual · ' : 'C5 · '}${raw}`
+        pushLog({
+          signal: side,
+          barrier: '—',
+          ok: false,
+          message: prefixed,
+        })
+      }
     } finally {
       tradeLockRef.current = false
       setBusy(false)
@@ -540,14 +665,32 @@ export function useAutoTrade(symbol: string) {
 
   const onTradeSignal = useCallback(async (sig: AutoTradeSignal) => {
     const s = settingsRef.current
-    if (!s.autoEnabled) return
-    if (sig.side !== 'RISE' && sig.side !== 'FALL') return
-    const confPct = Math.round(100 * sig.confidence)
-    if (confPct < s.minConfidencePct) return
-    const key = `${sig.time}:${sig.side}`
-    if (tradedSignals.current.has(key)) return
-    await executeTrade(sig.side, { source: 'auto', confPct, dedupeKey: key })
-  }, [executeTrade])
+    const auth = authorizeC5AutoTrade(sig, {
+      autoEnabled: s.autoEnabled,
+      nowSec: Date.now() / 1000,
+      alreadyTraded: tradedSignals.current.has(c5DedupeKey(sig.candleTime, sig.side)),
+      // Saved threshold must never weaken the four mandatory C5 requirements.
+      minConfidencePct: s.minConfidencePct,
+    })
+    if (!auth.ok) {
+      if (auth.reason === 'expired') {
+        pushLog({
+          signal: sig.side === 'RISE' || sig.side === 'FALL' ? sig.side : 'NO_TRADE',
+          barrier: '—',
+          ok: false,
+          message: 'C5 skipped · signal expired before auto handler',
+        })
+      }
+      return
+    }
+    await executeTrade(sig.side, {
+      source: 'auto',
+      confPct: 100,
+      dedupeKey: auth.dedupeKey,
+      expiresAt: sig.expiresAt,
+      strategyId: C5_STRATEGY_ID,
+    })
+  }, [executeTrade, pushLog])
 
   const placeManualTrade = useCallback(async (side: 'RISE' | 'FALL') => {
     await executeTrade(side, { source: 'manual' })

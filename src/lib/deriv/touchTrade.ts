@@ -23,6 +23,14 @@ export type TouchBuyResult = {
   raw: Record<string, unknown>
 }
 
+/**
+ * Optional gate after the proposal quote returns and immediately before buy.
+ * Throw to abort the purchase (e.g. C5 entry window expired during a slow quote).
+ */
+export type TouchBuyGate = {
+  beforeBuy?: () => void | Promise<void>
+}
+
 /** Format absolute distance as Deriv relative barrier ("+0.05" / "-0.05"). */
 export function formatTouchBarrier(abs: number, sign: 1 | -1): string {
   if (!(abs > 0) || !Number.isFinite(abs)) throw new Error('Barrier must be a positive number')
@@ -48,6 +56,7 @@ export async function buyOneTouch(
   client: DerivTradingClient,
   settings: TouchTradeSettings,
   barrier: string,
+  gate?: TouchBuyGate,
 ): Promise<TouchBuyResult> {
   const proposalMsg = await client.request({
     proposal: 1,
@@ -64,6 +73,9 @@ export async function buyOneTouch(
   const proposal = proposalMsg.proposal as Record<string, unknown> | undefined
   const proposalId = typeof proposal?.id === 'string' ? proposal.id : null
   if (!proposalId) throw new Error(`No proposal id for barrier ${barrier}`)
+
+  // Final readiness gate: after quote, before purchase (covers delayed proposals).
+  if (gate?.beforeBuy) await gate.beforeBuy()
 
   const ask = num(proposal?.ask_price) ?? settings.stake
   const buyMsg = await client.request({
@@ -86,13 +98,14 @@ export async function placeTouchTrades(
   client: DerivTradingClient,
   settings: TouchTradeSettings,
   signal: FinalSignal,
+  gate?: TouchBuyGate,
 ): Promise<TouchBuyResult[]> {
   const barriers = barriersForSignal(signal, settings)
   if (!barriers.length) return []
   const results: TouchBuyResult[] = []
   // Sequential buys avoid rate-limit / proposal races on the same socket.
   for (const barrier of barriers) {
-    results.push(await buyOneTouch(client, settings, barrier))
+    results.push(await buyOneTouch(client, settings, barrier, gate))
   }
   return results
 }

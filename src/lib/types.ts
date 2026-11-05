@@ -58,6 +58,11 @@ export interface SignalEvaluation {
   rsi: number | null
   /** Fully qualified RISE/FALL only */
   isQualified: boolean
+  /** Main strategy id when evaluated as C5 */
+  strategyId?: 'C5'
+  /** Required C5 conditions passed (UT/ST/SMA/RSI); AO excluded */
+  requiredPassed?: number
+  requiredTotal?: number
 }
 
 export interface SignalHistoryRow {

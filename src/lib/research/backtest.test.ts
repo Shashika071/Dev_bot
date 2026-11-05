@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { runBacktest } from './backtest'
+import { accepts, runBacktest, variants } from './backtest'
 import { summarize, wilsonInterval } from './statistics'
 import { fixtureCandles } from '../testFixtures'
 import { evaluateAll } from '../strategy/signalEngine'
@@ -23,7 +23,10 @@ describe('chronological research', () => {
   it('reuses actual strategy decisions and keeps outcomes inside the holdout', () => {
     const candles = fixtureCandles(4000)
     const split = candles[2800].time
-    const expected = evaluateAll(candles).filter((e) => e.isQualified && e.time >= split && e.time < candles.at(-1)!.time)
+    // Research "Current five rules" still requires AO; live C5 isQualified does not.
+    const five = variants.find((v) => v.name === 'Current five rules')!.required
+    const expected = evaluateAll(candles).filter((e) =>
+      accepts(e, five) && e.time >= split && e.time < candles.at(-1)!.time)
     expect(expected.length).toBeGreaterThan(0)
     const report = runBacktest(candles)
     const result = report.rows.find((r) => r.window === 'Holdout final 30%' && r.variant === 'Current five rules')!

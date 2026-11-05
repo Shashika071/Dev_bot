@@ -6,6 +6,7 @@ import {
   pickSideByScore,
   riseFlagsAt,
 } from '../../strategy/conditionFlags'
+import { C5_REQUIRED } from '../../strategy/c5Strategy'
 import type { StrategyContext, StrategyHit } from './types'
 
 const ALL: (keyof ConfirmationFlags)[] = ['ut', 'supertrend', 'sma', 'ao', 'rsi']
@@ -90,6 +91,7 @@ export const MASKS: Record<string, (keyof ConfirmationFlags)[]> = {
   C2: ['supertrend', 'sma', 'ao', 'rsi'],
   C3: ['ut', 'sma', 'ao', 'rsi'],
   C4: ['ut', 'supertrend', 'ao', 'rsi'],
-  C5: ['ut', 'supertrend', 'sma', 'rsi'],
+  /** Shared with live main strategy — AO not required. */
+  C5: [...C5_REQUIRED],
   C6: ['ut', 'supertrend', 'sma', 'ao'],
 }

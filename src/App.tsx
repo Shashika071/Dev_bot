@@ -33,9 +33,9 @@ export default function App() {
     } catch { /* ignore */ }
   }
   const {
-    market, evaluations, latestEval, liveSignal, readyAlert, sound, setSound,
+    market, evaluations, latestEval, liveSignal, signalMeta, sound, setSound,
     liveSetup,
-  } = useMarketAndSignals(trade.onTradeSignal, trade.minConfidencePct)
+  } = useMarketAndSignals(trade.onTradeSignal)
 
   const tradeConnected = trade.status === 'CONNECTED'
 
@@ -57,8 +57,9 @@ export default function App() {
         </nav>
 
         <div className="ml-auto flex items-center gap-3 text-xs tabular-nums">
-          <span className="text-emerald-400">RISE {Math.round(100 * liveSetup.rise.confidence)}%</span>
-          <span className="text-rose-400">FALL {Math.round(100 * liveSetup.fall.confidence)}%</span>
+          <span className="hidden text-slate-400 sm:inline">C5</span>
+          <span className="text-emerald-400">RISE {liveSetup.rise.passed}/{liveSetup.rise.total}</span>
+          <span className="text-rose-400">FALL {liveSetup.fall.passed}/{liveSetup.fall.total}</span>
           {tab === 'chart' && (
             <span
               className={
@@ -91,47 +92,23 @@ export default function App() {
         </div>
       </header>
 
-      {liveSignal && (
+      {liveSignal?.isQualified && (liveSignal.final === 'RISE' || liveSignal.final === 'FALL') && (
         <div
           className={`shrink-0 px-3 py-1 text-center text-xs font-bold text-white ${
             liveSignal.final === 'FALL' ? 'bg-rose-600' : 'bg-emerald-600'
           }`}
         >
-          FULL {liveSignal.final} · 5/5 on completed candle
+          C5 {liveSignal.final} · 4/4 required on completed candle
+          {signalMeta ? ` · ${signalMeta.remainingSec.toFixed(0)}s left` : ''}
           {trade.autoEnabled ? ' · auto Touch firing' : ''}
         </div>
       )}
-      {!liveSignal && (() => {
-        const risePct = Math.round(100 * liveSetup.rise.confidence)
-        const fallPct = Math.round(100 * liveSetup.fall.confidence)
-        const side = risePct >= fallPct ? 'RISE' as const : 'FALL' as const
-        const pct = Math.max(risePct, fallPct)
-        if (pct >= trade.minConfidencePct) {
-          return (
-            <div
-              className={`shrink-0 px-3 py-1 text-center text-xs font-semibold ${
-                side === 'FALL'
-                  ? 'bg-amber-500/20 text-amber-200'
-                  : 'bg-cyan-500/20 text-cyan-200'
-              }`}
-            >
-              PARTIAL {side} {pct}% · {pct >= 100 ? '5/5' : `${Math.round(pct / 20)}/5`} (trade level)
-              {trade.autoEnabled ? ' · auto may fire' : ''}
-            </div>
-          )
-        }
-        if (readyAlert) {
-          const near = readyAlert.near.slice(0, 2).join(' · ')
-          return (
-            <div className="shrink-0 bg-orange-600 px-3 py-1.5 text-center text-xs font-bold text-white">
-              GET READY · {readyAlert.side} {readyAlert.pct}% ({readyAlert.passed}/{readyAlert.total})
-              {' · '}alert coming — be ready
-              {near ? ` · near: ${near}` : ''}
-            </div>
-          )
-        }
-        return null
-      })()}
+      {!liveSignal && liveSetup.forming && liveSetup.lean !== 'NONE' && (
+        <div className="shrink-0 bg-slate-800 px-3 py-1 text-center text-xs font-semibold text-slate-300">
+          Forming preview · {liveSetup.lean} {liveSetup.lean === 'RISE' ? liveSetup.rise.passed : liveSetup.fall.passed}/4
+          {' '}required — not actionable
+        </div>
+      )}
 
       {tab === 'chart' ? (
         <>
@@ -148,7 +125,7 @@ export default function App() {
               eval_={latestEval}
               liveSignal={liveSignal}
               liveSetup={liveSetup}
-              minConfidencePct={trade.minConfidencePct}
+              signalMeta={signalMeta}
               sound={sound}
               onToggleSound={() => setSound((v) => !v)}
             />

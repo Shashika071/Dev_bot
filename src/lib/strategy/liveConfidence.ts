@@ -1,184 +1,132 @@
 /**
- * Real-time setup strength from the exact 5 signal conditions
- * on the current (forming) minute — not historical backtest rates.
+ * Live C5 setup preview (forming or closed) — not an order trigger by itself.
+ * Required score = UT/ST/SMA/RSI (4). AO is informational only.
  */
 import type { Candle, ConfirmationFlags } from '../types'
 import { closedSegments } from '../deriv/candles'
 import { enrich, WARMUP_BARS, type EnrichedSeries } from './signalEngine'
-import { countPassed, fallFlagsAt, riseFlagsAt } from './conditionFlags'
+import { fallFlagsAt, riseFlagsAt } from './conditionFlags'
+import { C5_CALC_WINDOW, C5_REQUIRED, evaluateC5All } from './c5Strategy'
 
 export interface SideSetup {
   side: 'RISE' | 'FALL'
-  /** 0–1 from how many of the 5 conditions are true right now */
+  /** requiredPassed / 4 — display only; never authorizes trades alone */
   confidence: number
   passed: number
   total: number
   flags: ConfirmationFlags
+  /** Required C5 checks only (excludes AO) */
+  requiredLabels: { key: keyof ConfirmationFlags; ok: boolean; text: string }[]
+  /** @deprecated alias of requiredLabels for older UI */
   labels: { key: keyof ConfirmationFlags; ok: boolean; text: string }[]
-  /** Failed conditions that are close to flipping true (for GET READY alerts). */
+  aoOptional: { ok: boolean; text: string; value: number | null }
   nearRemaining: { key: keyof ConfirmationFlags; text: string }[]
 }
 
-/** Pre-trade warning level (3/5). Trade still uses min confidence (default 80%). */
-export const READY_ALERT_PCT = 60
+export const READY_ALERT_PCT = 75
 
 export interface LiveSetupConfidence {
   ready: boolean
   candleTime: number | null
-  /** Forming minute (not yet a tradable alert until close + all 5) */
+  /** Forming minute preview — never actionable for auto-entry */
   forming: boolean
   rise: SideSetup
   fall: SideSetup
-  /** Stronger side right now */
   lean: 'RISE' | 'FALL' | 'NONE'
+  strategyId: 'C5'
+  strategyLabel: string
 }
 
-const RISE_LABELS: Record<keyof ConfirmationFlags, string> = {
-  ut: 'New UT BUY',
-  supertrend: 'Supertrend bullish',
+const RISE_REQUIRED_LABELS: Record<'ut' | 'supertrend' | 'sma' | 'rsi', string> = {
+  ut: 'Fresh UT BUY crossover',
+  supertrend: 'Supertrend bullish (ATR7×2)',
   sma: 'Close > rising SMA20',
-  ao: 'AO > 0 & rising',
-  rsi: '52 < RSI < 70',
+  rsi: '52 < RSI14 < 70',
 }
 
-const FALL_LABELS: Record<keyof ConfirmationFlags, string> = {
-  ut: 'New UT SELL',
-  supertrend: 'Supertrend bearish',
+const FALL_REQUIRED_LABELS: Record<'ut' | 'supertrend' | 'sma' | 'rsi', string> = {
+  ut: 'Fresh UT SELL crossover',
+  supertrend: 'Supertrend bearish (ATR7×2)',
   sma: 'Close < falling SMA20',
-  ao: 'AO < 0 & falling',
-  rsi: '30 < RSI < 48',
+  rsi: '30 < RSI14 < 48',
 }
 
-function nearRise(
-  flags: ConfirmationFlags,
-  close: number,
-  sma: number | null,
-  smaRising: boolean,
-  ao: number | null,
-  aoPrev: number | null,
-  rsi: number | null,
-  stDir: number,
-): SideSetup['nearRemaining'] {
-  const near: SideSetup['nearRemaining'] = []
-  if (!flags.supertrend && stDir === 0) near.push({ key: 'supertrend', text: 'Supertrend flat → bullish near' })
-  if (!flags.sma && sma != null) {
-    const dist = Math.abs(close - sma) / Math.max(Math.abs(sma), 1e-9)
-    if (close > sma && !smaRising) near.push({ key: 'sma', text: 'Close above SMA, slope nearly rising' })
-    else if (dist <= 0.0015) near.push({ key: 'sma', text: 'Price near SMA20' })
-  }
-  if (!flags.ao && ao != null && aoPrev != null) {
-    if (ao > 0 && !(ao > aoPrev)) near.push({ key: 'ao', text: 'AO above 0, almost rising' })
-    else if (ao <= 0 && ao > -Math.abs(aoPrev || 0.01) * 0.5) near.push({ key: 'ao', text: 'AO near zero (bullish)' })
-  }
-  if (!flags.rsi && rsi != null) {
-    if (rsi >= 49 && rsi <= 52) near.push({ key: 'rsi', text: `RSI ${rsi.toFixed(1)} near >52` })
-    else if (rsi >= 70 && rsi <= 73) near.push({ key: 'rsi', text: `RSI ${rsi.toFixed(1)} near <70` })
-  }
-  return near
-}
-
-function nearFall(
-  flags: ConfirmationFlags,
-  close: number,
-  sma: number | null,
-  smaFalling: boolean,
-  ao: number | null,
-  aoPrev: number | null,
-  rsi: number | null,
-  stDir: number,
-): SideSetup['nearRemaining'] {
-  const near: SideSetup['nearRemaining'] = []
-  if (!flags.supertrend && stDir === 0) near.push({ key: 'supertrend', text: 'Supertrend flat → bearish near' })
-  if (!flags.sma && sma != null) {
-    const dist = Math.abs(close - sma) / Math.max(Math.abs(sma), 1e-9)
-    if (close < sma && !smaFalling) near.push({ key: 'sma', text: 'Close below SMA, slope nearly falling' })
-    else if (dist <= 0.0015) near.push({ key: 'sma', text: 'Price near SMA20' })
-  }
-  if (!flags.ao && ao != null && aoPrev != null) {
-    if (ao < 0 && !(ao < aoPrev)) near.push({ key: 'ao', text: 'AO below 0, almost falling' })
-    else if (ao >= 0 && ao < Math.abs(aoPrev || 0.01) * 0.5) near.push({ key: 'ao', text: 'AO near zero (bearish)' })
-  }
-  if (!flags.rsi && rsi != null) {
-    if (rsi >= 48 && rsi <= 51) near.push({ key: 'rsi', text: `RSI ${rsi.toFixed(1)} near <48` })
-    else if (rsi >= 27 && rsi <= 30) near.push({ key: 'rsi', text: `RSI ${rsi.toFixed(1)} near >30` })
-  }
-  return near
-}
-
-function scoreRise(series: EnrichedSeries, i: number): SideSetup {
-  const close = series.candles[i].close
-  const sma = series.sma20[i]
-  const ao = series.ao[i]
-  const aoPrev = i > 0 ? series.ao[i - 1] : null
-  const rsi = series.rsi[i]
-  const flags = riseFlagsAt(series, i)
-  const keys = Object.keys(flags) as (keyof ConfirmationFlags)[]
-  const passed = countPassed(flags)
+function scoreSide(
+  side: 'RISE' | 'FALL',
+  series: EnrichedSeries,
+  i: number,
+): SideSetup {
+  const flags = side === 'RISE' ? riseFlagsAt(series, i) : fallFlagsAt(series, i)
+  const labelsSrc = side === 'RISE' ? RISE_REQUIRED_LABELS : FALL_REQUIRED_LABELS
+  const requiredLabels = (C5_REQUIRED as ('ut' | 'supertrend' | 'sma' | 'rsi')[]).map((key) => ({
+    key,
+    ok: flags[key],
+    text: labelsSrc[key],
+  }))
+  const passed = requiredLabels.filter((r) => r.ok).length
+  const ao = series.ao[i] ?? null
   return {
-    side: 'RISE',
-    confidence: passed / keys.length,
+    side,
+    confidence: passed / C5_REQUIRED.length,
     passed,
-    total: keys.length,
+    total: C5_REQUIRED.length,
     flags,
-    labels: keys.map((key) => ({ key, ok: flags[key], text: RISE_LABELS[key] })),
-    nearRemaining: nearRise(flags, close, sma, series.smaRising[i], ao, aoPrev, rsi, series.stDir[i]),
+    requiredLabels,
+    labels: requiredLabels,
+    aoOptional: {
+      ok: flags.ao,
+      value: ao,
+      text: side === 'RISE'
+        ? 'Optional — AO > 0 & rising (informational)'
+        : 'Optional — AO < 0 & falling (informational)',
+    },
+    nearRemaining: [],
   }
 }
 
-function scoreFall(series: EnrichedSeries, i: number): SideSetup {
-  const close = series.candles[i].close
-  const sma = series.sma20[i]
-  const ao = series.ao[i]
-  const aoPrev = i > 0 ? series.ao[i - 1] : null
-  const rsi = series.rsi[i]
-  const flags = fallFlagsAt(series, i)
-  const keys = Object.keys(flags) as (keyof ConfirmationFlags)[]
-  const passed = countPassed(flags)
+function emptySide(side: 'RISE' | 'FALL'): SideSetup {
+  const labelsSrc = side === 'RISE' ? RISE_REQUIRED_LABELS : FALL_REQUIRED_LABELS
+  const requiredLabels = (C5_REQUIRED as ('ut' | 'supertrend' | 'sma' | 'rsi')[]).map((key) => ({
+    key,
+    ok: false,
+    text: labelsSrc[key],
+  }))
   return {
-    side: 'FALL',
-    confidence: passed / keys.length,
-    passed,
-    total: keys.length,
-    flags,
-    labels: keys.map((key) => ({ key, ok: flags[key], text: FALL_LABELS[key] })),
-    nearRemaining: nearFall(flags, close, sma, series.smaFalling[i], ao, aoPrev, rsi, series.stDir[i]),
+    side,
+    confidence: 0,
+    passed: 0,
+    total: 4,
+    flags: { ut: false, supertrend: false, sma: false, ao: false, rsi: false },
+    requiredLabels,
+    labels: requiredLabels,
+    aoOptional: {
+      ok: false,
+      value: null,
+      text: 'Optional — informational',
+    },
+    nearRemaining: [],
   }
 }
 
 /**
- * Score the latest minute in real time (includes the open forming candle).
- * Alert still only fires on a completed candle with all 5 — this is preview strength.
+ * Score the latest minute in real time (includes forming candle as preview only).
+ * Does not authorize automatic trades.
  */
 export function computeLiveSetupConfidence(candles: Candle[]): LiveSetupConfidence {
   const empty: LiveSetupConfidence = {
     ready: false,
     candleTime: null,
     forming: false,
-    rise: {
-      side: 'RISE', confidence: 0, passed: 0, total: 5,
-      flags: { ut: false, supertrend: false, sma: false, ao: false, rsi: false },
-      labels: (Object.keys(RISE_LABELS) as (keyof ConfirmationFlags)[]).map((key) => ({
-        key, ok: false, text: RISE_LABELS[key],
-      })),
-      nearRemaining: [],
-    },
-    fall: {
-      side: 'FALL', confidence: 0, passed: 0, total: 5,
-      flags: { ut: false, supertrend: false, sma: false, ao: false, rsi: false },
-      labels: (Object.keys(FALL_LABELS) as (keyof ConfirmationFlags)[]).map((key) => ({
-        key, ok: false, text: FALL_LABELS[key],
-      })),
-      nearRemaining: [],
-    },
+    rise: emptySide('RISE'),
+    fall: emptySide('FALL'),
     lean: 'NONE',
+    strategyId: 'C5',
+    strategyLabel: 'C5 — UT + Supertrend + SMA20 + RSI14',
   }
 
   if (candles.length < WARMUP_BARS + 1) return empty
 
-  // Keep enough history for indicators; avoid re-scoring the full year every tick.
-  const window = candles.length > WARMUP_BARS + 200 ? candles.slice(-(WARMUP_BARS + 200)) : candles
-
-  // Treat forming candle as evaluable for live preview only.
+  const window = candles.length > C5_CALC_WINDOW ? candles.slice(-C5_CALC_WINDOW) : candles
   const preview = window.map((c, i) =>
     i === window.length - 1 && !c.isClosed ? { ...c, isClosed: true } : c,
   )
@@ -187,19 +135,21 @@ export function computeLiveSetupConfidence(candles: Candle[]): LiveSetupConfiden
 
   const series = enrich(segment)
   const i = segment.length - 1
-  const rise = scoreRise(series, i)
-  const fall = scoreFall(series, i)
+  const rise = scoreSide('RISE', series, i)
+  const fall = scoreSide('FALL', series, i)
   let lean: LiveSetupConfidence['lean'] = 'NONE'
-  if (rise.confidence > fall.confidence && rise.confidence > 0) lean = 'RISE'
-  else if (fall.confidence > rise.confidence && fall.confidence > 0) lean = 'FALL'
+  if (rise.passed > fall.passed && rise.passed > 0) lean = 'RISE'
+  else if (fall.passed > rise.passed && fall.passed > 0) lean = 'FALL'
 
   return {
     ready: true,
-    candleTime: segment[i].time,
+    candleTime: segment[i]!.time,
     forming: !candles[candles.length - 1]?.isClosed,
     rise,
     fall,
     lean,
+    strategyId: 'C5',
+    strategyLabel: 'C5 — UT + Supertrend + SMA20 + RSI14',
   }
 }
 
@@ -209,47 +159,31 @@ export type SetupChartMarker = {
   confidence: number
   passed: number
   total: number
-  /** true when all 5 conditions passed */
   full: boolean
+  strategyId: 'C5'
 }
 
-/**
- * Closed-candle setups at/above minConfidence for chart markers.
- * Scans a recent window only (perf). Full (5/5) and partial (e.g. 4/5) both included.
- */
+/** Closed-candle C5 markers (4/4 required). AO never required. */
 export function computeSetupChartMarkers(
   candles: Candle[],
-  minConfidence = 0.8,
+  _minConfidence = 1,
   maxBars = 800,
 ): SetupChartMarker[] {
   const closed = candles.filter((c) => c.isClosed)
   const window = closed.length > maxBars ? closed.slice(-maxBars) : closed
   const out: SetupChartMarker[] = []
 
-  for (const segment of closedSegments(window)) {
-    if (segment.length <= WARMUP_BARS) continue
-    const series = enrich(segment)
-    for (let i = WARMUP_BARS; i < segment.length; i++) {
-      const rise = scoreRise(series, i)
-      const fall = scoreFall(series, i)
-      const pick =
-        rise.confidence > fall.confidence
-          ? rise
-          : fall.confidence > rise.confidence
-            ? fall
-            : rise.confidence > 0
-              ? rise
-              : fall
-      if (pick.confidence + 1e-12 < minConfidence) continue
-      out.push({
-        time: series.candles[i].time,
-        side: pick.side,
-        confidence: pick.confidence,
-        passed: pick.passed,
-        total: pick.total,
-        full: pick.passed >= pick.total,
-      })
-    }
+  for (const ev of evaluateC5All(window)) {
+    if (!ev.isQualified || (ev.final !== 'RISE' && ev.final !== 'FALL')) continue
+    out.push({
+      time: ev.time,
+      side: ev.final,
+      confidence: (ev.requiredPassed ?? 4) / 4,
+      passed: ev.requiredPassed ?? 4,
+      total: 4,
+      full: true,
+      strategyId: 'C5',
+    })
   }
   return out
 }
