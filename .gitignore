@@ -3,6 +3,7 @@ dist
 dist-ssr
 *.local
 .env
+.env.prod
 .env.backup
 .DS_Store
 coverage
