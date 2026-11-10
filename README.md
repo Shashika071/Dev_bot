@@ -73,9 +73,9 @@ No parameters are optimized. Once you inspect the holdout to choose a strategy, 
 
 Data endpoint: `wss://api.derivws.com/trading/v1/options/ws/public`. [Deriv candle history API](https://developers.deriv.com/docs/data/ticks-history/). [Deriv contract descriptions](https://dsmarttrader.deriv.com/explanation).
 
-## In-app Research tab (22 strategies, paper-only)
+## In-app Research tab (8 strategies, paper-only)
 
-The **Research** tab compares 22 locked paper strategies (B0 live forming baseline, B1/C1–C6 closed confirmations, S1–S7 patterns, T1–T3 stats, O1–O2 stochastic, N1–N2 CCI/DMI) on public R_100 data. It does **not** place trades, use your API token, or change Chart/Trade settings.
+The **Research** tab compares 8 paper methods on public R_100 data: Supertrend flip (ATR7×2), UT solo (key2/ATR10), UT+EMA50, Supertrend+EMA50, Supertrend+wick, UT+wick, Supertrend+wick+EMA50, UT+wick+EMA50. It does **not** place trades, use your API token, or change Chart/Trade settings.
 
 **Always-on after deploy (close tab OK):** redeploy with the `research` and `autotrade` containers. Edge proxies `/research-api/` and `/auto-api/`. Research continues paper collection; VPS Auto can place real C5 ONETOUCH orders after you enable it in **Trade settings → VPS Auto**.
 
@@ -95,7 +95,7 @@ npm run research:report
 npm run research:replay
 ```
 
-**How to read results:** the primary result is **Touch within the seven-minute contract window**. A target hit wins immediately and stays a win even if price reverses or the feed disconnects later. A miss requires no touch through expiry with complete coverage; without that coverage and without a confirmed hit, the result is unknown. Endpoint direction at minute 7 is an optional diagnostic and never delays or cancels a Touch win. 80% means 4/5 conditions, not win probability. Compare completed-candle strategies to **B1**; **B0** uses forming-candle timing. Quoted paper P&L uses a separate entry after quote receipt. Rankings remain descriptive and never auto-enable in production.
+**How to read results:** the primary result is **Touch within the seven-minute contract window**. A target hit wins immediately and stays a win even if price reverses or the feed disconnects later. A miss requires no touch through expiry with complete coverage; without that coverage and without a confirmed hit, the result is unknown. Endpoint direction at minute 7 is an optional diagnostic and never delays or cancels a Touch win. Quoted paper P&L uses a separate entry after quote receipt. Rankings remain descriptive and never auto-enable in production.
 
 **Missing outcomes:** check Signal and Quoted H/M/U/P (hit/miss/unknown/pending). Touch win% means hits / (hits + misses). Unknown and pending Touch outcomes are shown separately. Settled P&L and cost exclude unknown and pending outcomes. A high settled win rate can be biased because quick hits survive a connection interruption while possible misses require full coverage through expiry. The matured quoted P&L range shows all unknown quoted outcomes as losses at its lower bound and wins at its upper bound. This is a sensitivity range, not a confidence interval, and excludes pending and unquoted signals. The optional 50/50 endpoint reference is not a Touch win-rate benchmark.
 

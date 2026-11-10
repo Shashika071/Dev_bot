@@ -1,24 +1,14 @@
 import type { Candle, ConfirmationFlags, Tick } from '../../types'
 import type { EnrichedSeries } from '../../strategy/signalEngine'
 
+/** Eight paper research methods (Supertrend / UT × EMA / wick combos). */
 export type StrategyId =
-  | 'B0' | 'B1'
-  | 'C1' | 'C2' | 'C3' | 'C4' | 'C5' | 'C6'
-  | 'S1' | 'S2' | 'S3' | 'S4' | 'S5' | 'S6' | 'S7'
-  | 'T1' | 'T2' | 'T3'
-  | 'O1' | 'O2'
-  | 'N1' | 'N2'
-  | 'H1'
+  | 'R1' | 'R2' | 'R3' | 'R4' | 'R5' | 'R6' | 'R7' | 'R8'
 
 export type StrategyFamily =
-  | 'baseline_live'
-  | 'baseline_closed'
-  | 'confirmation_mask'
-  | 'pattern'
-  | 'statistical'
-  | 'stochastic'
-  | 'cci_dmi'
-  | 'hybrid'
+  | 'supertrend'
+  | 'ut'
+  | 'combo'
 
 export type ResearchSide = 'RISE' | 'FALL'
 
@@ -29,7 +19,7 @@ export interface StrategyDefinition {
   version: string
   /** Human-readable exact rules */
   rules: string
-  /** Forming candle (B0) vs completed only */
+  /** Forming candle vs completed only */
   usesFormingCandle: boolean
   /** Share cooldown/qualify schedule with this id (if any) */
   pairedWith?: StrategyId
@@ -41,7 +31,7 @@ export interface StrategyContext {
   candles: Candle[]
   /** Closed-only prefix length (candles[0..closedCount-1] are closed) */
   closedCount: number
-  /** Index to evaluate (B0: last; others: last closed) */
+  /** Index to evaluate (last closed for these strategies) */
   index: number
   series: EnrichedSeries
   /** Extra series caches built by engine */

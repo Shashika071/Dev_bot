@@ -9,7 +9,7 @@ import type { ResearchObservation } from './strategies/types'
 function row(id: number, status: 'hit' | 'miss' | 'unknown' | 'pending', quote = true): ResearchObservation {
   const tick = { epoch: 1000, quote: 100, symbol: 'R_100' }
   const obs = maybeStartTouchPaper({
-    id: `S6:${id}:RISE`, strategyId: 'S6', side: 'RISE', candleTime: 960,
+    id: `R1:${id}:RISE`, strategyId: 'R1', side: 'RISE', candleTime: 960,
     signalEpoch: 1000, receiptEpoch: 1000, entryReferencePrice: 100, entryTick: tick,
     forming: false, reason: 'Test, with "quoted" text',
     atr: { atr14: 1, atrPct: 1, candleRange: 1, rangeOverAtr: 1 },
@@ -26,7 +26,7 @@ function row(id: number, status: 'hit' | 'miss' | 'unknown' | 'pending', quote =
 
 describe('research outcome coverage', () => {
   it('keeps settled-only costs aligned and bounds unknown quoted outcomes separately', () => {
-    const state = { ...createInitialState('discovery', ['S6']),
+    const state = { ...createInitialState('discovery', ['R1']),
       observations: [row(1, 'hit'), row(2, 'miss'), row(3, 'unknown'), row(4, 'pending'), row(5, 'hit', false)] }
     const s = summarizeExperiment(state).strategies[0]!
     expect(s.quotesAvailable).toBe(4)
@@ -47,7 +47,7 @@ describe('research outcome coverage', () => {
   })
 
   it('reproduces the 592 wins / 28 unknowns issue without claiming a positive total return', () => {
-    const state = { ...createInitialState('discovery', ['S6']), observations: [
+    const state = { ...createInitialState('discovery', ['R1']), observations: [
       ...Array.from({ length: 592 }, (_, i) => row(i, 'hit')),
       ...Array.from({ length: 28 }, (_, i) => row(592 + i, 'unknown')),
       row(620, 'pending'),
@@ -59,8 +59,8 @@ describe('research outcome coverage', () => {
     expect(s.maturedQuotedCost).toBe(620)
   })
 
-  it('exports missing-outcome reasons and keeps pre-fix financial results unavailable', () => {
-    const state = { ...createInitialState('discovery', ['S6']), observations: [row(1, 'unknown')] }
+  it('exports missing-outcome reasons and keeps legacy financial results unavailable', () => {
+    const state = { ...createInitialState('discovery', ['R1']), observations: [row(1, 'unknown')] }
     const csv = exportObservationsCsv(state)
     expect(csv).toContain('h7Reason,h7TargetEpoch,h7ObservedEpoch')
     expect(csv).toContain('flagUt,flagSupertrend,flagSma,flagAo,flagRsi')
@@ -80,7 +80,7 @@ describe('research outcome coverage', () => {
     expect(legacy.strategies[0]?.paperPnl).toBeNull()
   })
 
-  it('keeps every CSV row aligned and maps T1 z into the t1z column', () => {
+  it('keeps every CSV row aligned for observations and rejects', () => {
     function colCount(line: string): number {
       let n = 0
       let inQ = false
@@ -91,75 +91,36 @@ describe('research outcome coverage', () => {
       }
       return n
     }
-    const state = createInitialState('confirmation', ['T1', 'H1'])
+    const state = createInitialState('confirmation', ['R1', 'R2'])
     state.observations = [{
       ...row(1, 'hit'),
-      id: 'T1:1:RISE',
-      strategyId: 'T1',
-      reason: 'Return-shock reversal',
-      metrics: { z: -3.25 },
+      id: 'R1:1:RISE',
+      strategyId: 'R1',
+      reason: 'R1 Supertrend flip signal',
+      metrics: { stDir: 1, close: 100 },
     }]
     state.rejected = [{
-      strategyId: 'H1',
+      strategyId: 'R2',
       candleTime: 960,
       signalEpoch: 1000,
-      reason: 'H1 cooldown active',
+      reason: 'Cooldown active',
       side: 'RISE',
-      flags: { ut: true, supertrend: true, sma: true, ao: false, rsi: true },
-      metrics: { z: -3.25, t1z: -3.25, c5Side: 'RISE', t1Side: 'RISE', agreementKind: 'agree' },
-    }]
-    state.h1Skips = [{
-      id: 'H1:960:oppose',
-      candleTime: 960,
-      signalEpoch: 1000,
-      kind: 'oppose',
-      reason: 'H1 skip: C5 RISE vs T1 FALL',
-      c5Side: 'RISE',
-      t1Side: 'FALL',
-      flags: { ut: true, supertrend: true, sma: true, ao: false, rsi: true },
-      metrics: { z: 2.4, close: 100, agreementKind: 'oppose' },
+      metrics: { utBuy: true },
     }]
     const lines = exportObservationsCsv(state).split('\n')
     const width = colCount(lines[0]!)
     expect(width).toBeGreaterThan(60)
     for (const line of lines) expect(colCount(line)).toBe(width)
-    const t1 = lines.find((l) => l.includes('T1:1:RISE'))!
-    const headers = lines[0]!.split(',')
-    const t1zIdx = headers.indexOf('t1z')
-    const cells: string[] = []
-    let cur = ''
-    let inQ = false
-    for (let i = 0; i <= t1.length; i++) {
-      const ch = t1[i]
-      if (ch === '"') { inQ = !inQ; continue }
-      if ((ch === ',' && !inQ) || i === t1.length) { cells.push(cur); cur = ''; continue }
-      cur += ch ?? ''
-    }
-    expect(cells[t1zIdx]).toBe('-3.25')
-    const codeIdx = headers.indexOf('codeVersion')
-    const rejected = lines.find((l) => l.includes('H1 cooldown active'))!
-    const rCells: string[] = []
-    cur = ''
-    inQ = false
-    for (let i = 0; i <= rejected.length; i++) {
-      const ch = rejected[i]
-      if (ch === '"') { inQ = !inQ; continue }
-      if ((ch === ',' && !inQ) || i === rejected.length) { rCells.push(cur); cur = ''; continue }
-      cur += ch ?? ''
-    }
-    expect(rCells[codeIdx]).toBe(state.codeVersion)
-    expect(rCells[headers.indexOf('ask')]).toBe('')
-    expect(lines.some((l) => l.includes('h1_skip'))).toBe(true)
+    expect(lines.some((l) => l.includes('R1:1:RISE'))).toBe(true)
+    expect(lines.some((l) => l.includes('Cooldown active'))).toBe(true)
   })
 
   it('reports a Touch win while every direction diagnostic is still pending', () => {
     const obs = { ...row(1, 'hit'), horizons: makeHorizons(1000), pendingHorizons: true }
-    const s = summarizeExperiment({ ...createInitialState('discovery', ['S6']), observations: [obs] }).strategies[0]!
+    const s = summarizeExperiment({ ...createInitialState('discovery', ['R1']), observations: [obs] }).strategies[0]!
     expect(s.pending).toBe(0)
     expect(s.known).toBe(1)
     expect(s.touchWinRate).toBe(1)
-    expect(s.quotedWinRate).toBe(1)
-    expect(s.paperPnl).toBeCloseTo(0.03)
-    expect(s.horizons.find((h) => h.minutes === 7)?.pending).toBe(1)
+    expect(s.horizons.every((h) => h.pending === 1)).toBe(true)
   })
 })

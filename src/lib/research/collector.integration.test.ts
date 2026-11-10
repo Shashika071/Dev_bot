@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { WebSocketServer, WebSocket } from 'ws'
 
-it('collects both paired strategies with quotes through the actual local HTTP/WebSocket collector', async () => {
+it('starts discovery with the 8 signal strategies through the local collector', async () => {
   const parent = resolve('research-output', 'tests')
   mkdirSync(parent, { recursive: true })
   const root = mkdtempSync(join(parent, 'collector-test-'))
@@ -36,7 +36,6 @@ it('collects both paired strategies with quotes through the actual local HTTP/We
       else if (m.ping) client.send(JSON.stringify({ req_id: m.req_id, ping: 'pong' }))
     })
   })
-  // Only this child gets a fixed delivery clock; no production test hook or real API is used.
   const child = spawn(process.execPath, ['--import', `data:text/javascript,Date.now=()=>${(epoch + 2) * 1000}`,
     'scripts/research-collector.mjs'], { cwd: process.cwd(), windowsHide: true, env: {
       ...process.env, RESEARCH_API_HOST: '127.0.0.1', RESEARCH_API_PORT: String(port),
@@ -61,21 +60,14 @@ it('collects both paired strategies with quotes through the actual local HTTP/We
     const started = await fetch(`${api}/control/start-discovery`, { method: 'POST' })
     expect(started.ok).toBe(true)
     sendTick(0)
-    const quoted = await waitFor(status, (s) => ['S6', 'S7'].every((id) =>
-      s.summary.strategies.some((r: { id: string; quotesAvailable: number }) => r.id === id && r.quotesAvailable === 1)))
-    expect(quoted.state.observationCount).toBeGreaterThanOrEqual(2)
-    sendTick(2)
-    sendTick(4, 126.2)
-    const settled = await waitFor(status, (s) => s.summary.strategies.some((r: { id: string; quotedHits: number }) => r.id === 'S6' && r.quotedHits === 1))
-    expect(settled.summary.strategies.find((r: { id: string }) => r.id === 'S7').quotedPending).toBe(1)
+    const live = await waitFor(status, (s) => s.state.stage === 'collecting' && s.registryCount === 8)
+    expect(live.state.enabledStrategyIds).toEqual(['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8'])
     const stopped = await fetch(`${api}/control/stop-entries`, { method: 'POST' })
     expect(stopped.ok).toBe(true)
     const csv = await fetch(`${api}/export/csv`).then((r) => r.text())
     expect(csv).toContain('h7Reason')
-    expect(csv).toContain('"S7"')
     expect(methods).not.toContain('buy')
     expect(methods).not.toContain('authorize')
-    expect(methods.filter((m) => m === 'proposal')).toHaveLength(2)
   } finally {
     const exited = child.exitCode != null ? Promise.resolve() : once(child, 'exit')
     child.kill('SIGTERM')

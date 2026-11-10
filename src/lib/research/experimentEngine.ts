@@ -27,19 +27,8 @@ import {
   normalizeContractSettings,
   type FrozenContractSettings,
 } from './contractSettings'
-import {
-  classifyC5T1Agreement,
-  h1SkipReason,
-  snapshotMetricsFromAgreement,
-} from './strategies/hybridStrategies'
-import {
-  emptyH1Diagnostics,
-  type H1Diagnostics,
-  type H1SkipRecord,
-} from './hybridComparison'
-
 export { DEFAULT_FROZEN_CONTRACT, type FrozenContractSettings }
-export const RESEARCH_CODE_VERSION = 'v100-research-engine-2'
+export const RESEARCH_CODE_VERSION = 'v100-research-engine-3'
 export const DISCOVERY_HOURS = 72
 
 export type ExperimentStage =
@@ -68,13 +57,6 @@ export interface ExperimentState {
   b0Fired: string[]
   observations: ResearchObservation[]
   rejected: RejectedCandidate[]
-  /**
-   * Pre-cooldown C5/T1 agreement counts for H1 diagnostics (closed candles only).
-   * Optional so older saved runs / replay checkpoints without this field stay byte-stable.
-   */
-  h1Diagnostics?: H1Diagnostics
-  /** Detailed H1 skip snapshots (oppose / only-C5 / only-T1). Absent on legacy runs. */
-  h1Skips?: H1SkipRecord[]
   downtimeSec: number
   lastTickEpoch: number | null
   feedHealthy: boolean
@@ -111,7 +93,6 @@ export function createInitialState(
     b0Fired: [],
     observations: [],
     rejected: [],
-    h1Diagnostics: emptyH1Diagnostics(),
     downtimeSec: 0,
     lastTickEpoch: null,
     feedHealthy: false,
@@ -273,11 +254,6 @@ export function onTick(
     rejected: [...state.rejected],
     awaitingCloseEntry: [...state.awaitingCloseEntry],
   }
-  // Preserve absence of optional diagnostic fields for exact replay of older checkpoints.
-  if (state.h1Diagnostics != null) next.h1Diagnostics = { ...state.h1Diagnostics }
-  else delete next.h1Diagnostics
-  if (state.h1Skips != null) next.h1Skips = state.h1Skips.map((s) => ({ ...s, metrics: s.metrics ? { ...s.metrics } : undefined }))
-  else delete next.h1Skips
   // Every member of a pair sees cooldowns from BEFORE this tick's batch.
   const admissionState = { ...next, cooldowns: { ...next.cooldowns } }
 
@@ -372,11 +348,8 @@ export function onTick(
 
   // Detect newly closed candle: last closed time just completed
   const lastClosed = closed[closed.length - 1]!
-  const forming = candles[candles.length - 1] && !candles[candles.length - 1]!.isClosed
-    ? candles[candles.length - 1]!
-    : null
 
-  // Build series on window (closed + optional forming treated closed for B0)
+  // Build series on closed-candle window
   const forClosed = closed.slice(-(WARMUP_BARS + 200))
   const seriesClosed = enrich(forClosed)
   const extrasClosed = buildResearchExtras(forClosed)
@@ -396,40 +369,9 @@ export function onTick(
       feedHealthy: true,
       nowEpoch: tick.epoch,
     }
-    // Pre-cooldown C5/T1 agreement diagnostics whenever H1 is in the experiment.
-    let h1Snap: ReturnType<typeof classifyC5T1Agreement> | null = null
-    if (next.enabledStrategyIds.includes('H1')) {
-      if (next.h1Diagnostics == null) next.h1Diagnostics = emptyH1Diagnostics()
-      if (next.h1Skips == null) next.h1Skips = []
-      h1Snap = classifyC5T1Agreement(ctxBase)
-      const d = next.h1Diagnostics
-      if (h1Snap.kind === 'agree') d.agree += 1
-      else if (h1Snap.kind === 'oppose') d.oppose += 1
-      else if (h1Snap.kind === 'only_c5') d.onlyC5 += 1
-      else if (h1Snap.kind === 'only_t1') d.onlyT1 += 1
-      else d.neither += 1
-      // Persist individual skip snapshots when at least one parent qualifies (not every quiet bar).
-      if (h1Snap.kind === 'oppose' || h1Snap.kind === 'only_c5' || h1Snap.kind === 'only_t1') {
-        const flags = h1Snap.c5?.flags
-        next.h1Skips.push({
-          id: `H1:${lastClosed.time}:${h1Snap.kind}`,
-          candleTime: lastClosed.time,
-          signalEpoch: tick.epoch,
-          kind: h1Snap.kind,
-          reason: h1SkipReason(h1Snap),
-          c5Side: h1Snap.c5Side,
-          t1Side: h1Snap.t1Side,
-          flags,
-          passed: h1Snap.c5?.passed,
-          total: h1Snap.c5?.total,
-          metrics: snapshotMetricsFromAgreement(h1Snap),
-        })
-      }
-    }
     for (const def of STRATEGY_REGISTRY) {
       if (!next.enabledStrategyIds.includes(def.id)) continue
       if (def.usesFormingCandle) continue
-      // H1 evaluates raw C5/T1 conditions (not accepted parent observations).
       const hit = def.evaluate(ctxBase)
       if (!hit) continue
       const key = `${def.id}:${lastClosed.time}:${hit.side}`
@@ -438,21 +380,16 @@ export function onTick(
         continue
       }
       if (onCooldown(admissionState, def.id, tick.epoch)) {
-        const reason = def.id === 'H1' ? 'H1 cooldown active' : 'Cooldown active'
-        if (def.id === 'H1') {
-          if (next.h1Diagnostics == null) next.h1Diagnostics = emptyH1Diagnostics()
-          next.h1Diagnostics.h1CooldownBlocked += 1
-        }
         next.rejected.push({
           strategyId: def.id,
           candleTime: lastClosed.time,
           signalEpoch: tick.epoch,
-          reason,
+          reason: 'Cooldown active',
           side: hit.side,
           flags: hit.flags,
           passed: hit.passed,
           total: hit.total,
-          metrics: hit.metrics ?? (def.id === 'H1' && h1Snap ? snapshotMetricsFromAgreement(h1Snap) : undefined),
+          metrics: hit.metrics,
         })
         continue
       }
@@ -473,58 +410,6 @@ export function onTick(
         metrics: hit.metrics,
         atrCandles: candles,
       })
-    }
-  }
-
-  // B0 forming evaluation
-  if (forming && next.enabledStrategyIds.includes('B0')) {
-    const preview = [...closed, { ...forming, isClosed: true }]
-    const win = closedSegments(preview.slice(-(WARMUP_BARS + 200))).at(-1) ?? []
-    if (win.length <= WARMUP_BARS) return next
-    const series = enrich(win)
-    const extras = buildResearchExtras(win)
-    const index = win.length - 1
-    const def = getStrategy('B0')
-    const hit = def.evaluate({
-      candles: win,
-      closedCount: closed.length,
-      index,
-      series,
-      extras,
-      feedHealthy: true,
-      nowEpoch: tick.epoch,
-    })
-    if (hit) {
-      const key = `B0:${forming.time}:${hit.side}`
-      if (!next.b0Fired.includes(key) && !next.acceptedKeys.includes(key)) {
-        if (onCooldown(admissionState, 'B0', tick.epoch)) {
-          next.rejected.push({
-            strategyId: 'B0',
-            candleTime: forming.time,
-            signalEpoch: tick.epoch,
-            reason: 'Cooldown active',
-            side: hit.side,
-          })
-        } else {
-          next.b0Fired.push(key)
-          pushObservation(next, {
-            strategyId: 'B0',
-            side: hit.side,
-            candleTime: forming.time,
-            signalEpoch: tick.epoch,
-            receiptEpoch,
-            entryReferencePrice: tick.quote,
-            tick,
-            forming: true,
-            reason: hit.reason,
-            flags: hit.flags,
-            passed: hit.passed,
-            total: hit.total,
-            metrics: hit.metrics,
-            atrCandles: candles,
-          })
-        }
-      }
     }
   }
 

@@ -15,7 +15,7 @@ vi.mock('../lib/research/researchApi', () => ({
 afterEach(() => { cleanup(); sessionStorage.clear(); localStorage.clear() })
 
 it('keeps server results visible on disconnect, with aligned headers and explicit coverage', async () => {
-  const state = createInitialState('discovery', ['S6'])
+  const state = createInitialState('discovery', ['R1'])
   const summary = summarizeExperiment(state)
   const s = summary.strategies[0]!
   Object.assign(s, { candidatesAccepted: 10, touchHits: 9, touchMisses: 0, touchUnknown: 1, quotedSettled: 8, quotedHits: 8, quotedUnknown: 2,
@@ -25,7 +25,7 @@ it('keeps server results visible on disconnect, with aligned headers and explici
     contRate: 1, randomContRate: 0.5, insufficient: true })
   sessionStorage.setItem('v100_research_server_status_v1', JSON.stringify({
     experimentId: 'discovery-test', state: { ...state, observationCount: 10 },
-    summary, registryCount: 22, feedDiagnostics: { disconnects: 3, lastDisconnectReason: 'Socket closed (1006)' },
+    summary, registryCount: 8, feedDiagnostics: { disconnects: 3, lastDisconnectReason: 'Socket closed (1006)' },
   }))
   render(createElement(ResearchTab, { market: null }))
   await waitFor(() => expect(screen.getByText(/showing last saved snapshot/i)).toBeTruthy())
@@ -41,14 +41,14 @@ it('keeps server results visible on disconnect, with aligned headers and explici
 })
 
 it('does not warn about missing Touch outcomes when only endpoint diagnostics are unknown', async () => {
-  const state = createInitialState('discovery', ['S6'])
+  const state = createInitialState('discovery', ['R1'])
   const summary = summarizeExperiment(state)
   const s = summary.strategies[0]!
   Object.assign(s, { candidatesAccepted: 1, touchHits: 1, quotedHits: 1, quotesAvailable: 1,
     quotedSettled: 1, paperCost: 1, paperPnl: 0.03, paperReturn: 0.03, pnlUnavailable: false })
   Object.assign(s.horizons.find((h) => h.minutes === 7)!, { total: 1, unknown: 1 })
   sessionStorage.setItem('v100_research_server_status_v1', JSON.stringify({
-    experimentId: 'discovery-test', state: { ...state, observationCount: 1 }, summary, registryCount: 22,
+    experimentId: 'discovery-test', state: { ...state, observationCount: 1 }, summary, registryCount: 8,
   }))
   render(createElement(ResearchTab, { market: null }))
   await waitFor(() => expect(screen.getByText(/Signal Touch:/).textContent).toContain('1 hits, 0 misses, 0 unknown, 0 pending'))

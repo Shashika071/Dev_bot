@@ -13,8 +13,6 @@ import { summarizeExperiment, exportObservationsCsv, exportReportMarkdown } from
 import { STRATEGY_REGISTRY } from '../lib/research/strategies/registry'
 
 const ALL_STRATEGY_IDS = STRATEGY_REGISTRY.map((s) => s.id)
-import { FOCUSED_CONFIRMATION_IDS } from '../lib/research/focusedConfirmation'
-import { HYBRID_COMPARISON_IDS } from '../lib/research/hybridComparison'
 import { loadBrowserResearch, saveBrowserResearch, archiveBrowserResearch } from '../lib/research/browserResearchStore'
 import {
   contractWithPrefs,
@@ -132,16 +130,6 @@ export function useBrowserResearch(market: MarketState | null, enabled = true) {
     return next
   }
 
-  /** B1 baseline / C5 main candidate / C1 AO-required — separate paper experiment. */
-  function startFocusedConfirmation() {
-    return startConfirmation([...FOCUSED_CONFIRMATION_IDS])
-  }
-
-  /** C5 / T1 / H1 hybrid agreement — separate paper experiment. */
-  function startHybridComparison() {
-    return startConfirmation([...HYBRID_COMPARISON_IDS])
-  }
-
   /** Wipe observations/rejected/cooldowns and start a fresh discovery from zero. */
   function resetAll() {
     archiveBrowserResearch(stateRef.current)
@@ -195,8 +183,6 @@ export function useBrowserResearch(market: MarketState | null, enabled = true) {
     resume,
     stopEntries,
     startConfirmation,
-    startFocusedConfirmation,
-    startHybridComparison,
     resetAll,
     cooldownPrefs,
     updateCooldownPrefs,

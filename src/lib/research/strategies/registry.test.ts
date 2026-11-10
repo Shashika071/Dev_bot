@@ -1,35 +1,22 @@
 import { describe, expect, it } from 'vitest'
 import { assertRegistryComplete, STRATEGY_REGISTRY } from './registry'
-import { MASKS } from './maskStrategies'
 import { fixtureCandles } from '../../testFixtures'
 import { enrich } from '../../strategy/signalEngine'
 import { buildResearchExtras } from './buildExtras'
 import type { StrategyContext } from './types'
 
 describe('strategy registry', () => {
-  it('has exactly 23 unique IDs covering B0..N2 and H1', () => {
+  it('has exactly 8 unique R1–R8 IDs', () => {
     assertRegistryComplete()
-    expect(STRATEGY_REGISTRY.map((s) => s.id).sort()).toEqual([
-      'B0', 'B1',
-      'C1', 'C2', 'C3', 'C4', 'C5', 'C6',
-      'H1',
-      'N1', 'N2',
-      'O1', 'O2',
-      'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7',
-      'T1', 'T2', 'T3',
-    ].sort())
+    expect(STRATEGY_REGISTRY.map((s) => s.id)).toEqual([
+      'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8',
+    ])
   })
 
-  it('pairs S6/S7 and T1/T2', () => {
-    expect(STRATEGY_REGISTRY.find((s) => s.id === 'S6')!.pairedWith).toBe('S7')
-    expect(STRATEGY_REGISTRY.find((s) => s.id === 'S7')!.pairedWith).toBe('S6')
-    expect(STRATEGY_REGISTRY.find((s) => s.id === 'T1')!.pairedWith).toBe('T2')
-    expect(STRATEGY_REGISTRY.find((s) => s.id === 'T2')!.pairedWith).toBe('T1')
-  })
-
-  it('C2 mask ignores UT (does not require UT false)', () => {
-    expect(MASKS.C2).not.toContain('ut')
-    expect(MASKS.C2).toEqual(['supertrend', 'sma', 'ao', 'rsi'])
+  it('all strategies evaluate completed candles only', () => {
+    for (const s of STRATEGY_REGISTRY) {
+      expect(s.usesFormingCandle).toBe(false)
+    }
   })
 
   it('evaluators run without throwing on fixture history', () => {

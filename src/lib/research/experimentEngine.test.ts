@@ -15,8 +15,6 @@ import { RESEARCH_FORBIDDEN_METHODS } from './touchPaper'
 import { summarizeExperiment } from './summarizeExperiment'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import type { Candle } from '../types'
-
 function closedFixtures(n: number) {
   return fixtureCandles(n).map((c) => ({ ...c, isClosed: true }))
 }
@@ -68,11 +66,11 @@ describe('experiment engine', () => {
 
   it('applies a 15-minute post-win break after a Touch HIT', () => {
     const t0 = 1_700_100_000
-    let state = startDiscovery(createInitialState('confirmation', ['C5']), t0 * 1000)
+    let state = startDiscovery(createInitialState('confirmation', ['R1']), t0 * 1000)
     const tick = { epoch: t0, quote: 100, symbol: 'R_100' }
     const obs = maybeStartTouchPaper({
-      id: 'C5:1:RISE',
-      strategyId: 'C5',
+      id: 'R1:1:RISE',
+      strategyId: 'R1',
       side: 'RISE',
       candleTime: t0 - 60,
       signalEpoch: t0,
@@ -90,7 +88,7 @@ describe('experiment engine', () => {
       ...state,
       observations: [obs],
       acceptedKeys: [obs.id],
-      cooldowns: { C5: t0 + STRATEGY_COOLDOWN_SEC },
+      cooldowns: { R1: t0 + STRATEGY_COOLDOWN_SEC },
       lastTickEpoch: t0,
       feedHealthy: true,
     }
@@ -103,28 +101,27 @@ describe('experiment engine', () => {
       true,
     )
     expect(state.observations[0]?.touch?.status).toBe('hit')
-    expect(state.cooldowns['win:C5']).toBe(t0 + 30 + POST_WIN_COOLDOWN_SEC)
-    // Other strategies are not paused by C5's win.
-    expect(state.cooldowns['win:B1']).toBeUndefined()
-    expect(state.cooldowns['win:C1']).toBeUndefined()
+    expect(state.cooldowns['win:R1']).toBe(t0 + 30 + POST_WIN_COOLDOWN_SEC)
+    // Other strategies are not paused by R1's win.
+    expect(state.cooldowns['win:R2']).toBeUndefined()
+    expect(state.cooldowns['win:R3']).toBeUndefined()
   })
 
   it('keeps sibling strategies collecting while one strategy is in post-win break', () => {
     const t0 = 1_700_200_000
     let state = startDiscovery(
-      createInitialState('confirmation', ['B1', 'C5', 'C1']),
+      createInitialState('confirmation', ['R1', 'R2', 'R3']),
       t0 * 1000,
     )
     state = {
       ...state,
-      cooldowns: { 'win:C5': t0 + 500 },
+      cooldowns: { 'win:R1': t0 + 500 },
       lastTickEpoch: t0,
       feedHealthy: true,
     }
-    // C5 blocked; B1 and C1 must still be allowed by onCooldown rules.
-    expect(state.cooldowns['win:C5']).toBeGreaterThan(t0)
-    expect(state.cooldowns['win:B1']).toBeUndefined()
-    expect(state.cooldowns['win:C1']).toBeUndefined()
+    expect(state.cooldowns['win:R1']).toBeGreaterThan(t0)
+    expect(state.cooldowns['win:R2']).toBeUndefined()
+    expect(state.cooldowns['win:R3']).toBeUndefined()
   })
 
   it('marks horizons unknown when feed unhealthy', () => {
@@ -154,46 +151,20 @@ describe('experiment engine', () => {
     expect(propose.includes('buyOneTouch')).toBe(false)
   })
 
-  it('admits both S6 and S7 on the same tick (shared cooldown snapshot)', () => {
-    const start = 1_700_000_040 // minute-aligned
-    const candles: Candle[] = []
-    let px = 100
-    for (let i = 0; i < 220; i++) {
-      const open = px
-      // flat warmup, then three strict up closes at the end
-      if (i >= 217) px += 1
-      candles.push({
-        time: start + i * 60,
-        open,
-        high: Math.max(open, px) + 0.2,
-        low: Math.min(open, px) - 0.2,
-        close: px,
-        isClosed: true,
-      })
-    }
-    const last = candles[candles.length - 1]!
-    const closeEpoch = last.time + 60
-    let state = startDiscovery(createInitialState('discovery', ['S6', 'S7']), closeEpoch * 1000)
-    state = onTick(
-      state,
-      { epoch: closeEpoch, quote: last.close, symbol: 'R_100' },
-      candles,
-      closeEpoch,
-      true,
-    )
-    const ids = state.observations.map((o) => o.strategyId).sort()
-    expect(ids).toEqual(['S6', 'S7'])
-    expect(state.rejected.filter((r) => r.reason === 'Cooldown active')).toHaveLength(0)
+  it('can enable multiple strategies without shared pairing cooldowns', () => {
+    const state = createInitialState('discovery', ['R1', 'R2'])
+    expect(state.enabledStrategyIds).toEqual(['R1', 'R2'])
+    expect(state.cooldowns).toEqual({})
   })
 
   it('uses exact 50% equally weighted RISE/FALL as vs-random', () => {
     const t0 = 1_700_000_040
-    let state = startDiscovery(createInitialState('discovery', ['S6']), t0 * 1000)
+    let state = startDiscovery(createInitialState('discovery', ['R1']), t0 * 1000)
     state = {
       ...state,
       observations: [{
-        id: 'S6:1:RISE',
-        strategyId: 'S6',
+        id: 'R1:1:RISE',
+        strategyId: 'R1',
         side: 'RISE',
         candleTime: t0 - 60,
         signalEpoch: t0,
@@ -202,7 +173,7 @@ describe('experiment engine', () => {
         entryTick: { epoch: t0, quote: 100, symbol: 'R_100' },
         forming: false,
         reason: 'test',
-        atr: 1,
+        atr: { atr14: 1, atrPct: 1, candleRange: 1, rangeOverAtr: 1 },
         lastTickEpoch: t0 + 420,
         horizons: [{
           minutes: 7,
@@ -222,16 +193,12 @@ describe('experiment engine', () => {
     expect(h7.randomContRate).toBe(0.5)
   })
 
-  it('does not invent h1Diagnostics on older states during tick/interrupt', () => {
-    const legacy = createInitialState('discovery', ['S6'])
-    delete legacy.h1Diagnostics
-    delete legacy.h1Skips
+  it('does not invent removed H1 diagnostic fields on new states', () => {
+    const state = createInitialState('discovery', ['R1'])
     const tick = { epoch: 1_700_000_060, quote: 100, symbol: 'R_100' }
-    const next = onTick(legacy, tick, closedFixtures(80), tick.epoch, true)
-    expect(next.h1Diagnostics).toBeUndefined()
-    expect(next.h1Skips).toBeUndefined()
+    const next = onTick(state, tick, closedFixtures(80), tick.epoch, true)
+    expect(JSON.stringify(next).includes('h1Diagnostics')).toBe(false)
     const interrupted = interruptResearchFeed(next)
-    expect(interrupted.h1Diagnostics).toBeUndefined()
     expect(JSON.stringify(interrupted).includes('h1Diagnostics')).toBe(false)
   })
 })

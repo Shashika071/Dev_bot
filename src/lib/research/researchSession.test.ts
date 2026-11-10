@@ -4,6 +4,9 @@ import { join, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
 import type { Candle } from '../types'
 import { createInitialState, startDiscovery } from './experimentEngine'
+import { makeHorizons } from './horizons'
+import { maybeStartTouchPaper } from './touchPaper'
+import { DEFAULT_FROZEN_CONTRACT } from './contractSettings'
 import { applyResearchEvent, emptyResearchSession, type ResearchEvent } from './researchSession'
 
 const testParent = resolve('research-output', 'tests')
@@ -23,12 +26,55 @@ function sampleEvents(): ResearchEvent[] {
     time: entry - (260 - i) * 60, open: 100 + i / 10,
     high: 100.2 + i / 10, low: 99.9 + i / 10, close: 100.1 + i / 10, isClosed: true,
   }))
-  const events: ResearchEvent[] = [{ type: 'start',
-    state: startDiscovery(createInitialState('discovery', ['S6', 'S7']), entry * 1000), candles },
-  { type: 'tick', tick: { epoch: entry, quote: 126, symbol: 'R_100' }, receiptEpoch: entry + 0.1, healthy: true },
-  { type: 'quote', ids: [`S6:${entry - 60}:RISE`, `S7:${entry - 60}:FALL`],
-    quote: { ask: 1, payout: 1.03, requestEpoch: entry + 0.1, responseEpoch: entry + 0.3 } },
-  { type: 'stop_entries' }]
+  const tick = { epoch: entry, quote: 126, symbol: 'R_100' }
+  const r1 = maybeStartTouchPaper({
+    id: `R1:${entry - 60}:RISE`,
+    strategyId: 'R1',
+    side: 'RISE',
+    candleTime: entry - 60,
+    signalEpoch: entry,
+    receiptEpoch: entry,
+    entryReferencePrice: 126,
+    entryTick: tick,
+    forming: false,
+    reason: 'seed R1',
+    atr: { atr14: 1, atrPct: 1, candleRange: 1, rangeOverAtr: 1 },
+    lastTickEpoch: entry,
+    horizons: makeHorizons(entry),
+    pendingHorizons: true,
+  }, DEFAULT_FROZEN_CONTRACT, tick)
+  const r2 = maybeStartTouchPaper({
+    id: `R2:${entry - 60}:FALL`,
+    strategyId: 'R2',
+    side: 'FALL',
+    candleTime: entry - 60,
+    signalEpoch: entry,
+    receiptEpoch: entry,
+    entryReferencePrice: 126,
+    entryTick: tick,
+    forming: false,
+    reason: 'seed R2',
+    atr: { atr14: 1, atrPct: 1, candleRange: 1, rangeOverAtr: 1 },
+    lastTickEpoch: entry,
+    horizons: makeHorizons(entry),
+    pendingHorizons: true,
+  }, DEFAULT_FROZEN_CONTRACT, tick)
+
+  let state = startDiscovery(createInitialState('discovery', ['R1', 'R2']), entry * 1000)
+  state = {
+    ...state,
+    observations: [r1, r2],
+    acceptedKeys: [r1.id, r2.id],
+    lastTickEpoch: entry,
+    feedHealthy: true,
+  }
+
+  const events: ResearchEvent[] = [
+    { type: 'start', state, candles },
+    { type: 'quote', ids: [r1.id, r2.id],
+      quote: { ask: 1, payout: 1.03, requestEpoch: entry + 0.1, responseEpoch: entry + 0.3 } },
+    { type: 'stop_entries' },
+  ]
   for (let offset = 2; offset <= 424; offset += 2) {
     events.push({ type: 'tick', tick: { epoch: entry + offset,
       quote: offset < 4 ? 126 : 126.2, symbol: 'R_100' }, receiptEpoch: entry + offset + 0.1, healthy: true })
@@ -38,7 +84,7 @@ function sampleEvents(): ResearchEvent[] {
 }
 
 describe('research persistence and replay', () => {
-  it('replays history, paired entries, quotes and settlement exactly across a checkpoint', async () => {
+  it('replays history, quotes and settlement exactly across a checkpoint', async () => {
     vi.stubEnv('RESEARCH_DATA_ROOT', root)
     const store = await import('./experimentStore')
     const id = 'discovery-2026-11-02T00-00-00-000Z'
@@ -53,7 +99,7 @@ describe('research persistence and replay', () => {
     let resumed = checkpoint
     for (const event of store.readJournal(id).slice(checkpoint.sequence)) resumed = applyResearchEvent(resumed, event)
     expect(JSON.parse(JSON.stringify(resumed))).toEqual(JSON.parse(JSON.stringify(session)))
-    expect(session.state.observations.map((o) => o.strategyId)).toEqual(['S6', 'S7'])
+    expect(session.state.observations.map((o) => o.strategyId)).toEqual(['R1', 'R2'])
     expect(session.state.observations.map((o) => o.touch?.quotedPath?.status)).toEqual(['hit', 'miss'])
     expect(session.state.stage).toBe('completed')
     store.appendSessionSnapshot(id, session)
