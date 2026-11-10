@@ -25,6 +25,22 @@ function touchRate(hits: number, misses: number) {
   return hits + misses > 0 ? `${pct(hits / (hits + misses))}${hits + misses < 20 ? '*' : ''}` : '—'
 }
 
+function ifNoTouchLabel(side: StrategySummary['rise'] | undefined) {
+  if (!side?.ifNoTouchPrefer) return '—'
+  if (side.ifNoTouchPrefer === 'same_side') return `same (${side.missContinuation}c/${side.missReversal}r)`
+  if (side.ifNoTouchPrefer === 'opposite_side') return `opposite (${side.missContinuation}c/${side.missReversal}r)`
+  if (side.ifNoTouchPrefer === 'flat') return `flat (${side.missUnchanged})`
+  return 'unknown'
+}
+
+function bestPickLine(
+  label: string,
+  pick: { id: string; name: string; winRate: number; hits: number; misses: number } | null | undefined,
+) {
+  if (!pick) return `${label}: —`
+  return `${label}: ${pick.id} ${pick.name} · ${pct(pick.winRate)} (${pick.hits}H/${pick.misses}M)`
+}
+
 function ago(epoch: number | null | undefined) {
   if (epoch == null) return '—'
   return new Date(epoch * 1000).toISOString().replace('.000Z', 'Z')
@@ -530,8 +546,20 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
               It excludes pending and unquoted signals and is not a confidence interval.</p>
           </div>
         )}
+        {observationCount > 0 && (
+          <div className="mt-3 rounded border border-emerald-800/50 bg-emerald-950/20 p-3 text-[11px] text-emerald-100">
+            <div className="font-medium text-emerald-200">Best Touch picks so far (paper only — not live advice)</div>
+            <p className="mt-1">{bestPickLine('Overall', (summary as { bestOverall?: Parameters<typeof bestPickLine>[1] } | undefined)?.bestOverall)}</p>
+            <p>{bestPickLine('Best RISE', (summary as { bestRise?: Parameters<typeof bestPickLine>[1] } | undefined)?.bestRise)}</p>
+            <p>{bestPickLine('Best FALL', (summary as { bestFall?: Parameters<typeof bestPickLine>[1] } | undefined)?.bestFall)}</p>
+            <p className="mt-2 text-emerald-100/80">
+              If no touch: table shows whether minute-7 price more often stayed on the <span className="text-emerald-200">same</span> side
+              or went <span className="text-emerald-200">opposite</span> (c=continuation, r=reversal). Diagnostic only — miss stays a miss.
+            </p>
+          </div>
+        )}
         <div className="mt-2 overflow-auto">
-          <table className="w-full min-w-[1600px] text-left text-[11px]">
+          <table className="w-full min-w-[1900px] text-left text-[11px]">
             <thead className="text-slate-500">
               <tr>
                 <th className="px-2 py-1">ID</th>
@@ -539,6 +567,12 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
                 <th className="px-2 py-1">n</th>
                 <th className="px-2 py-1">Signal Touch win%</th>
                 <th className="px-2 py-1">Signal H/M/U/P</th>
+                <th className="px-2 py-1">RISE win%</th>
+                <th className="px-2 py-1">RISE H/M</th>
+                <th className="px-2 py-1">If no touch (RISE)</th>
+                <th className="px-2 py-1">FALL win%</th>
+                <th className="px-2 py-1">FALL H/M</th>
+                <th className="px-2 py-1">If no touch (FALL)</th>
                 <th className="px-2 py-1">Quote cov%</th>
                 <th className="px-2 py-1">Sig/day</th>
                 <th className="px-2 py-1">Median TTT</th>
@@ -567,6 +601,12 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
                       <td className="px-2 py-1 tabular-nums">{s.candidatesAccepted}</td>
                       <td className="px-2 py-1 tabular-nums">{touchRate(s.touchHits, s.touchMisses)}</td>
                       <td className="px-2 py-1 tabular-nums">{s.touchHits}/{s.touchMisses}/{s.touchUnknown}/{s.touchPending ?? 0}</td>
+                      <td className="px-2 py-1 tabular-nums">{touchRate(s.rise?.hits ?? 0, s.rise?.misses ?? 0)}</td>
+                      <td className="px-2 py-1 tabular-nums">{s.rise?.hits ?? 0}/{s.rise?.misses ?? 0}</td>
+                      <td className="px-2 py-1">{ifNoTouchLabel(s.rise)}</td>
+                      <td className="px-2 py-1 tabular-nums">{touchRate(s.fall?.hits ?? 0, s.fall?.misses ?? 0)}</td>
+                      <td className="px-2 py-1 tabular-nums">{s.fall?.hits ?? 0}/{s.fall?.misses ?? 0}</td>
+                      <td className="px-2 py-1">{ifNoTouchLabel(s.fall)}</td>
                       <td className="px-2 py-1 tabular-nums">{pct(s.quoteCoverageRate)}</td>
                       <td className="px-2 py-1 tabular-nums">{s.signalsPerDay == null ? '—' : s.signalsPerDay.toFixed(2)}</td>
                       <td className="px-2 py-1 tabular-nums">{s.medianTimeToTouchSec == null ? '—' : `${Math.round(s.medianTimeToTouchSec)}s`}</td>
@@ -580,9 +620,10 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
                     </tr>
                     {expanded === s.id && (
                       <tr className="border-t border-slate-900/50 bg-[#121820]">
-                        <td colSpan={15} className="px-3 py-2 text-[11px] text-slate-400 whitespace-pre-wrap">{s.rules}{'\n\n'}
+                        <td colSpan={21} className="px-3 py-2 text-[11px] text-slate-400 whitespace-pre-wrap">{s.rules}{'\n\n'}
                           Quoted results include only simulations entered after quote receipt. Unquoted observations do not contribute to P&amp;L.
                           Signal-reference Touch and quoted-paper Touch are counted separately; endpoint unknowns never mix into Touch H/M/U/P.
+                          If no touch: same = price continued that side by minute 7; opposite = price reversed.
                           <details className="mt-2">
                             <summary className="cursor-pointer">Optional endpoint diagnostics (not Touch wins)</summary>
                             <p className="mt-1">Direction at minute 7: {h7?.continuation ?? 0} continuation / {h7?.reversal ?? 0} reversal / {h7?.unchanged ?? 0} unchanged / {h7?.unknown ?? 0} unknown / {h7?.pending ?? 0} pending.</p>

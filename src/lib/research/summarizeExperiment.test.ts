@@ -123,4 +123,37 @@ describe('research outcome coverage', () => {
     expect(s.touchWinRate).toBe(1)
     expect(s.horizons.every((h) => h.pending === 1)).toBe(true)
   })
+
+  it('ranks best overall / RISE / FALL and labels if-no-touch preference', () => {
+    const riseHit = { ...row(1, 'hit'), side: 'RISE' as const, id: 'R1:1:RISE' }
+    const riseMiss = {
+      ...row(2, 'miss'),
+      side: 'RISE' as const,
+      id: 'R1:2:RISE',
+      horizons: makeHorizons(1000).map((h) => (
+        h.minutes === 7 ? { ...h, status: 'reversal' as const } : { ...h, status: 'unknown' as const }
+      )),
+    }
+    const fallHit = { ...row(3, 'hit'), side: 'FALL' as const, id: 'R2:3:FALL', strategyId: 'R2' as const }
+    const fallMiss = {
+      ...row(4, 'miss'),
+      side: 'FALL' as const,
+      id: 'R2:4:FALL',
+      strategyId: 'R2' as const,
+      horizons: makeHorizons(1000).map((h) => (
+        h.minutes === 7 ? { ...h, status: 'continuation' as const } : { ...h, status: 'unknown' as const }
+      )),
+    }
+    const summary = summarizeExperiment({
+      ...createInitialState('discovery', ['R1', 'R2']),
+      observations: [riseHit, riseMiss, fallHit, fallMiss],
+    })
+    expect(summary.bestOverall?.id).toBeTruthy()
+    expect(summary.bestRise?.id).toBe('R1')
+    expect(summary.bestFall?.id).toBe('R2')
+    const r1 = summary.strategies.find((s) => s.id === 'R1')!
+    expect(r1.rise.ifNoTouchPrefer).toBe('opposite_side')
+    const r2 = summary.strategies.find((s) => s.id === 'R2')!
+    expect(r2.fall.ifNoTouchPrefer).toBe('same_side')
+  })
 })

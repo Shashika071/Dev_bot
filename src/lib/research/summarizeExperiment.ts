@@ -23,6 +23,29 @@ export interface StrategyHorizonSummary {
   insufficient: boolean
 }
 
+export interface SideTouchStats {
+  hits: number
+  misses: number
+  unknown: number
+  pending: number
+  winRate: number | null
+  /** Among misses with a known 7m endpoint: continuation = same side moved; reversal = opposite. */
+  missContinuation: number
+  missReversal: number
+  missUnchanged: number
+  /** If no touch, which way price more often went by minute 7 (same / opposite / flat / unknown). */
+  ifNoTouchPrefer: 'same_side' | 'opposite_side' | 'flat' | 'unknown' | null
+}
+
+export interface BestPick {
+  id: StrategyId
+  name: string
+  winRate: number
+  hits: number
+  misses: number
+  known: number
+}
+
 export interface StrategySummary {
   id: StrategyId
   name: string
@@ -37,6 +60,8 @@ export interface StrategySummary {
   touchUnknown: number
   touchPending: number
   touchWinRate: number | null
+  rise: SideTouchStats
+  fall: SideTouchStats
   quoteCoverageRate: number | null
   signalsPerDay: number | null
   /** Median seconds from signal epoch to first touch among reference hits. */
@@ -70,6 +95,68 @@ function median(xs: number[]): number | null {
   return sorted.length % 2 === 0
     ? (sorted[mid - 1]! + sorted[mid]!) / 2
     : sorted[mid]!
+}
+
+function sideTouchStats(rows: ResearchObservation[]): SideTouchStats {
+  const hits = rows.filter((r) => r.touch?.status === 'hit').length
+  const misses = rows.filter((r) => r.touch?.status === 'miss').length
+  const unknown = rows.filter((r) => r.touch?.status === 'unknown').length
+  const pending = rows.filter((r) => r.touch?.status === 'pending').length
+  let missContinuation = 0
+  let missReversal = 0
+  let missUnchanged = 0
+  for (const r of rows) {
+    if (r.touch?.status !== 'miss') continue
+    const h7 = r.horizons.find((h) => h.minutes === 7)
+    if (!h7) continue
+    if (h7.status === 'continuation') missContinuation += 1
+    else if (h7.status === 'reversal') missReversal += 1
+    else if (h7.status === 'unchanged') missUnchanged += 1
+  }
+  const dirN = missContinuation + missReversal + missUnchanged
+  let ifNoTouchPrefer: SideTouchStats['ifNoTouchPrefer'] = null
+  if (dirN > 0) {
+    if (missContinuation > missReversal && missContinuation >= missUnchanged) ifNoTouchPrefer = 'same_side'
+    else if (missReversal > missContinuation && missReversal >= missUnchanged) ifNoTouchPrefer = 'opposite_side'
+    else if (missUnchanged > missContinuation && missUnchanged > missReversal) ifNoTouchPrefer = 'flat'
+    else if (missContinuation === missReversal && missContinuation > missUnchanged) ifNoTouchPrefer = 'unknown'
+    else ifNoTouchPrefer = 'unknown'
+  } else if (misses > 0) {
+    ifNoTouchPrefer = 'unknown'
+  }
+  return {
+    hits,
+    misses,
+    unknown,
+    pending,
+    winRate: hits + misses > 0 ? hits / (hits + misses) : null,
+    missContinuation,
+    missReversal,
+    missUnchanged,
+    ifNoTouchPrefer,
+  }
+}
+
+function pickBest(
+  strategies: StrategySummary[],
+  rateOf: (s: StrategySummary) => { winRate: number | null; hits: number; misses: number },
+): BestPick | null {
+  let best: BestPick | null = null
+  for (const s of strategies) {
+    const { winRate, hits, misses } = rateOf(s)
+    const known = hits + misses
+    if (winRate == null || known <= 0) continue
+    const cand: BestPick = { id: s.id, name: s.name, winRate, hits, misses, known }
+    if (
+      !best
+      || cand.winRate > best.winRate
+      || (cand.winRate === best.winRate && cand.hits > best.hits)
+      || (cand.winRate === best.winRate && cand.hits === best.hits && cand.known > best.known)
+    ) {
+      best = cand
+    }
+  }
+  return best
 }
 
 function horizonSummary(rows: ResearchObservation[], minutes: HorizonMin): StrategyHorizonSummary {
@@ -126,6 +213,10 @@ export function summarizeExperiment(state: ExperimentState): {
   observationCount: number
   rejectedCount: number
   strategies: StrategySummary[]
+  /** Descriptive Touch leaders — not live trading advice. */
+  bestOverall: BestPick | null
+  bestRise: BestPick | null
+  bestFall: BestPick | null
   notes: string[]
 } {
   const byId = new Map<StrategyId, ResearchObservation[]>()
@@ -149,6 +240,8 @@ export function summarizeExperiment(state: ExperimentState): {
       const touchHits = rows.filter((r) => r.touch?.status === 'hit').length
       const touchMisses = rows.filter((r) => r.touch?.status === 'miss').length
       const touchUnknown = rows.filter((r) => r.touch?.status === 'unknown').length
+      const rise = sideTouchStats(rows.filter((r) => r.side === 'RISE'))
+      const fall = sideTouchStats(rows.filter((r) => r.side === 'FALL'))
       const quoted = rows.filter((r) => r.touch?.quoteAvailable)
       const hitTimes = rows
         .filter((r) => r.touch?.status === 'hit' && r.touch.firstTouchEpoch != null)
@@ -182,6 +275,8 @@ export function summarizeExperiment(state: ExperimentState): {
         touchUnknown,
         touchPending: rows.filter((r) => r.touch?.status === 'pending').length,
         touchWinRate: touchHits + touchMisses > 0 ? touchHits / (touchHits + touchMisses) : null,
+        rise,
+        fall,
         quoteCoverageRate: rows.length ? quoted.length / rows.length : null,
         signalsPerDay: runSpanSec != null && rows.length
           ? rows.length / (runSpanSec / 86400)
@@ -204,6 +299,16 @@ export function summarizeExperiment(state: ExperimentState): {
       }
     })
 
+  const bestOverall = pickBest(strategies, (s) => ({
+    winRate: s.touchWinRate, hits: s.touchHits, misses: s.touchMisses,
+  }))
+  const bestRise = pickBest(strategies, (s) => ({
+    winRate: s.rise.winRate, hits: s.rise.hits, misses: s.rise.misses,
+  }))
+  const bestFall = pickBest(strategies, (s) => ({
+    winRate: s.fall.winRate, hits: s.fall.hits, misses: s.fall.misses,
+  }))
+
   return {
     generatedAt: Math.floor(Date.now() / 1000),
     codeVersion: state.codeVersion,
@@ -220,12 +325,17 @@ export function summarizeExperiment(state: ExperimentState): {
     observationCount: state.observations.length,
     rejectedCount: state.rejected.length,
     strategies,
+    bestOverall,
+    bestRise,
+    bestFall,
     notes: [
       ...(state.codeVersion !== RESEARCH_CODE_VERSION ? ['Legacy / older research engine run: preserved read-only. Start a new discovery with the current 8 signal strategies.'] : []),
       'Paper comparison of 8 methods: Supertrend flip, UT solo, and combos with EMA50 / candle wicks.',
       'R1 uses Supertrend ATR7×2 flip signals as entries. R2 uses UT Bot Alerts (key2/ATR10) alone.',
       'EMA filter = close vs rising/falling EMA50. Wick = pin-bar rejection (wick ≥2× body).',
       'Rankings are descriptive/exploratory; observations can overlap and correlate.',
+      'Best overall / best RISE / best FALL are ranked by Touch win% (hits / hits+misses). Misses lower the rate.',
+      'If no touch: for that strategy+side, minute-7 endpoint says whether price more often continued (same side) or reversed (opposite side). Diagnostic only — not a Touch win.',
       'Do not label a small sample or a 100% observed Touch win rate as a proven best strategy.',
       'Never display an empty Touch sample as 100%.',
       'Research entry/post-win intervals are separate from the live Trade cooldown and freeze at experiment start.',
@@ -331,6 +441,14 @@ export function exportObservationsCsv(state: ExperimentState): string {
   return lines.join('\n')
 }
 
+function noTouchLabel(side: SideTouchStats): string {
+  if (side.ifNoTouchPrefer === 'same_side') return `same (${side.missContinuation}c/${side.missReversal}r)`
+  if (side.ifNoTouchPrefer === 'opposite_side') return `opposite (${side.missContinuation}c/${side.missReversal}r)`
+  if (side.ifNoTouchPrefer === 'flat') return `flat (${side.missUnchanged})`
+  if (side.ifNoTouchPrefer === 'unknown') return 'unknown'
+  return '—'
+}
+
 export function exportReportMarkdown(summary: ReturnType<typeof summarizeExperiment>): string {
   const lines = [
     '# Research experiment report',
@@ -346,18 +464,32 @@ export function exportReportMarkdown(summary: ReturnType<typeof summarizeExperim
     '',
     'Eight paper methods: R1 Supertrend flip · R2 UT solo · R3 UT+EMA · R4 ST+EMA · R5 ST+wick · R6 UT+wick · R7 ST+wick+EMA · R8 UT+wick+EMA.',
     '',
-    '| ID | Name | n | Signal Touch win% | Signal H/M/U/P | Quote cov% | Sig/day | Median TTT s | Quotes/n | Quoted Touch win% | Quoted H/M/U/P | Settled cost | Settled P&L | Settled return | Matured quoted P&L range |',
-    '|----|------|---|-------------------|----------------|------------|---------|--------------|----------|-------------------|----------------|--------------|-------------|----------------|--------------------------|',
+    '## Best Touch picks (descriptive)',
+    '',
+    summary.bestOverall
+      ? `Overall: ${summary.bestOverall.id} ${summary.bestOverall.name} — ${(100 * summary.bestOverall.winRate).toFixed(1)}% (${summary.bestOverall.hits}H/${summary.bestOverall.misses}M)`
+      : 'Overall: —',
+    summary.bestRise
+      ? `Best RISE: ${summary.bestRise.id} — ${(100 * summary.bestRise.winRate).toFixed(1)}% (${summary.bestRise.hits}H/${summary.bestRise.misses}M)`
+      : 'Best RISE: —',
+    summary.bestFall
+      ? `Best FALL: ${summary.bestFall.id} — ${(100 * summary.bestFall.winRate).toFixed(1)}% (${summary.bestFall.hits}H/${summary.bestFall.misses}M)`
+      : 'Best FALL: —',
+    '',
+    '| ID | Name | n | Signal Touch win% | Signal H/M/U/P | RISE win% | RISE H/M | If no touch (RISE) | FALL win% | FALL H/M | If no touch (FALL) | Quote cov% | Sig/day | Median TTT s | Quotes/n | Quoted Touch win% | Quoted H/M/U/P | Settled cost | Settled P&L | Settled return | Matured quoted P&L range |',
+    '|----|------|---|-------------------|----------------|-----------|----------|-------------------|-----------|----------|--------------------|------------|---------|--------------|----------|-------------------|----------------|--------------|-------------|----------------|--------------------------|',
   ]
   for (const s of summary.strategies) {
     const touchRate = s.touchWinRate == null ? '—' : `${(100 * s.touchWinRate).toFixed(1)}%`
+    const riseRate = s.rise.winRate == null ? '—' : `${(100 * s.rise.winRate).toFixed(1)}%`
+    const fallRate = s.fall.winRate == null ? '—' : `${(100 * s.fall.winRate).toFixed(1)}%`
     const quotedRate = s.quotedWinRate == null ? '—' : `${(100 * s.quotedWinRate).toFixed(1)}%`
     const pnl = s.pnlUnavailable ? 'UNAVAILABLE' : (s.paperPnl?.toFixed(4) ?? '—')
     const cov = s.quoteCoverageRate == null ? '—' : `${(100 * s.quoteCoverageRate).toFixed(0)}%`
     const spd = s.signalsPerDay == null ? '—' : s.signalsPerDay.toFixed(2)
     const ttt = s.medianTimeToTouchSec == null ? '—' : s.medianTimeToTouchSec.toFixed(0)
     lines.push(
-      `| ${s.id} | ${s.name} | ${s.candidatesAccepted} | ${touchRate} | ${s.touchHits}/${s.touchMisses}/${s.touchUnknown}/${s.touchPending} | ${cov} | ${spd} | ${ttt} | ${s.quotesAvailable}/${s.candidatesAccepted} | ${quotedRate} | ${s.quotedHits}/${s.quotedMisses}/${s.quotedUnknown}/${s.quotedPending} | ${s.paperCost?.toFixed(4) ?? '—'} | ${pnl} | ${s.paperReturn == null ? '—' : (s.paperReturn * 100).toFixed(2) + '%'} | ${s.paperPnlLower?.toFixed(4) ?? '—'} to ${s.paperPnlUpper?.toFixed(4) ?? '—'} |`,
+      `| ${s.id} | ${s.name} | ${s.candidatesAccepted} | ${touchRate} | ${s.touchHits}/${s.touchMisses}/${s.touchUnknown}/${s.touchPending} | ${riseRate} | ${s.rise.hits}/${s.rise.misses} | ${noTouchLabel(s.rise)} | ${fallRate} | ${s.fall.hits}/${s.fall.misses} | ${noTouchLabel(s.fall)} | ${cov} | ${spd} | ${ttt} | ${s.quotesAvailable}/${s.candidatesAccepted} | ${quotedRate} | ${s.quotedHits}/${s.quotedMisses}/${s.quotedUnknown}/${s.quotedPending} | ${s.paperCost?.toFixed(4) ?? '—'} | ${pnl} | ${s.paperReturn == null ? '—' : (s.paperReturn * 100).toFixed(2) + '%'} | ${s.paperPnlLower?.toFixed(4) ?? '—'} to ${s.paperPnlUpper?.toFixed(4) ?? '—'} |`,
     )
   }
   lines.push('', '## Optional endpoint diagnostics', '',
