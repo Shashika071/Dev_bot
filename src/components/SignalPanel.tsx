@@ -145,7 +145,7 @@ export function SignalPanel({
 
       <label className="flex cursor-pointer items-center justify-center gap-2 text-sm text-slate-300">
         <input type="checkbox" checked={sound} onChange={onToggleSound} />
-        Sound on qualified C5 (first 4/4 this minute)
+        Sound on (4/4 + 3/4 near-miss) — click once to unlock browser audio
       </label>
     </aside>
   )

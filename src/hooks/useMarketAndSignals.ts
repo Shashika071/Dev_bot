@@ -12,12 +12,11 @@ import type { AutoTradeSignal } from './useAutoTrade'
 
 const SYMBOL = import.meta.env.VITE_DERIV_SYMBOL || 'R_100'
 
-/** Main C5 alert clip (served from /public/sounds). */
-const ALERT_MAIN_URL = `${import.meta.env.BASE_URL}sounds/alert-main.mp3`
+/** Main C5 alert clip (copied into dist as /sounds/alert-main.mp3). */
+const ALERT_MAIN_URL = '/sounds/alert-main.mp3'
 
-/** Shared AudioContext — browsers block sound until unlocked by a user click. */
+/** Shared AudioContext — browsers block sound until unlocked by a user gesture. */
 let alertAudioCtx: AudioContext | null = null
-let alertMainAudio: HTMLAudioElement | null = null
 
 function getAlertAudioCtx(): AudioContext | null {
   try {
@@ -31,16 +30,7 @@ function getAlertAudioCtx(): AudioContext | null {
   }
 }
 
-function getAlertMainAudio(): HTMLAudioElement {
-  if (!alertMainAudio) {
-    alertMainAudio = new Audio(ALERT_MAIN_URL)
-    alertMainAudio.preload = 'auto'
-    alertMainAudio.volume = 0.7
-  }
-  return alertMainAudio
-}
-
-/** Call from a click (sound checkbox) so later C5 alerts are allowed to play. */
+/** Call from a click (sound checkbox / any page click) so later alerts can play. */
 export async function unlockC5AlertSound(): Promise<void> {
   const ctx = getAlertAudioCtx()
   if (ctx) {
@@ -48,18 +38,16 @@ export async function unlockC5AlertSound(): Promise<void> {
       if (ctx.state === 'suspended') await ctx.resume()
     } catch { /* ignore */ }
   }
-  // Prime the MP3 element after a user gesture so later play() is allowed.
+  // Prime the MP3 after a user gesture so later play() is allowed.
   try {
-    const audio = getAlertMainAudio()
+    const audio = new Audio(ALERT_MAIN_URL)
     audio.muted = true
     await audio.play()
     audio.pause()
-    audio.currentTime = 0
-    audio.muted = false
-  } catch { /* ignore — first real alert may still work after click */ }
+  } catch { /* first real alert may still work after this click */ }
 }
 
-/** Soft oscillator fallback if the MP3 cannot play. */
+/** Louder oscillator fallback if the MP3 is missing or blocked. */
 function playBeepFallback() {
   try {
     const ctx = getAlertAudioCtx()
@@ -67,22 +55,25 @@ function playBeepFallback() {
     void ctx.resume().then(() => {
       const oscillator = ctx.createOscillator()
       const gain = ctx.createGain()
+      oscillator.type = 'sine'
       oscillator.connect(gain)
       gain.connect(ctx.destination)
-      oscillator.frequency.value = 880
-      gain.gain.value = 0.05
-      oscillator.start()
-      oscillator.stop(ctx.currentTime + 0.15)
+      oscillator.frequency.value = 980
+      const t = ctx.currentTime
+      gain.gain.setValueAtTime(0.0001, t)
+      gain.gain.exponentialRampToValueAtTime(0.22, t + 0.02)
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.35)
+      oscillator.start(t)
+      oscillator.stop(t + 0.36)
     }).catch(() => { /* autoplay still blocked */ })
   } catch { /* ignore */ }
 }
 
-/** Play the main alert MP3 for qualified C5 signals. */
+/** Play the main alert MP3 (fresh element each time — avoids stuck Audio nodes). */
 function playBeep() {
   try {
-    const audio = getAlertMainAudio()
-    audio.pause()
-    audio.currentTime = 0
+    const audio = new Audio(ALERT_MAIN_URL)
+    audio.volume = 0.9
     void audio.play().catch(() => playBeepFallback())
   } catch {
     playBeepFallback()
@@ -145,12 +136,21 @@ export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => vo
     if (on) void unlockC5AlertSound()
   }
 
+  // Browsers block audio until a real user gesture — unlock on first click/tap while Sound is ON.
+  useEffect(() => {
+    if (!sound) return
+    const unlock = () => { void unlockC5AlertSound() }
+    window.addEventListener('pointerdown', unlock, { once: true, capture: true })
+    return () => window.removeEventListener('pointerdown', unlock, true)
+  }, [sound])
+
   useEffect(() => {
     const feed = new MarketFeed()
     let evaluationKey = ''
     let expiresAt = 0
     let lastTickSeen: number | null = null
     const notified = new Set<string>()
+    const nearNotified = new Set<string>()
 
     const emitQualified = (
       state: MarketState,
@@ -161,6 +161,9 @@ export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => vo
       const id = `${C5_STRATEGY_ID}:${ev.time}:${ev.final}`
       if (notified.has(id)) return
       notified.add(id)
+
+      // Always alert on first 4/4 (even if feed not READY yet) so you hear the signal.
+      if (opts.playSound && soundRef.current) playBeep()
 
       const nowSec = Date.now() / 1000
       const entryTime = opts.forming ? nowSec : Math.max(nowSec, state.lastTickEpoch ?? nowSec)
@@ -173,7 +176,6 @@ export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => vo
           expiresAt: opts.expiresAt,
           remainingSec: Math.max(0, opts.expiresAt - nowSec),
         })
-        if (opts.playSound && soundRef.current) playBeep()
       }
       onTradeRef.current?.(toAutoSignal(ev, state, {
         candleCloseEpoch: opts.candleCloseEpoch,
@@ -181,6 +183,18 @@ export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => vo
         feedReady: state.ready,
         forming: opts.forming,
       }))
+    }
+
+    /** 3/4 near-miss: sound only (no Auto). Once per minute. */
+    const emitNearMissSound = (ev: SignalEvaluation) => {
+      if (!soundRef.current) return
+      if (ev.isQualified) return
+      if ((ev.requiredPassed ?? 0) !== 3) return
+      const id = `near3:${ev.time}`
+      if (nearNotified.has(id) || notified.has(`${C5_STRATEGY_ID}:${ev.time}:RISE`)
+        || notified.has(`${C5_STRATEGY_ID}:${ev.time}:FALL`)) return
+      nearNotified.add(id)
+      playBeep()
     }
 
     const unsubscribe = feed.subscribe((state, event) => {
@@ -198,13 +212,17 @@ export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => vo
       // Completed-candle path (backup if 4/4 only appears at the close).
       if (event?.type === 'candle_close') {
         const ev = evaluateC5LatestClosed(state.candles)
-        if (ev && ev.time === event.candle.time && ev.isQualified) {
-          const candleCloseEpoch = ev.time + 60
-          emitQualified(state, ev, {
-            candleCloseEpoch,
-            expiresAt: candleCloseEpoch + SIGNAL_WINDOW_SECONDS,
-            playSound: true,
-          })
+        if (ev && ev.time === event.candle.time) {
+          if (ev.isQualified) {
+            const candleCloseEpoch = ev.time + 60
+            emitQualified(state, ev, {
+              candleCloseEpoch,
+              expiresAt: candleCloseEpoch + SIGNAL_WINDOW_SECONDS,
+              playSound: true,
+            })
+          } else {
+            emitNearMissSound(ev)
+          }
         }
       }
 
@@ -215,15 +233,19 @@ export function useMarketAndSignals(onTradeSignal?: (sig: AutoTradeSignal) => vo
         const isFirstTick = lastTickSeen == null
         lastTickSeen = tickEpoch
         const last = state.candles.at(-1)
-        if (!isFirstTick && state.ready && last && !last.isClosed) {
+        if (!isFirstTick && last && !last.isClosed) {
           const ev = evaluateC5LiveBar(state.candles)
-          if (ev && ev.time === last.time && ev.isQualified) {
-            emitQualified(state, ev, {
-              candleCloseEpoch: nowSec,
-              expiresAt: nowSec + SIGNAL_WINDOW_SECONDS,
-              playSound: true,
-              forming: true,
-            })
+          if (ev && ev.time === last.time) {
+            if (ev.isQualified && state.ready) {
+              emitQualified(state, ev, {
+                candleCloseEpoch: nowSec,
+                expiresAt: nowSec + SIGNAL_WINDOW_SECONDS,
+                playSound: true,
+                forming: true,
+              })
+            } else if (!ev.isQualified) {
+              emitNearMissSound(ev)
+            }
           }
         }
       }
