@@ -12,8 +12,12 @@ import type { AutoTradeSignal } from './useAutoTrade'
 
 const SYMBOL = import.meta.env.VITE_DERIV_SYMBOL || 'R_100'
 
-/** Shared AudioContext — browsers block beep until unlocked by a user click. */
+/** Main C5 alert clip (served from /public/sounds). */
+const ALERT_MAIN_URL = `${import.meta.env.BASE_URL}sounds/alert-main.mp3`
+
+/** Shared AudioContext — browsers block sound until unlocked by a user click. */
 let alertAudioCtx: AudioContext | null = null
+let alertMainAudio: HTMLAudioElement | null = null
 
 function getAlertAudioCtx(): AudioContext | null {
   try {
@@ -27,17 +31,36 @@ function getAlertAudioCtx(): AudioContext | null {
   }
 }
 
-/** Call from a click (sound checkbox) so later C5 alerts are allowed to beep. */
-export async function unlockC5AlertSound(): Promise<void> {
-  const ctx = getAlertAudioCtx()
-  if (!ctx) return
-  try {
-    if (ctx.state === 'suspended') await ctx.resume()
-  } catch { /* ignore */ }
+function getAlertMainAudio(): HTMLAudioElement {
+  if (!alertMainAudio) {
+    alertMainAudio = new Audio(ALERT_MAIN_URL)
+    alertMainAudio.preload = 'auto'
+    alertMainAudio.volume = 0.7
+  }
+  return alertMainAudio
 }
 
-/** Soft beep for qualified C5 alerts. */
-function playBeep() {
+/** Call from a click (sound checkbox) so later C5 alerts are allowed to play. */
+export async function unlockC5AlertSound(): Promise<void> {
+  const ctx = getAlertAudioCtx()
+  if (ctx) {
+    try {
+      if (ctx.state === 'suspended') await ctx.resume()
+    } catch { /* ignore */ }
+  }
+  // Prime the MP3 element after a user gesture so later play() is allowed.
+  try {
+    const audio = getAlertMainAudio()
+    audio.muted = true
+    await audio.play()
+    audio.pause()
+    audio.currentTime = 0
+    audio.muted = false
+  } catch { /* ignore — first real alert may still work after click */ }
+}
+
+/** Soft oscillator fallback if the MP3 cannot play. */
+function playBeepFallback() {
   try {
     const ctx = getAlertAudioCtx()
     if (!ctx) return
@@ -51,7 +74,19 @@ function playBeep() {
       oscillator.start()
       oscillator.stop(ctx.currentTime + 0.15)
     }).catch(() => { /* autoplay still blocked */ })
-  } catch { /* Sound may require a browser interaction. */ }
+  } catch { /* ignore */ }
+}
+
+/** Play the main alert MP3 for qualified C5 signals. */
+function playBeep() {
+  try {
+    const audio = getAlertMainAudio()
+    audio.pause()
+    audio.currentTime = 0
+    void audio.play().catch(() => playBeepFallback())
+  } catch {
+    playBeepFallback()
+  }
 }
 
 function toAutoSignal(
