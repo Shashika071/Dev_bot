@@ -12,6 +12,7 @@ import {
   LineStyle,
 } from 'lightweight-charts'
 import type { Candle, SignalEvaluation } from '../lib/types'
+import { isValidCandle } from '../lib/deriv/candles'
 import {
   computeDynamicSRv2,
   DYNAMIC_SR_V2_DEFAULTS,
@@ -55,6 +56,17 @@ export function TradingChart({ candles, lastPrice, evaluations }: Props) {
     () => computeDynamicSRv2(candles, DYNAMIC_SR_V2_DEFAULTS),
     [candles],
   )
+  const contexts = useMemo(() => candles.map((bar, i) => {
+    const prior = candles.slice(Math.max(0, i - 20), i)
+    if (!bar.isClosed || !isValidCandle(bar) || prior.length !== 20 || prior.some((p, j) => !p.isClosed || !isValidCandle(p) || p.time !== bar.time - (20 - j) * 60)) return null
+    const high = Math.max(...prior.map(p => p.high))
+    const low = Math.min(...prior.map(p => p.low))
+    const label = bar.close > high ? 'Up breakout' : bar.close < low ? 'Down breakout'
+      : bar.high > high && bar.low < low ? 'Both wicks rejected'
+        : bar.high > high ? 'Upper rejection' : bar.low < low ? 'Lower rejection' : 'Inside range'
+    return { high, low, label, time: bar.time }
+  }), [candles])
+  const latestContext = contexts.at(-1) ?? contexts.at(-2)
 
   useEffect(() => {
     if (!mainRef.current) return
@@ -132,7 +144,7 @@ export function TradingChart({ candles, lastPrice, evaluations }: Props) {
           position: 'belowBar' as const,
           color: '#00e676',
           shape: 'arrowUp' as const,
-          text: 'RISE',
+          text: `RISE${contexts[i] ? ' · ' + contexts[i]!.label : ''}`,
           size: 2,
         })
       } else if (e.final === 'FALL') {
@@ -141,7 +153,7 @@ export function TradingChart({ candles, lastPrice, evaluations }: Props) {
           position: 'aboveBar' as const,
           color: '#ff1744',
           shape: 'arrowDown' as const,
-          text: 'FALL',
+          text: `FALL${contexts[i] ? ' · ' + contexts[i]!.label : ''}`,
           size: 2,
         })
       }
@@ -165,6 +177,20 @@ export function TradingChart({ candles, lastPrice, evaluations }: Props) {
     for (const series of c.srSeries) c.main.removeSeries(series)
     c.srPriceLines = []
     c.srSeries = []
+
+    // Each point uses only the preceding 20 closed minutes, never future bars.
+    for (const boundary of ['high', 'low'] as const) {
+      const channel = c.main.addSeries(LineSeries, {
+        color: '#64b5f6', lineWidth: 1,
+        lineStyle: boundary === 'high' ? LineStyle.Solid : LineStyle.Dashed,
+        priceLineVisible: false, lastValueVisible: true,
+        title: boundary === 'high' ? 'Prior 20 high' : 'Prior 20 low',
+      })
+      channel.setData(candles.map((bar, i) => contexts[i]
+        ? { time: bar.time as Time, value: contexts[i]![boundary] }
+        : { time: bar.time as Time }))
+      c.srSeries.push(channel)
+    }
 
     const endTime = candles[candles.length - 1].time
     const style = lineStyleFromSetting(DYNAMIC_SR_V2_DEFAULTS.lineStyle)
@@ -231,7 +257,14 @@ export function TradingChart({ candles, lastPrice, evaluations }: Props) {
         title: 'Last',
       })
     }
-  }, [candles, lastPrice, evaluations, sr])
+  }, [candles, lastPrice, evaluations, sr, contexts])
 
-  return <div ref={mainRef} className="h-full min-h-0 w-full" />
+  return <div className="flex h-full min-h-0 w-full flex-col">
+    <div className="flex flex-wrap gap-x-4 gap-y-1 px-3 py-1 text-xs text-slate-300" aria-live="polite">
+      <span>Chart context · {latestContext?.label ?? 'Waiting for 20 completed minutes'}</span>
+      {latestContext && <span>Last closed candle · {new Date((latestContext.time + 60) * 1000).toISOString().slice(11, 16)} UTC</span>}
+      <span>Blue: prior 20 high (solid) / low (dashed) · descriptive only</span>
+    </div>
+    <div ref={mainRef} className="min-h-0 w-full flex-1" />
+  </div>
 }
