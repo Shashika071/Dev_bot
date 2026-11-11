@@ -12,7 +12,9 @@ import {
   LineStyle,
 } from 'lightweight-charts'
 import type { Candle, SignalEvaluation } from '../lib/types'
-import { isValidCandle } from '../lib/deriv/candles'
+import { getChartContexts } from '../lib/strategy/chartContext'
+import type { EntryDisplay } from '../lib/strategy/entryDisplay'
+import { ChartRangePrimitive } from './chartRangePrimitive'
 import {
   computeDynamicSRv2,
   DYNAMIC_SR_V2_DEFAULTS,
@@ -22,6 +24,7 @@ interface Props {
   candles: Candle[]
   evaluations: SignalEvaluation[]
   lastPrice: number | null
+  entry?: EntryDisplay
 }
 
 function lineStyleFromSetting(style: 'Solid' | 'Dashed' | 'Dotted'): LineStyle {
@@ -39,7 +42,7 @@ function horizSegment(fromTime: number, toTime: number, price: number) {
   ]
 }
 
-export function TradingChart({ candles, lastPrice, evaluations }: Props) {
+export function TradingChart({ candles, lastPrice, evaluations, entry }: Props) {
   const mainRef = useRef<HTMLDivElement>(null)
   const fittedLen = useRef(0)
   const charts = useRef<{
@@ -48,6 +51,8 @@ export function TradingChart({ candles, lastPrice, evaluations }: Props) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     markers?: any
     priceLine?: IPriceLine
+    targetLine?: IPriceLine
+    range?: ChartRangePrimitive
     srPriceLines: IPriceLine[]
     srSeries: ISeriesApi<'Line'>[]
   }>({ srPriceLines: [], srSeries: [] })
@@ -56,17 +61,8 @@ export function TradingChart({ candles, lastPrice, evaluations }: Props) {
     () => computeDynamicSRv2(candles, DYNAMIC_SR_V2_DEFAULTS),
     [candles],
   )
-  const contexts = useMemo(() => candles.map((bar, i) => {
-    const prior = candles.slice(Math.max(0, i - 20), i)
-    if (!bar.isClosed || !isValidCandle(bar) || prior.length !== 20 || prior.some((p, j) => !p.isClosed || !isValidCandle(p) || p.time !== bar.time - (20 - j) * 60)) return null
-    const high = Math.max(...prior.map(p => p.high))
-    const low = Math.min(...prior.map(p => p.low))
-    const label = bar.close > high ? 'Up breakout' : bar.close < low ? 'Down breakout'
-      : bar.high > high && bar.low < low ? 'Both wicks rejected'
-        : bar.high > high ? 'Upper rejection' : bar.low < low ? 'Lower rejection' : 'Inside range'
-    return { high, low, label, time: bar.time }
-  }), [candles])
-  const latestContext = contexts.at(-1) ?? contexts.at(-2)
+  const contexts = useMemo(() => getChartContexts(candles, true), [candles])
+  const latestContext = contexts.at(-1)
 
   useEffect(() => {
     if (!mainRef.current) return
@@ -97,7 +93,9 @@ export function TradingChart({ candles, lastPrice, evaluations }: Props) {
       wickDownColor: '#ef5350',
     })
     const markers = createSeriesMarkers(candle, [])
-    charts.current = { main, candle, markers, srPriceLines: [], srSeries: [] }
+    const range = new ChartRangePrimitive()
+    candle.attachPrimitive(range)
+    charts.current = { main, candle, markers, range, srPriceLines: [], srSeries: [] }
 
     const ro = new ResizeObserver(() => {
       if (mainRef.current) {
@@ -112,12 +110,24 @@ export function TradingChart({ candles, lastPrice, evaluations }: Props) {
     return () => {
       ro.disconnect()
       main.remove()
+      charts.current = { srPriceLines: [], srSeries: [] }
+      fittedLen.current = 0
     }
   }, [])
 
   useEffect(() => {
     const c = charts.current
-    if (!c.main || !c.candle || candles.length === 0) return
+    if (!c.main || !c.candle) return
+    if (candles.length === 0) {
+      c.candle.setData([])
+      c.markers?.setMarkers([])
+      c.range?.setRange(null)
+      for (const line of c.srPriceLines) c.candle.removePriceLine(line)
+      for (const series of c.srSeries) c.main.removeSeries(series)
+      c.srPriceLines = []; c.srSeries = []
+      if (c.priceLine) { c.candle.removePriceLine(c.priceLine); c.priceLine = undefined }
+      return
+    }
 
     c.candle.setData(
       candles.map((x) => ({
@@ -171,6 +181,11 @@ export function TradingChart({ candles, lastPrice, evaluations }: Props) {
       }
     }
     c.markers?.setMarkers(markers)
+    const latestRange = contexts.at(-1)
+    c.range?.setRange(latestRange ? {
+      startTime: latestRange.time - 20 * 60, endTime: latestRange.time,
+      high: latestRange.high, low: latestRange.low,
+    } : null)
 
     // Clear previous S/R drawings
     for (const line of c.srPriceLines) c.candle.removePriceLine(line)
@@ -259,11 +274,21 @@ export function TradingChart({ candles, lastPrice, evaluations }: Props) {
     }
   }, [candles, lastPrice, evaluations, sr, contexts])
 
+  useEffect(() => {
+    const c = charts.current
+    if (!c.candle) return
+    if (c.targetLine) { c.candle.removePriceLine(c.targetLine); c.targetLine = undefined }
+    if (candles.length && entry && entry.state !== 'WAIT' && entry.target != null) {
+      c.targetLine = c.candle.createPriceLine({ price: entry.target, color: '#c4b5fd', lineWidth: 1,
+        lineStyle: LineStyle.Dotted, axisLabelVisible: true, title: 'Indicative touch' })
+    }
+  }, [entry?.state, entry?.target, candles.length])
+
   return <div className="flex h-full min-h-0 w-full flex-col">
     <div className="flex flex-wrap gap-x-4 gap-y-1 px-3 py-1 text-xs text-slate-300" aria-live="polite">
-      <span>Chart context · {latestContext?.label ?? 'Waiting for 20 completed minutes'}</span>
-      {latestContext && <span>Last closed candle · {new Date((latestContext.time + 60) * 1000).toISOString().slice(11, 16)} UTC</span>}
-      <span>Blue: prior 20 high (solid) / low (dashed) · descriptive only</span>
+      <span className="font-medium text-sky-200">{latestContext?.label ?? 'Waiting for 20 completed minutes'}{latestContext && !latestContext.isClosed ? ' · forming' : ''}</span>
+      <span>Blue zone: prior 20-minute range · solid high / dashed low</span>
+      <span className="text-slate-500">Context only</span>
     </div>
     <div ref={mainRef} className="min-h-0 w-full flex-1" />
   </div>

@@ -1,11 +1,13 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { TradingChart } from './components/TradingChart'
-import { SignalPanel } from './components/SignalPanel'
+import { LiveEntryPanel } from './components/LiveEntryPanel'
 import { useMarketAndSignals } from './hooks/useMarketAndSignals'
 import { useAutoTrade } from './hooks/useAutoTrade'
 import { AutoTradePanel } from './components/AutoTradePanel'
 import { ManualTradeBar } from './components/ManualTradeBar'
 import { ResearchTab } from './components/ResearchTab'
+import { contextAt } from './lib/strategy/chartContext'
+import { deriveEntryDisplay } from './lib/strategy/entryDisplay'
 
 const SYMBOL = import.meta.env.VITE_DERIV_SYMBOL || 'R_100'
 const TAB_KEY = 'v100_ui_tab_v1'
@@ -24,7 +26,12 @@ function loadTab(): TabId {
 
 export default function App() {
   const [tab, setTab] = useState<TabId>(() => loadTab())
+  const [nowSec, setNowSec] = useState(() => Date.now() / 1000)
   const trade = useAutoTrade(SYMBOL)
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowSec(Date.now() / 1000), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   const selectTab = (next: TabId) => {
     setTab(next)
@@ -37,15 +44,24 @@ export default function App() {
     liveSetup,
   } = useMarketAndSignals(trade.onTradeSignal)
 
+  const context = useMemo(
+    () => market ? contextAt(market.candles, market.candles.length - 1, true) : null,
+    [market?.candles, market?.lastTickEpoch],
+  )
+  const entry = useMemo(() => deriveEntryDisplay({
+    market, liveSignal, liveSetup, signalMeta, nowSec,
+    barrierAbs: trade.barrierAbs, duration: trade.duration, durationUnit: trade.durationUnit,
+  }), [market, liveSignal, liveSetup, signalMeta, nowSec, trade.barrierAbs, trade.duration, trade.durationUnit])
+
   const tradeConnected = trade.status === 'CONNECTED'
 
   return (
     <div className="flex h-screen min-h-[650px] flex-col bg-[#0b0f14] text-slate-100">
-      <header className="flex h-9 shrink-0 items-center gap-3 border-b border-slate-800 px-3 text-sm">
+      <header className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-slate-800 px-3 py-2 text-sm">
         <span className="font-bold text-white">V100 Smart Signal Bot</span>
         <span className="hidden text-slate-500 sm:inline">R_100 · M1</span>
 
-        <nav className="ml-2 flex items-center gap-1 rounded-md border border-slate-800 bg-[#0c1118] p-0.5 text-xs">
+        <nav className="flex max-w-full flex-wrap items-center gap-1 rounded-md border border-slate-800 bg-[#0c1118] p-0.5 text-xs" aria-label="Main navigation">
           <TabButton active={tab === 'chart'} onClick={() => selectTab('chart')}>Chart</TabButton>
           <TabButton active={tab === 'trade'} onClick={() => selectTab('trade')}>
             Trade settings
@@ -56,7 +72,7 @@ export default function App() {
           <TabButton active={tab === 'research'} onClick={() => selectTab('research')}>Research</TabButton>
         </nav>
 
-        <div className="ml-auto flex items-center gap-3 text-xs tabular-nums">
+        <div className="ml-auto hidden items-center gap-3 text-xs tabular-nums md:flex">
           <span className="hidden text-slate-400 sm:inline">C5</span>
           <span className="text-emerald-400">RISE {liveSetup.rise.passed}/{liveSetup.rise.total}</span>
           <span className="text-rose-400">FALL {liveSetup.fall.passed}/{liveSetup.fall.total}</span>
@@ -92,45 +108,39 @@ export default function App() {
         </div>
       </header>
 
-      {liveSignal?.isQualified && (liveSignal.final === 'RISE' || liveSignal.final === 'FALL') && (
-        <div
-          className={`shrink-0 px-3 py-1 text-center text-xs font-bold text-white ${
-            liveSignal.final === 'FALL' ? 'bg-rose-600' : 'bg-emerald-600'
-          }`}
-        >
-          C5 {liveSignal.final} · 4/4 · entry window
-          {signalMeta ? ` · ${signalMeta.remainingSec.toFixed(0)}s left` : ''}
-          {trade.autoEnabled ? ' · auto Touch firing' : ''}
-        </div>
-      )}
-      {!liveSignal && liveSetup.forming && liveSetup.lean !== 'NONE' && (
-        <div className="shrink-0 bg-slate-800 px-3 py-1 text-center text-xs font-semibold text-slate-300">
-          Forming · {liveSetup.lean} {liveSetup.lean === 'RISE' ? liveSetup.rise.passed : liveSetup.fall.passed}/4
-          {((liveSetup.lean === 'RISE' ? liveSetup.rise.passed : liveSetup.fall.passed) >= 4)
-            ? ' · waiting / already signaled'
-            : ' required'}
-        </div>
-      )}
+      <div className={`flex shrink-0 flex-wrap items-center justify-center gap-x-2 px-3 py-1.5 text-center text-xs ${
+        entry.state === 'WAIT' ? 'bg-slate-800/70 text-slate-300'
+          : entry.state === 'FORMING' ? 'bg-amber-400/10 text-amber-200'
+            : entry.side === 'RISE' ? 'bg-emerald-400/10 text-emerald-200' : 'bg-rose-400/10 text-rose-200'
+      }`}>
+        <span className="font-semibold">C5 · {entry.state === 'WAIT' ? 'Wait' : `${entry.side} · ${entry.state === 'FORMING' ? 'Forming' : 'Confirmed'} 4/4`}</span>
+        <span>{entry.state === 'WAIT' ? entry.reason : `${entry.expiresInSeconds.toFixed(0)}s left in signal window`}</span>
+      </div>
 
       {tab === 'chart' ? (
         <>
-          <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_300px]">
-            <main className="min-h-0 min-w-0">
+          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto lg:grid lg:grid-cols-[minmax(0,1fr)_360px] lg:overflow-hidden">
+            <main className="h-[55vh] min-h-[320px] min-w-0 shrink-0 lg:h-full lg:min-h-0">
               <TradingChart
                 candles={market?.candles ?? []}
                 evaluations={evaluations}
                 lastPrice={market?.lastPrice ?? null}
+                entry={entry}
               />
             </main>
-            <SignalPanel
+            <div className="min-w-0 shrink-0 lg:min-h-0">
+            <LiveEntryPanel
               market={market}
               eval_={latestEval}
-              liveSignal={liveSignal}
+              signal={liveSignal}
               liveSetup={liveSetup}
-              signalMeta={signalMeta}
+              entry={entry}
+              context={context}
+              barrierAbs={trade.barrierAbs}
               sound={sound}
               onToggleSound={() => setSound(!sound)}
             />
+            </div>
           </div>
           <ManualTradeBar trade={trade} />
         </>
