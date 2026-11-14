@@ -27,6 +27,7 @@ const vite = await createViteServer({
 const {
   createInitialState,
   startDiscovery,
+  startConfirmation,
   RESEARCH_CODE_VERSION,
 } = await vite.ssrLoadModule('/src/lib/research/experimentEngine.ts')
 const {
@@ -50,6 +51,8 @@ const { STRATEGY_REGISTRY } =
   await vite.ssrLoadModule('/src/lib/research/strategies/registry.ts')
 const contractHelpers =
   await vite.ssrLoadModule('/src/lib/research/contractSettings.ts')
+const { CONTEXT_M1_HISTORY } = await vite.ssrLoadModule('/src/lib/timeframes/candleAggregation.ts')
+const { c5Baseline } = await vite.ssrLoadModule('/src/lib/research/decisionComparison.ts')
 
 const { applyResearchEvent, emptyResearchSession } = await vite.ssrLoadModule('/src/lib/research/researchSession.ts')
 const { ResearchQuoteScheduler } = await vite.ssrLoadModule('/src/lib/research/quoteScheduler.ts')
@@ -129,9 +132,8 @@ function request(payload) {
 function resetQuotes() {
   quotes?.cancel()
   const runId = experimentId
-  const contract = { ...state.contract }
   quotes = new ResearchQuoteScheduler(
-    (side) => proposeOneTouchOnly({ request }, contract, SYMBOL, side),
+    (side, contract) => proposeOneTouchOnly({ request }, contract, SYMBOL, side),
     (ids, quote) => {
       if (runId !== experimentId) return
       record({ type: 'quote', ids, quote })
@@ -159,10 +161,13 @@ function startRun(mode, ids, contractOverride = null) {
     : (mode === 'discovery'
       ? STRATEGY_REGISTRY.map((s) => s.id)
       : state.enabledStrategyIds)
+  const priorState = state
+  const started = mode === 'confirmation'
+    ? startConfirmation(priorState, Date.now(), enabled, contract)
+    : startDiscovery(createInitialState(mode, enabled, contract), Date.now())
   experimentId = newExperimentId(mode)
   session = emptyResearchSession()
   state = session.state
-  const started = startDiscovery(createInitialState(mode, enabled, contract), Date.now())
   record({ type: 'start', state: started, candles: seed })
   resetQuotes()
   persist(true)
@@ -240,6 +245,7 @@ const api = createHttpServer(async (req, res) => {
           rejectedCount: state.rejected.length,
         },
         summary,
+        c5Baselines: state.codeVersion === RESEARCH_CODE_VERSION ? state.c5ContextObservations.map(c5Baseline) : [],
       })
     }
     if (url.pathname === '/strategy' && url.searchParams.get('id')) {
@@ -291,6 +297,9 @@ const api = createHttpServer(async (req, res) => {
       return json(res, 200, { ok: true, stage: state.stage })
     }
     if (req.method === 'POST' && url.pathname === '/control/start-confirmation') {
+      if (state.codeVersion !== RESEARCH_CODE_VERSION || state.mode !== 'discovery' || state.startedAt == null) {
+        return json(res, 409, { error: 'A current-version discovery is required for a later confirmation run.' })
+      }
       const body = await readBody(req)
       const ids = Array.isArray(body.strategyIds) ? body.strategyIds : state.enabledStrategyIds
       if (!ids.length || ids.some((id) => !STRATEGY_REGISTRY.some((s) => s.id === id)) || new Set(ids).size !== ids.length) return json(res, 400, { error: 'Invalid strategy IDs' })
@@ -375,7 +384,7 @@ function connect() {
       ticks_history: SYMBOL,
       style: 'candles',
       granularity: 60,
-      count: 1000,
+      count: CONTEXT_M1_HISTORY,
       end: 'latest',
       req_id: id,
     }))
@@ -442,13 +451,15 @@ function connect() {
       const healthy = Math.abs(receiptEpoch - tick.epoch) <= 10 && candles.length >= 120
       feedHealthy = healthy
       const beforeCount = state.observations.length
+      const beforeC5 = state.c5ContextObservations?.length ?? 0
       if (state.codeVersion === RESEARCH_CODE_VERSION) {
         appendTick(experimentId, { ...tick, receiptMs: receiptEpoch * 1000 })
         record({ type: 'tick', tick, receiptEpoch, healthy })
         quotes?.enqueue(state.observations.slice(beforeCount), state.contract)
+        quotes?.enqueue(state.c5ContextObservations.slice(beforeC5), contractHelpers.c5StudyContract(state.contract))
         persist()
       } else {
-        candles = applyTick(candles, tick).candles.slice(-1000)
+        candles = applyTick(candles, tick).candles.slice(-CONTEXT_M1_HISTORY)
       }
     }
   })

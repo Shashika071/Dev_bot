@@ -60,13 +60,13 @@ describe('buyOneTouch expiry after delayed proposal', () => {
         if ('proposal' in payload) {
           await handlers.onProposal?.()
           return {
-            proposal: { id: 'prop-1', ask_price: 1 },
+            proposal: { id: 'prop-1', ask_price: 1, spot: 999 },
           }
         }
         if ('buy' in payload) {
           handlers.onBuy?.()
           return {
-            buy: { contract_id: 42, buy_price: 1, payout: 1.8 },
+            buy: { contract_id: 42, buy_price: 1, payout: 1.8, entry_spot: 100.25 },
           }
         }
         return {}
@@ -112,6 +112,8 @@ describe('buyOneTouch expiry after delayed proposal', () => {
     expect(results).toHaveLength(1)
     expect(buys).toHaveLength(1)
     expect(results[0]!.contractId).toBe(42)
+    expect(results[0]!.entrySpot).toBe(100.25)
+    expect(results[0]!.entrySpot).not.toBe(999)
   })
 
   it('aborts placeTouchTrades when beforeBuy fails after a delayed quote', async () => {

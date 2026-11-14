@@ -3,11 +3,13 @@ import { fixtureCandles } from '../testFixtures'
 import {
   createInitialState,
   startDiscovery,
+  startConfirmation,
   onTick,
   listEnabledCandidates,
   DISCOVERY_HOURS,
   interruptResearchFeed,
 } from './experimentEngine'
+import { c5ContextId, type C5ContextObservation } from './c5ContextStudy'
 import { makeHorizons, POST_WIN_COOLDOWN_SEC, STRATEGY_COOLDOWN_SEC } from './horizons'
 import { maybeStartTouchPaper } from './touchPaper'
 import { DEFAULT_FROZEN_CONTRACT } from './contractSettings'
@@ -191,6 +193,49 @@ describe('experiment engine', () => {
     const h7 = summary.strategies[0]!.horizons.find((h) => h.minutes === 7)!
     expect(h7.contRate).toBe(1)
     expect(h7.randomContRate).toBe(0.5)
+  })
+
+  it('freezes discovery C5 cohorts when confirmation starts', () => {
+    const obs: C5ContextObservation = {
+      id: c5ContextId(100, 'RISE'),
+      side: 'RISE',
+      candleTime: 100,
+      signalEpoch: 160,
+      receiptEpoch: 160,
+      entryReferencePrice: 1,
+      entryTick: { epoch: 160, quote: 1, symbol: 'R_100' },
+      reason: 'seed',
+      passed: 4,
+      total: 4,
+      confirmations: { ut: true, supertrend: true, sma: true, ao: false, rsi: true },
+      m5: {
+        timeframe: 5, trend: 'Up', support: null, resistance: null,
+        behavior: null, behaviorText: null, agreement: 'Supports', agreementReason: 'x',
+        candleTime: 90, forming: false,
+      },
+      m15: {
+        timeframe: 15, trend: 'Up', support: null, resistance: null,
+        behavior: null, behaviorText: null, agreement: 'Supports', agreementReason: 'x',
+        candleTime: 60, forming: false,
+      },
+      lastTickEpoch: 160,
+      touch: {
+        paperEntryEpoch: 160, paperEntryPrice: 1, absoluteBarrier: 1.1,
+        status: 'hit', barrierAbs: 0.1, durationMin: 7, stake: 1,
+        quoteAvailable: false, quoteStatus: 'unavailable',
+      },
+    }
+    let discovery = startDiscovery(createInitialState('discovery', ['R1']), 1_700_000_000_000)
+    discovery = {
+      ...discovery,
+      c5ContextObservations: [obs],
+      c5AcceptedKeys: [obs.id],
+    }
+    const confirmation = startConfirmation(discovery, 1_700_000_100_000, ['R1'])
+    expect(confirmation.mode).toBe('confirmation')
+    expect(confirmation.c5ContextObservations).toEqual([])
+    expect(confirmation.priorDiscoveryC5Summary?.observationCount).toBe(1)
+    expect(confirmation.priorDiscoveryC5Summary?.cohorts.find((c) => c.id === 'both_support')?.sampleSize).toBe(1)
   })
 
   it('does not invent removed H1 diagnostic fields on new states', () => {

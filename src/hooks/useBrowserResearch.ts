@@ -5,6 +5,7 @@ import {
   onTick,
   resumeCollecting,
   startDiscovery,
+  startConfirmation as startConfirmationRun,
   advanceExperimentClock,
   interruptResearchFeed,
   type ExperimentState,
@@ -119,11 +120,11 @@ export function useBrowserResearch(market: MarketState | null, enabled = true) {
   function startConfirmation(ids?: StrategyId[]) {
     archiveBrowserResearch(stateRef.current)
     const enabled = ids ?? stateRef.current.enabledStrategyIds
-    let next = startDiscovery(
-      createInitialState('confirmation', enabled, freshContract()),
+    const next = startConfirmationRun(
+      { ...stateRef.current, contract: freshContract() },
       Date.now(),
+      enabled,
     )
-    next = { ...next, mode: 'confirmation' }
     stateRef.current = next
     setState(next)
     saveBrowserResearch(next)

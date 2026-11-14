@@ -1,32 +1,39 @@
 import type { FrozenContractSettings } from './contractSettings'
-import type { ResearchObservation, ResearchSide } from './strategies/types'
+import type { ResearchSide } from './strategies/types'
 import type { PaperQuote } from './touchPaper'
+import type { C5ContextObservation } from './c5ContextStudy'
+import type { ResearchObservation } from './strategies/types'
 
-type Job = { ids: string[]; side: ResearchSide; deadline: number }
+export type QuoteEnqueueRow = Pick<
+  ResearchObservation | C5ContextObservation,
+  'id' | 'side' | 'signalEpoch' | 'receiptEpoch' | 'touch'
+>
+
+type Job = { ids: string[]; side: ResearchSide; contract: FrozenContractSettings; deadline: number }
 
 /** Every accepted observation gets a result; same-tick/same-side quotes are shared. */
 export class ResearchQuoteScheduler {
   private queue: Job[] = []
   private active = 0
   private cancelled = false
-  private request: (side: ResearchSide) => Promise<PaperQuote | null>
+  private request: (side: ResearchSide, contract: FrozenContractSettings) => Promise<PaperQuote | null>
   private result: (ids: string[], quote: PaperQuote) => void
   private now: () => number
   private concurrency: number
 
   constructor(
-    request: (side: ResearchSide) => Promise<PaperQuote | null>,
+    request: (side: ResearchSide, contract: FrozenContractSettings) => Promise<PaperQuote | null>,
     result: (ids: string[], quote: PaperQuote) => void,
     now: () => number = () => Date.now() / 1000,
     concurrency = 2,
   ) { this.request = request; this.result = result; this.now = now; this.concurrency = concurrency }
 
-  enqueue(rows: ResearchObservation[], contract: FrozenContractSettings): void {
+  enqueue(rows: QuoteEnqueueRow[], contract: FrozenContractSettings): void {
     const groups = new Map<string, Job>()
     for (const row of rows) {
       if (row.touch?.quoteStatus !== 'waiting') continue
       const key = `${row.signalEpoch}:${row.side}`
-      const job = groups.get(key) ?? { ids: [], side: row.side, deadline: row.receiptEpoch + contract.maxQuoteAgeSec }
+      const job = groups.get(key) ?? { ids: [], side: row.side, contract, deadline: row.receiptEpoch + contract.maxQuoteAgeSec }
       job.ids.push(row.id)
       job.deadline = Math.min(job.deadline, row.receiptEpoch + contract.maxQuoteAgeSec)
       groups.set(key, job)
@@ -51,7 +58,7 @@ export class ResearchQuoteScheduler {
 
   private async run(job: Job): Promise<void> {
     let quote: PaperQuote | null = null
-    try { quote = await this.request(job.side) }
+    try { quote = await this.request(job.side, job.contract) }
     catch (error) { quote = { ask: 0, payout: 0, responseEpoch: this.now(), rawError: String(error) } }
     try {
       if (!this.cancelled) this.result(job.ids, quote ?? {

@@ -1,5 +1,6 @@
 import type { FinalSignal } from '../types'
 import type { DerivTradingClient } from './tradingClient'
+import { brokerNumber } from './contractTracking'
 
 export type TouchSideMode = 'both' | 'signal'
 
@@ -17,9 +18,21 @@ export type TouchTradeSettings = {
 export type TouchBuyResult = {
   barrier: string
   proposalId: string
-  contractId: number | null
+  contractId: number
   buyPrice: number | null
   payout: number | null
+  /** Broker entry spot when the API provides it */
+  entrySpot: number | null
+  raw: Record<string, unknown>
+}
+
+export type TouchProposalQuote = {
+  barrier: string
+  proposalId: string
+  ask: number | null
+  payout: number | null
+  spot: number | null
+  responseEpoch: number
   raw: Record<string, unknown>
 }
 
@@ -46,18 +59,12 @@ export function barriersForSignal(signal: FinalSignal, settings: TouchTradeSetti
   return [signal === 'RISE' ? up : down]
 }
 
-function num(v: unknown): number | null {
-  const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN
-  return Number.isFinite(n) ? n : null
-}
-
-/** Request ONETOUCH proposal then buy it. */
-export async function buyOneTouch(
+/** Request a fresh ONETOUCH proposal without buying. */
+export async function proposeOneTouch(
   client: DerivTradingClient,
   settings: TouchTradeSettings,
   barrier: string,
-  gate?: TouchBuyGate,
-): Promise<TouchBuyResult> {
+): Promise<TouchProposalQuote> {
   const proposalMsg = await client.request({
     proposal: 1,
     amount: settings.stake,
@@ -69,27 +76,50 @@ export async function buyOneTouch(
     underlying_symbol: settings.symbol,
     barrier,
   })
-
   const proposal = proposalMsg.proposal as Record<string, unknown> | undefined
-  const proposalId = typeof proposal?.id === 'string' ? proposal.id : null
-  if (!proposalId) throw new Error(`No proposal id for barrier ${barrier}`)
+  const proposalId = typeof proposal?.id === 'string' ? proposal.id : ''
+  return {
+    barrier,
+    proposalId,
+    ask: brokerNumber(proposal?.ask_price),
+    payout: brokerNumber(proposal?.payout),
+    spot: brokerNumber(proposal?.spot),
+    responseEpoch: Date.now() / 1000,
+    raw: proposalMsg,
+  }
+}
+
+/** Request ONETOUCH proposal then buy it. */
+export async function buyOneTouch(
+  client: DerivTradingClient,
+  settings: TouchTradeSettings,
+  barrier: string,
+  gate?: TouchBuyGate,
+): Promise<TouchBuyResult> {
+  const quoted = await proposeOneTouch(client, settings, barrier)
+  if (!quoted.proposalId) throw new Error(`No proposal id for barrier ${barrier}`)
 
   // Final readiness gate: after quote, before purchase (covers delayed proposals).
   if (gate?.beforeBuy) await gate.beforeBuy()
 
-  const ask = num(proposal?.ask_price) ?? settings.stake
+  const ask = quoted.ask ?? settings.stake
   const buyMsg = await client.request({
-    buy: proposalId,
+    buy: quoted.proposalId,
     price: ask,
   })
 
   const buy = buyMsg.buy as Record<string, unknown> | undefined
+  const contractId = brokerNumber(buy?.contract_id)
+  if (contractId == null || !Number.isSafeInteger(contractId) || contractId <= 0) {
+    throw new Error('Broker did not confirm a purchase with a contract ID')
+  }
   return {
     barrier,
-    proposalId,
-    contractId: num(buy?.contract_id),
-    buyPrice: num(buy?.buy_price),
-    payout: num(buy?.payout),
+    proposalId: quoted.proposalId,
+    contractId,
+    buyPrice: brokerNumber(buy?.buy_price),
+    payout: brokerNumber(buy?.payout),
+    entrySpot: brokerNumber(buy?.entry_spot),
     raw: buyMsg,
   }
 }

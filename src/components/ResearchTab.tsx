@@ -1,6 +1,8 @@
 import { Fragment, useEffect, useState } from 'react'
 import { RESEARCH_CODE_VERSION } from '../lib/research/experimentEngine'
 import type { StrategySummary } from '../lib/research/summarizeExperiment'
+import type { C5CohortSummaryBundle, C5CohortTouchSummary } from '../lib/research/c5ContextStudy'
+import type { summarizeJournal, DecisionJournalState } from '../lib/journal/decisionJournal'
 import type { MarketState } from '../lib/deriv/marketFeed'
 import { useBrowserResearch } from '../hooks/useBrowserResearch'
 import {
@@ -14,8 +16,18 @@ import {
   saveResearchCooldownPrefs,
   type ResearchCooldownPrefs,
 } from '../lib/research/researchCooldownPrefs'
+import {
+  c5Baseline,
+  compareC5Decisions,
+  type C5Baseline,
+} from '../lib/research/decisionComparison'
+import {
+  c5StudyContract,
+  DEFAULT_FROZEN_CONTRACT,
+} from '../lib/research/contractSettings'
 
 const SERVER_CACHE_KEY = 'v100_research_server_status_v1'
+const C5_STUDY_CONTRACT = c5StudyContract(DEFAULT_FROZEN_CONTRACT)
 
 function pct(n: number | null | undefined) {
   return n == null ? '—' : `${(100 * n).toFixed(1)}%`
@@ -66,7 +78,74 @@ function writeServerCache(status: RemotePayload) {
   }
 }
 
-export function ResearchTab({ market }: { market: MarketState | null }) {
+function c5CohortTable(
+  title: string,
+  bundle: C5CohortSummaryBundle | null | undefined,
+  legacy: boolean,
+) {
+  if (!bundle || bundle.observationCount === 0) {
+    return (
+      <div className="mt-3">
+        <div className="font-medium text-slate-200">{title}</div>
+        <p className="mt-1 text-[11px] text-slate-500">No confirmed C5 context observations yet.</p>
+      </div>
+    )
+  }
+  return (
+    <div className="mt-3">
+      <div className="font-medium text-slate-200">{title}</div>
+      <p className="mt-1 text-[11px] text-slate-500">
+        Observed paper Touch rates by frozen M5/M15 agreement — not win probabilities. n={bundle.observationCount}.
+      </p>
+      <div className="mt-2 overflow-auto">
+        <table className="w-full min-w-[1100px] text-left text-[11px]">
+          <thead className="text-slate-500">
+            <tr>
+              <th className="px-2 py-1">Cohort</th>
+              <th className="px-2 py-1">n</th>
+              <th className="px-2 py-1">Observed Touch%</th>
+              <th className="px-2 py-1">H/M/U/P</th>
+              <th className="px-2 py-1">Excluded n</th>
+              <th className="px-2 py-1">Excl. misses</th>
+              <th className="px-2 py-1">Excl. hits</th>
+              <th className="px-2 py-1">Excl. hits / all hits</th>
+              <th className="px-2 py-1">Quoted Touch%</th>
+              <th className="px-2 py-1">Settled P&amp;L</th>
+            </tr>
+          </thead>
+          <tbody>
+            {bundle.cohorts.map((c: C5CohortTouchSummary) => (
+              <tr key={c.id} className="border-t border-slate-900/80">
+                <td className="px-2 py-1 text-slate-200">{c.label}</td>
+                <td className="px-2 py-1 tabular-nums">{c.sampleSize}</td>
+                <td className="px-2 py-1 tabular-nums">{touchRate(c.hits, c.misses)}</td>
+                <td className="px-2 py-1 tabular-nums">{c.hits}/{c.misses}/{c.unknown}/{c.pending}</td>
+                <td className="px-2 py-1 tabular-nums">{c.excludedCount}</td>
+                <td className="px-2 py-1 tabular-nums">{c.missesExcluded}</td>
+                <td className="px-2 py-1 tabular-nums">{c.successfulTouchesExcluded}</td>
+                <td className="px-2 py-1 tabular-nums">{pct(c.excludedHitsShareOfAllHits)}</td>
+                <td className="px-2 py-1 tabular-nums">{legacy ? '—' : touchRate(c.quotedHits, c.quotedMisses)}</td>
+                <td className="px-2 py-1">{legacy || c.pnlUnavailable ? 'UNAVAILABLE' : (c.paperPnl?.toFixed(4) ?? '—')}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+export function ResearchTab({
+  market,
+  journalSummary,
+  journal,
+  onDownloadJournal,
+}: {
+  market: MarketState | null
+  journalSummary?: ReturnType<typeof summarizeJournal>
+  journal?: DecisionJournalState
+  onDownloadJournal?: () => void
+}) {
   const cached = readServerCache()
   const [mode, setMode] = useState<'loading' | 'server' | 'browser'>(cached ? 'server' : 'loading')
   const [remote, setRemote] = useState<RemotePayload | null>(cached)
@@ -205,6 +284,14 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
     entryCooldownSec: cooldownForNextRun.entryCooldownSec,
     postWinCooldownSec: cooldownForNextRun.postWinCooldownSec,
   }
+  const decisionBaselines: C5Baseline[] = usingServer
+    ? ((remote as { c5Baselines?: C5Baseline[] } | null)?.c5Baselines ?? [])
+    : (browser.state.c5ContextObservations ?? []).map(c5Baseline)
+  const decisionComparison = compareC5Decisions(decisionBaselines, journal)
+  const canStartConfirmation = !legacy
+    && (st as { mode?: string } | undefined)?.mode === 'discovery'
+    && (st as { startedAt?: number | null } | undefined)?.startedAt != null
+    && (enabledIds?.length ?? 0) > 0
 
   function confirmWipe(action: string): boolean {
     if (observationCount <= 0) return true
@@ -375,6 +462,20 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
               </button>
               <button
                 type="button"
+                disabled={controlsDisabled || !canStartConfirmation}
+                onClick={() => {
+                  if (!confirmWipe('Start confirmation')) return
+                  void runRemote('/control/start-confirmation', {
+                    ...cooldownBody,
+                    strategyIds: enabledIds,
+                  }, 'Confirmation run started (server)')
+                }}
+                className={`${btn} bg-sky-700 text-white hover:bg-sky-600`}
+              >
+                Start confirmation run
+              </button>
+              <button
+                type="button"
                 disabled={controlsDisabled || legacy}
                 onClick={() => void runRemote('/control/resume', undefined, 'Resumed collecting')}
                 className={`${btn} bg-slate-600 text-slate-100 hover:bg-slate-500`}
@@ -413,6 +514,18 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
                 className={`${btn} bg-emerald-600 text-white hover:bg-emerald-500`}
               >
                 Start 72h discovery
+              </button>
+              <button
+                type="button"
+                disabled={!canStartConfirmation}
+                onClick={() => {
+                  if (!confirmWipe('Start confirmation')) return
+                  const next = browser.startConfirmation(enabledIds)
+                  note(`Confirmation started — stage: ${next.stage}`)
+                }}
+                className={`${btn} bg-sky-700 text-white hover:bg-sky-600`}
+              >
+                Start confirmation run
               </button>
               <button
                 type="button"
@@ -639,6 +752,118 @@ export function ResearchTab({ market }: { market: MarketState | null }) {
           </table>
         </div>
       </section>
+
+      <section className="rounded border border-slate-800 bg-[#0c1118] p-3">
+        <div className="font-medium text-slate-200">C5 context study (paper only)</div>
+        <p className="mt-1 text-[11px] text-slate-500">
+          Prospective confirmed C5 signals with causal M5/M15 closed context frozen at the post-close entry tick.
+          Separate from R1–R8 strategies and from your live decision journal.
+        </p>
+        <p className="mt-1 text-[11px] text-sky-300">
+          Decision-study contract: barrier ±{C5_STUDY_CONTRACT.barrierAbs} ·{' '}
+          {C5_STUDY_CONTRACT.duration}{C5_STUDY_CONTRACT.durationUnit} · fresh post-close tick.
+        </p>
+        {c5CohortTable(
+          `Current run (${(st as { mode?: string })?.mode ?? '—'})`,
+          (summary as { c5Context?: C5CohortSummaryBundle })?.c5Context,
+          legacy,
+        )}
+        {(summary as { priorDiscoveryC5Summary?: C5CohortSummaryBundle | null })?.priorDiscoveryC5Summary && (
+          c5CohortTable(
+            'Frozen discovery cohorts (at confirmation start)',
+            (summary as { priorDiscoveryC5Summary?: C5CohortSummaryBundle | null }).priorDiscoveryC5Summary,
+            legacy,
+          )
+        )}
+      </section>
+
+      {journalSummary && (
+        <section className="rounded border border-slate-800 bg-[#0c1118] p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="font-medium text-slate-200">Personal decision journal (live)</div>
+            {onDownloadJournal && (
+              <button
+                type="button"
+                className="rounded bg-slate-800 px-2 py-1 hover:bg-slate-700"
+                onClick={onDownloadJournal}
+              >
+                Download journal CSV
+              </button>
+            )}
+          </div>
+          <p className="mt-1 text-[11px] text-slate-500">
+            Manual C5 setups you took or skipped in the Trade tab. Settled P&amp;L is real/manual — not research paper Touch P&amp;L.
+          </p>
+          <div className="mt-2 grid gap-1 sm:grid-cols-3 lg:grid-cols-6 text-[11px]">
+            <div>Taken: <span className="text-slate-100">{journalSummary.taken}</span></div>
+            <div>Skipped: <span className="text-slate-100">{journalSummary.skipped}</span></div>
+            <div>Unanswered: <span className="text-slate-100">{journalSummary.unanswered}</span></div>
+            <div>Open: <span className="text-slate-100">{journalSummary.open}</span></div>
+            <div>Pending contracts: <span className="text-slate-100">{journalSummary.pendingContracts}</span></div>
+            <div>
+              Settled P&amp;L:{' '}
+              <span className="text-slate-100">
+                {journalSummary.settledPnl == null ? '—' : journalSummary.settledPnl.toFixed(2)}
+              </span>
+            </div>
+          </div>
+          <div className="mt-3 border-t border-slate-800 pt-3">
+            <div className="font-medium text-slate-200">Did my decision help?</div>
+            <p className="mt-1 text-[11px] text-slate-500">
+              Matches the original click ID to the same C5 candle and the ±
+              {C5_STUDY_CONTRACT.barrierAbs} / {C5_STUDY_CONTRACT.duration}
+              {C5_STUDY_CONTRACT.durationUnit} paper path. A skipped miss is an avoided loss;
+              a skipped hit is an opportunity cost.
+            </p>
+            {decisionBaselines.length === 0 ? (
+              <p className="mt-2 text-[11px] text-slate-500">
+                No matching C5 decision-study outcomes in this run yet.
+              </p>
+            ) : (
+              <>
+                <div className="mt-2 text-[11px] text-slate-400">
+                  Matching outcomes: {decisionBaselines.length - decisionComparison.unanswered}
+                  {' · '}unanswered: {decisionComparison.unanswered}
+                </div>
+                <div className="mt-2 grid gap-2 md:grid-cols-2">
+                  {decisionComparison.groups.map((group) => {
+                    const decisionNet = group.taken
+                      ? group.paperGains - group.paperLosses
+                      : group.paperLosses - group.paperGains
+                    return (
+                      <div
+                        key={`${group.taken ? 'taken' : 'skip'}:${group.reason}`}
+                        className="rounded border border-slate-800 bg-slate-950/40 p-2 text-[11px]"
+                      >
+                        <div className="font-medium text-slate-200">{group.reason}</div>
+                        <div className="mt-1 text-slate-400">
+                          {group.setups} decisions · {group.hits} hits · {group.misses} misses
+                          {' · '}{group.pending} pending · {group.unknown} unknown
+                          {group.late ? ` · ${group.late} too late` : ''}
+                        </div>
+                        <div className={decisionNet >= 0 ? 'mt-1 text-emerald-300' : 'mt-1 text-rose-300'}>
+                          {group.taken ? 'Matching paper P&L' : 'Estimated P&L avoided'}:{' '}
+                          {group.settledPaper ? decisionNet.toFixed(2) : '—'}
+                        </div>
+                        {group.brokerTrades > 0 && (
+                          <div className="mt-1 text-slate-400">
+                            Broker settlements: {group.brokerTrades}
+                          </div>
+                        )}
+                        {Object.entries(group.brokerByAccount).map(([account, pnl]) => (
+                          <div key={account} className="mt-1 text-slate-400">
+                            Broker {account}: {pnl.toFixed(2)}
+                          </div>
+                        ))}
+                      </div>
+                    )
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+        </section>
+      )}
     </div>
   )
 }

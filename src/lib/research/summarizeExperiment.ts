@@ -4,6 +4,11 @@ import type { ExperimentState } from './experimentEngine'
 import { RESEARCH_CODE_VERSION } from './experimentEngine'
 import type { HorizonMin, ResearchObservation, StrategyId } from './strategies/types'
 import { HORIZON_MINUTES } from './horizons'
+import { c5StudyContract } from './contractSettings'
+import {
+  summarizeC5CohortBundle,
+  type C5CohortSummaryBundle,
+} from './c5ContextStudy'
 
 const INSUFFICIENT = 20
 
@@ -217,6 +222,9 @@ export function summarizeExperiment(state: ExperimentState): {
   bestOverall: BestPick | null
   bestRise: BestPick | null
   bestFall: BestPick | null
+  c5Context: C5CohortSummaryBundle
+  priorDiscoveryC5Summary: C5CohortSummaryBundle | null
+  c5ObservationCount: number
   notes: string[]
 } {
   const byId = new Map<StrategyId, ResearchObservation[]>()
@@ -309,6 +317,9 @@ export function summarizeExperiment(state: ExperimentState): {
     winRate: s.fall.winRate, hits: s.fall.hits, misses: s.fall.misses,
   }))
 
+  const c5Rows = state.c5ContextObservations ?? []
+  const c5Context = summarizeC5CohortBundle(c5Rows)
+
   return {
     generatedAt: Math.floor(Date.now() / 1000),
     codeVersion: state.codeVersion,
@@ -328,6 +339,9 @@ export function summarizeExperiment(state: ExperimentState): {
     bestOverall,
     bestRise,
     bestFall,
+    c5Context,
+    priorDiscoveryC5Summary: state.priorDiscoveryC5Summary ?? null,
+    c5ObservationCount: c5Rows.length,
     notes: [
       ...(state.codeVersion !== RESEARCH_CODE_VERSION ? ['Legacy / older research engine run: preserved read-only. Start a new discovery with the current 8 signal strategies.'] : []),
       'Paper comparison of 8 methods: Supertrend flip, UT solo, and combos with EMA50 / candle wicks.',
@@ -352,6 +366,9 @@ export function summarizeExperiment(state: ExperimentState): {
       'The <20 marker only flags a very small settled sample; removing it does not establish statistical significance.',
       'Never auto-enables a top strategy in production.',
       'Prior filter-comparison reports that passed filterConfig into runTouchBacktest did not apply filters.',
+      'C5 context study: prospective confirmed C5 with frozen M5/M15 closed context. Cohort Touch rates are observed paper results only — not win probabilities.',
+      'C5 cohorts: all confirmed C5; M5 Supports; M15 Supports; both Support. Excluded rows = observations where that timeframe did not Support (Opposes/Mixed/null).',
+      'Personal decision journal P/L is live/manual and separate from research paper Touch P/L.',
     ],
   }
 }
@@ -368,6 +385,8 @@ const CSV_HEADER = [
   'quoteEntryPrice', 'quoteBarrier', 'quoteTouchStatus', 'quoteFirstTouchEpoch', 'ask', 'payout', 'codeVersion',
   'h1Reason', 'h3Reason', 'h5Reason', 'h7Reason', 'h7TargetEpoch', 'h7ObservedEpoch',
   'referenceTouchReason', 'quoteTouchReason', 'quoteCoverageLost',
+  'm5Trend', 'm5Agreement', 'm5Behavior', 'm15Trend', 'm15Agreement', 'm15Behavior',
+  'm5ClosedContext', 'm15ClosedContext',
 ] as const
 
 function csvCell(v: unknown): string {
@@ -437,6 +456,31 @@ export function exportObservationsCsv(state: ExperimentState): string {
       '', '', state.codeVersion,
       '', '', '', '', '', '', '', '', '',
     ]))
+  }
+  for (const o of state.c5ContextObservations ?? []) {
+    const t = o.touch
+    const product = state.codeVersion === RESEARCH_CODE_VERSION ? c5StudyContract(c) : c
+    const fields: Partial<Record<typeof CSV_HEADER[number], unknown>> = {
+      rowType: 'c5_context', id: o.id, strategyId: 'C5', side: o.side,
+      candleTime: o.candleTime, signalEpoch: o.signalEpoch, entryPrice: o.entryReferencePrice,
+      forming: false, reason: o.reason, passed: o.passed, total: o.total,
+      flagUt: o.confirmations.ut, flagSupertrend: o.confirmations.supertrend,
+      flagSma: o.confirmations.sma, flagRsi: o.confirmations.rsi, flagAo: o.confirmations.ao,
+      frozenBarrierAbs: t?.barrierAbs ?? product.barrierAbs, frozenDurationMin: t?.durationMin ?? product.duration,
+      frozenStake: t?.stake ?? product.paperStake, frozenCurrency: product.currency, mode: state.mode,
+      frozenEntryCooldownSec: 0, frozenPostWinCooldownSec: 0, referenceTouchStatus: t?.status,
+      referenceFirstTouchEpoch: t?.firstTouchEpoch, referenceTouchReason: t?.reason,
+      quotePnl: t?.paperPnl, quoteAvailable: t?.quoteAvailable, quoteStatus: t?.quoteStatus,
+      quoteReason: t?.quoteReason, quoteRequestEpoch: t?.quoteRequestEpoch, quoteResponseEpoch: t?.quoteResponseEpoch,
+      quoteEntryPrice: t?.quotedPath?.paperEntryPrice, quoteEntryEpoch: t?.quotedPath?.paperEntryEpoch,
+      quoteBarrier: t?.quotedPath?.absoluteBarrier, quoteTouchStatus: t?.quotedPath?.status,
+      quoteFirstTouchEpoch: t?.quotedPath?.firstTouchEpoch, quoteTouchReason: t?.quotedPath?.reason,
+      quoteCoverageLost: t?.quotedPath?.coverageLost, ask: t?.proposalAsk, payout: t?.proposalPayout,
+      codeVersion: state.codeVersion, m5Trend: o.m5.trend, m5Agreement: o.m5.agreement, m5Behavior: o.m5.behavior,
+      m15Trend: o.m15.trend, m15Agreement: o.m15.agreement, m15Behavior: o.m15.behavior,
+      m5ClosedContext: JSON.stringify(o.m5), m15ClosedContext: JSON.stringify(o.m15),
+    }
+    lines.push(csvRow(CSV_HEADER.map(k => fields[k])))
   }
   return lines.join('\n')
 }

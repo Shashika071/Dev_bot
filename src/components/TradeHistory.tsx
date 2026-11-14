@@ -9,6 +9,9 @@ export function TradeHistory({
 }) {
   const buys = rows.filter((r) => r.ok && r.contractId != null).length
   const fails = rows.filter((r) => !r.ok).length
+  const settledPnl = rows
+    .filter((r) => r.settled && r.profit != null)
+    .reduce((s, r) => s + (r.profit ?? 0), 0)
 
   const download = () => {
     const blob = new Blob([exportTradeHistoryCsv(rows)], { type: 'text/csv' })
@@ -26,7 +29,9 @@ export function TradeHistory({
         <div>
           <div className="text-sm font-semibold text-slate-200">Trade history</div>
           <div className="text-[11px] text-slate-500">
-            {rows.length} events · {buys} buys · {fails} skipped/failed · saved in this browser
+            {rows.length} events · {buys} buys · {fails} skipped/failed
+            {buys > 0 ? ` · settled P/L ${settledPnl.toFixed(2)}` : ''}
+            {' · '}saved in this browser (live results, not paper)
           </div>
         </div>
         <div className="flex gap-2">
@@ -62,6 +67,9 @@ export function TradeHistory({
                 <th className="px-2 py-1.5">Signal candle (UTC)</th>
                 <th className="px-2 py-1.5">Side</th>
                 <th className="px-2 py-1.5">Barrier</th>
+                <th className="px-2 py-1.5">Buy</th>
+                <th className="px-2 py-1.5">Payout</th>
+                <th className="px-2 py-1.5">P/L</th>
                 <th className="px-2 py-1.5">Status</th>
                 <th className="px-2 py-1.5">Contract</th>
                 <th className="px-2 py-1.5">Message</th>
@@ -88,8 +96,13 @@ export function TradeHistory({
                     {r.signal}
                   </td>
                   <td className="px-2 py-1.5 tabular-nums">{r.barrier}</td>
+                  <td className="px-2 py-1.5 tabular-nums">{r.buyPrice != null ? r.buyPrice.toFixed(2) : '—'}</td>
+                  <td className="px-2 py-1.5 tabular-nums">{r.payout != null ? r.payout.toFixed(2) : '—'}</td>
+                  <td className={`px-2 py-1.5 tabular-nums ${r.profit != null && r.profit >= 0 ? 'text-emerald-400' : r.profit != null ? 'text-rose-300' : 'text-slate-500'}`}>
+                    {r.profit != null ? r.profit.toFixed(2) : '—'}
+                  </td>
                   <td className={`px-2 py-1.5 font-semibold ${r.ok ? 'text-emerald-400' : 'text-rose-300'}`}>
-                    {r.ok ? (r.contractId != null ? 'BOUGHT' : 'OK') : 'SKIP/FAIL'}
+                    {r.settled ? 'SETTLED' : r.ok ? (r.contractId != null ? 'BOUGHT' : 'OK') : 'SKIP/FAIL'}
                   </td>
                   <td className="px-2 py-1.5 tabular-nums text-slate-400">
                     {r.contractId != null ? `#${r.contractId}` : '—'}

@@ -1,8 +1,18 @@
-import type { useAutoTrade } from '../hooks/useAutoTrade'
+﻿import type { useAutoTrade, ManualFillInfo } from '../hooks/useAutoTrade'
 
 type AutoTrade = ReturnType<typeof useAutoTrade>
 
-export function ManualTradeBar({ trade }: { trade: AutoTrade }) {
+export function ManualTradeBar({
+  trade,
+  onBeforeManual,
+  onManualFill,
+  onManualFailure,
+}: {
+  trade: AutoTrade
+  onBeforeManual?: (side: 'RISE' | 'FALL', attemptId: string) => void | Promise<void>
+  onManualFill?: (fill: ManualFillInfo, attemptId: string) => void
+  onManualFailure?: (attemptId: string) => void
+}) {
   const connected = trade.status === 'CONNECTED'
   const cooling = trade.cooldownLeft > 0
   const locked = !connected || trade.busy || cooling
@@ -18,6 +28,16 @@ export function ManualTradeBar({ trade }: { trade: AutoTrade }) {
     : `stake ${trade.stake}`
   const barrier = trade.barrierAbs
   const dur = `${trade.duration}${trade.durationUnit}`
+
+  const click = async (side: 'RISE' | 'FALL') => {
+    const attemptId = typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `${Date.now()}:${Math.random().toString(36).slice(2)}`
+    await onBeforeManual?.(side, attemptId)
+    const fills = await trade.placeManualTrade(side, attemptId)
+    if (!fills.length) onManualFailure?.(attemptId)
+    for (const fill of fills) onManualFill?.(fill, attemptId)
+  }
 
   return (
     <div className="relative z-20 shrink-0 border-t border-slate-800 bg-[#0c1118] px-3 py-3">
@@ -44,7 +64,7 @@ export function ManualTradeBar({ trade }: { trade: AutoTrade }) {
         <button
           type="button"
           disabled={locked}
-          onClick={() => void trade.placeManualTrade('RISE')}
+          onClick={() => void click('RISE')}
           className="cursor-pointer rounded-lg border border-emerald-500/50 bg-emerald-600 px-4 py-3 text-sm font-bold text-white shadow hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
           title={lockReason ?? 'Buy ONETOUCH with +barrier'}
         >
@@ -53,7 +73,7 @@ export function ManualTradeBar({ trade }: { trade: AutoTrade }) {
         <button
           type="button"
           disabled={locked}
-          onClick={() => void trade.placeManualTrade('FALL')}
+          onClick={() => void click('FALL')}
           className="cursor-pointer rounded-lg border border-rose-500/50 bg-rose-600 px-4 py-3 text-sm font-bold text-white shadow hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-40"
           title={lockReason ?? 'Buy ONETOUCH with −barrier'}
         >

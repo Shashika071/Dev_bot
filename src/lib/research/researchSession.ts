@@ -1,8 +1,11 @@
 import type { Candle, Tick } from '../types'
 import { applyTick } from '../deriv/candles'
+import { CONTEXT_M1_HISTORY } from '../timeframes/candleAggregation'
 import { createInitialState, onTick, advanceExperimentClock, interruptResearchFeed, resumeCollecting,
   RESEARCH_CODE_VERSION, type ExperimentState } from './experimentEngine'
 import { attachProposalQuote, type PaperQuote } from './touchPaper'
+import { attachC5ProposalQuote } from './c5ContextStudy'
+import { c5StudyContract } from './contractSettings'
 
 export interface ResearchSession { state: ExperimentState; candles: Candle[]; sequence: number }
 export type ResearchEvent =
@@ -30,14 +33,19 @@ export function applyResearchEvent(session: ResearchSession, event: ResearchEven
       const t = event.tick
       if (!Number.isFinite(t.epoch) || !Number.isFinite(t.quote) || t.quote <= 0
         || (state.lastTickEpoch != null && t.epoch <= state.lastTickEpoch)) break
-      candles = applyTick(candles, t).candles.slice(-1000)
+      candles = applyTick(candles, t).candles.slice(-CONTEXT_M1_HISTORY)
       state = onTick(state, t, candles, event.receiptEpoch, event.healthy)
       break
     }
     case 'quote': {
       const ids = new Set(event.ids)
-      state = { ...state, observations: state.observations.map((o) => ids.has(o.id)
-        ? attachProposalQuote(o, event.quote, state.contract) : o) }
+      state = {
+        ...state,
+        observations: state.observations.map((o) => ids.has(o.id)
+          ? attachProposalQuote(o, event.quote, state.contract) : o),
+        c5ContextObservations: (state.c5ContextObservations ?? []).map((o) => ids.has(o.id)
+          ? attachC5ProposalQuote(o, event.quote, c5StudyContract(state.contract)) : o),
+      }
       break
     }
     case 'clock': state = advanceExperimentClock(state, event.now); break

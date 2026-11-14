@@ -1,0 +1,58 @@
+//@version=6
+strategy("V100 | CCI zero + MACD cross + SAR", overlay = false, pyramiding = 0, calc_on_every_tick = false, process_orders_on_close = false, default_qty_type = strategy.fixed, default_qty_value = 1)
+
+// Apply to a regular 1-minute candlestick chart for the pictured setup.
+cciSource = input.source(hlc3, "CCI source")
+cciLevel = input.float(0.0, "CCI crossing level")
+maxBarsApart = input.int(0, "Maximum bars between CCI and MACD crosses", minval = 0, maxval = 20, tooltip = "0 requires both crosses on one candle. A larger value allows either cross first. The SAR must agree when the second cross closes.")
+
+cciValue = ta.cci(cciSource, 20)
+[macdLine, signalLine, histogram] = ta.macd(close, 12, 26, 9)
+sarValue = ta.sar(0.02, 0.02, 0.20)
+
+cciUp = ta.crossover(cciValue, cciLevel)
+cciDown = ta.crossunder(cciValue, cciLevel)
+macdUp = ta.crossover(macdLine, signalLine)
+macdDown = ta.crossunder(macdLine, signalLine)
+
+// A new cross always replaces the previous cross from that indicator.
+var int cciBar = na
+var int cciSide = 0
+var int macdBar = na
+var int macdSide = 0
+bool buySignal = false
+bool sellSignal = false
+
+if barstate.isconfirmed
+    if cciUp or cciDown
+        cciBar := bar_index
+        cciSide := cciUp ? 1 : -1
+    if macdUp or macdDown
+        macdBar := bar_index
+        macdSide := macdUp ? 1 : -1
+
+    bool newCross = cciUp or cciDown or macdUp or macdDown
+    bool paired = not na(cciBar) and not na(macdBar) and math.abs(cciBar - macdBar) <= maxBarsApart
+    if newCross and paired and cciSide == macdSide
+        buySignal := cciSide == 1 and cciValue > cciLevel and macdLine > signalLine and sarValue < close
+        sellSignal := cciSide == -1 and cciValue < cciLevel and macdLine < signalLine and sarValue > close
+        if buySignal or sellSignal
+            cciBar := na
+            macdBar := na
+
+// Strategy Tester reverses on the next opposite signal. Market fills use the next bar's open.
+if buySignal
+    strategy.entry("Buy", strategy.long)
+    alert("BUY / RISE | " + syminfo.ticker + " | CCI and MACD crossed up, SAR below price", alert.freq_once_per_bar_close)
+if sellSignal
+    strategy.entry("Sell", strategy.short)
+    alert("SELL / FALL | " + syminfo.ticker + " | CCI and MACD crossed down, SAR above price", alert.freq_once_per_bar_close)
+
+plot(cciValue, "CCI 20", color = color.blue, linewidth = 2)
+hline(cciLevel, "CCI trigger", color = color.gray, linestyle = hline.style_solid)
+plot(sarValue, "Parabolic SAR", color = color.rgb(42, 149, 211), style = plot.style_circles, linewidth = 2, force_overlay = true)
+plotshape(buySignal, title = "BUY / RISE", text = "BUY", style = shape.labelup, location = location.belowbar, color = color.teal, textcolor = color.white, force_overlay = true)
+plotshape(sellSignal, title = "SELL / FALL", text = "SELL", style = shape.labeldown, location = location.abovebar, color = color.red, textcolor = color.white, force_overlay = true)
+plot(macdLine, "MACD line", display = display.data_window)
+plot(signalLine, "MACD signal", display = display.data_window)
+plot(histogram, "MACD histogram", display = display.data_window)

@@ -3,11 +3,15 @@ import { TradingChart } from './components/TradingChart'
 import { LiveEntryPanel } from './components/LiveEntryPanel'
 import { useMarketAndSignals } from './hooks/useMarketAndSignals'
 import { useAutoTrade } from './hooks/useAutoTrade'
+import { useTimeframeContext } from './hooks/useTimeframeContext'
+import { useDecisionJournal } from './hooks/useDecisionJournal'
 import { AutoTradePanel } from './components/AutoTradePanel'
 import { ManualTradeBar } from './components/ManualTradeBar'
 import { ResearchTab } from './components/ResearchTab'
 import { contextAt } from './lib/strategy/chartContext'
 import { deriveEntryDisplay } from './lib/strategy/entryDisplay'
+import { emptyMultiTimeframeContext } from './lib/timeframes/timeframeContext'
+import { journalCandleTime } from './lib/journal/decisionJournal'
 
 const SYMBOL = import.meta.env.VITE_DERIV_SYMBOL || 'R_100'
 const TAB_KEY = 'v100_ui_tab_v1'
@@ -22,6 +26,19 @@ function loadTab(): TabId {
   } catch {
     return 'chart'
   }
+}
+
+/** Directional agreement only for active 4/4 or exact 3/4 lean. */
+function contextSide(
+  entry: ReturnType<typeof deriveEntryDisplay>,
+  liveSetup: ReturnType<typeof import('./lib/strategy/liveConfidence').computeLiveSetupConfidence>,
+): 'RISE' | 'FALL' | null {
+  const side = entry.side ?? entry.watchSide
+  if (!side) return null
+  if (entry.state !== 'WAIT') return entry.side
+  const setup = side === 'RISE' ? liveSetup.rise : liveSetup.fall
+  if (setup.passed === 3 && liveSetup.lean === side) return side
+  return null
 }
 
 export default function App() {
@@ -46,14 +63,62 @@ export default function App() {
 
   const context = useMemo(
     () => market ? contextAt(market.candles, market.candles.length - 1, true) : null,
-    [market?.candles, market?.lastTickEpoch],
+    [market],
   )
   const entry = useMemo(() => deriveEntryDisplay({
     market, liveSignal, liveSetup, signalMeta, nowSec,
     barrierAbs: trade.barrierAbs, duration: trade.duration, durationUnit: trade.durationUnit,
   }), [market, liveSignal, liveSetup, signalMeta, nowSec, trade.barrierAbs, trade.duration, trade.durationUnit])
 
+  const m1ContextSide = useMemo(() => contextSide(entry, liveSetup), [entry, liveSetup])
+  const timeframe = useTimeframeContext(market, m1ContextSide, nowSec)
+
+  const displaySide = entry.side ?? entry.watchSide
+  // A confirmed signal belongs to the candle that produced it, even though
+  // liveSetup has already advanced to the next forming minute.
+  const candleTime = journalCandleTime(entry.state, liveSignal?.time, liveSetup.candleTime)
+  const journal = useDecisionJournal({
+    entry,
+    liveSetup,
+    context: timeframe,
+    side: displaySide,
+    candleTime,
+    price: market?.lastPrice ?? null,
+    tickEpoch: market?.lastTickEpoch ?? null,
+    nowSec,
+  })
+  const { recordSettlement } = journal
+  const { setOnSettlement, acknowledgeSettlement, setQuoteSide } = trade
+
+  useEffect(() => {
+    setOnSettlement((row) => {
+      const recorded = recordSettlement({
+        attemptId: row.attemptId,
+        accountId: row.accountId,
+        execution: {
+          contractId: row.contractId,
+          entrySpot: row.entrySpot,
+          barrier: row.barrier,
+          buyPrice: row.buyPrice,
+          payout: row.payout,
+          profit: row.profit,
+          status: row.status,
+          currency: row.currency,
+        },
+      })
+      if (recorded) acknowledgeSettlement(row.accountId, row.contractId)
+    })
+    return () => setOnSettlement(null)
+  }, [setOnSettlement, acknowledgeSettlement, recordSettlement])
+
+  // Keep a fresh display quote for the current watch/active side.
+  useEffect(() => {
+    const side = m1ContextSide ?? (entry.state !== 'WAIT' ? entry.side : null)
+    setQuoteSide(side)
+  }, [m1ContextSide, entry.state, entry.side, setQuoteSide])
+
   const tradeConnected = trade.status === 'CONNECTED'
+  const quote = trade.liveQuote
 
   return (
     <div className="flex h-screen min-h-[650px] flex-col bg-[#0b0f14] text-slate-100">
@@ -136,13 +201,46 @@ export default function App() {
               liveSetup={liveSetup}
               entry={entry}
               context={context}
+              timeframe={timeframe ?? emptyMultiTimeframeContext(m1ContextSide)}
               barrierAbs={trade.barrierAbs}
               sound={sound}
               onToggleSound={() => setSound(!sound)}
+              quote={quote}
+              canSkip
+              onSkip={(reason) => journal.recordSkip(reason)}
             />
             </div>
           </div>
-          <ManualTradeBar trade={trade} />
+          <ManualTradeBar
+            trade={trade}
+            onBeforeManual={(side, attemptId) => {
+              journal.recordManualClick(side, attemptId, quote.available ? {
+                ask: quote.ask,
+                payout: quote.payout,
+                barrier: quote.barrier,
+                breakEven: quote.breakEven,
+                winGain: quote.winGain,
+                maxLoss: quote.maxLoss,
+              } : undefined)
+            }}
+            onManualFill={(fill, attemptId) => {
+              journal.recordBuy({
+                attemptId,
+                accountId: fill.accountId,
+                execution: {
+                  contractId: fill.contractId,
+                  entrySpot: fill.entrySpot,
+                  barrier: fill.barrier,
+                  buyPrice: fill.buyPrice,
+                  payout: fill.payout,
+                  profit: null,
+                  status: 'open',
+                  currency: fill.currency,
+                },
+              })
+            }}
+            onManualFailure={(attemptId) => journal.recordManualFailure(attemptId)}
+          />
         </>
       ) : tab === 'trade' ? (
         <div className="min-h-0 flex-1 overflow-auto">
@@ -150,7 +248,12 @@ export default function App() {
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-auto">
-          <ResearchTab market={market} />
+          <ResearchTab
+            market={market}
+            journalSummary={journal.summary}
+            journal={journal.journal}
+            onDownloadJournal={journal.downloadCsv}
+          />
         </div>
       )}
     </div>

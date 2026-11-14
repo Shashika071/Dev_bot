@@ -35,6 +35,11 @@ export const DEFAULT_FROZEN_CONTRACT: FrozenContractSettings = {
   postWinCooldownSec: POST_WIN_COOLDOWN_SEC,
 }
 
+/** The manual decision study has its own contract; other research keeps its run settings. */
+export function c5StudyContract(run: FrozenContractSettings): FrozenContractSettings {
+  return { ...run, barrierAbs: 0.01, duration: 9, durationUnit: 'm', entryCooldownSec: 0, postWinCooldownSec: 0 }
+}
+
 /** Fill missing cooldown fields on older saved experiments. */
 export function normalizeContractSettings(
   partial?: Partial<FrozenContractSettings> | null,

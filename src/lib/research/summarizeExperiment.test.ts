@@ -5,6 +5,7 @@ import { makeHorizons } from './horizons'
 import { maybeStartTouchPaper } from './touchPaper'
 import { DEFAULT_FROZEN_CONTRACT } from './contractSettings'
 import type { ResearchObservation } from './strategies/types'
+import { c5ContextId, type C5ContextObservation } from './c5ContextStudy'
 
 function row(id: number, status: 'hit' | 'miss' | 'unknown' | 'pending', quote = true): ResearchObservation {
   const tick = { epoch: 1000, quote: 100, symbol: 'R_100' }
@@ -155,5 +156,47 @@ describe('research outcome coverage', () => {
     expect(r1.rise.ifNoTouchPrefer).toBe('opposite_side')
     const r2 = summary.strategies.find((s) => s.id === 'R2')!
     expect(r2.fall.ifNoTouchPrefer).toBe('same_side')
+  })
+
+  it('includes C5 context cohort summaries separate from R1–R8', () => {
+    const obs: C5ContextObservation = {
+      id: c5ContextId(200, 'FALL'),
+      side: 'FALL',
+      candleTime: 200,
+      signalEpoch: 260,
+      receiptEpoch: 260,
+      entryReferencePrice: 50,
+      entryTick: { epoch: 260, quote: 50, symbol: 'R_100' },
+      reason: 'c5',
+      passed: 4,
+      total: 4,
+      confirmations: { ut: true, supertrend: true, sma: true, ao: false, rsi: true },
+      m5: {
+        timeframe: 5, trend: 'Down', support: null, resistance: null,
+        behavior: null, behaviorText: null, agreement: 'Supports', agreementReason: '',
+        candleTime: 180, forming: false,
+      },
+      m15: {
+        timeframe: 15, trend: 'Down', support: null, resistance: null,
+        behavior: null, behaviorText: null, agreement: 'Opposes', agreementReason: '',
+        candleTime: 120, forming: false,
+      },
+      lastTickEpoch: 260,
+      touch: {
+        paperEntryEpoch: 260, paperEntryPrice: 50, absoluteBarrier: 49.5,
+        status: 'miss', barrierAbs: 0.5, durationMin: 7, stake: 1,
+        quoteAvailable: false, quoteStatus: 'unavailable',
+      },
+    }
+    const prior = summarizeExperiment({ ...createInitialState(), c5ContextObservations: [obs] }).c5Context
+    const summary = summarizeExperiment({
+      ...createInitialState('confirmation', ['R1']),
+      c5ContextObservations: [],
+      priorDiscoveryC5Summary: prior,
+    })
+    expect(summary.c5ObservationCount).toBe(0)
+    expect(summary.priorDiscoveryC5Summary?.observationCount).toBe(1)
+    expect(summary.c5Context.cohorts.find((c) => c.id === 'all')?.misses).toBe(0)
+    expect(summary.priorDiscoveryC5Summary?.cohorts.find((c) => c.id === 'm5_support')?.sampleSize).toBe(1)
   })
 })

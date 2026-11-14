@@ -1,7 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listDerivAccounts, type DerivAccount } from '../lib/deriv/tradingAuth'
 import { DerivTradingClient } from '../lib/deriv/tradingClient'
-import { placeTouchTrades, type TouchSideMode } from '../lib/deriv/touchTrade'
+import {
+  brokerNumber, isManualSettlement, loadTrackedContracts, reconcileContract, trackingKey,
+  type ManualSettlement, type TrackedContract,
+} from '../lib/deriv/contractTracking'
+export type { ManualSettlement } from '../lib/deriv/contractTracking'
+import {
+  formatTouchBarrier,
+  placeTouchTrades,
+  proposeOneTouch,
+  type TouchSideMode,
+} from '../lib/deriv/touchTrade'
+import {
+  quoteEconomicsFromProposal,
+  QUOTE_MAX_AGE_SEC,
+  type QuoteDisplay,
+} from '../lib/deriv/quoteEconomics'
 import type { ConfirmationFlags, ConnectionStatus, FinalSignal, TrendDir } from '../lib/types'
 import { C5_STRATEGY_ID } from '../lib/strategy/c5Strategy'
 import {
@@ -28,6 +43,15 @@ export type TradeLogRow = {
   contractId?: number | null
   /** Candle open time in epoch seconds, matching the chart marker. */
   candleTime?: number
+  buyPrice?: number | null
+  payout?: number | null
+  entrySpot?: number | null
+  profit?: number | null
+  settled?: boolean
+  source?: 'auto' | 'manual'
+  accountId?: string
+  attemptId?: string
+  absoluteBarrier?: number | null
 }
 
 function loadTradeHistory(): TradeLogRow[] {
@@ -54,14 +78,30 @@ function saveTradeHistory(rows: TradeLogRow[]) {
 }
 
 export function exportTradeHistoryCsv(rows: TradeLogRow[]): string {
-  const header = 'utc,signal,barrier,ok,contract_id,message,signal_candle_utc'
+  const header = 'utc,signal,barrier,ok,contract_id,buy_price,payout,entry_spot,profit,settled,source,message,signal_candle_utc,absolute_barrier,account_id,attempt_id'
   const lines = rows.map((r) => {
     const utc = new Date(r.at).toISOString()
     const msg = `"${r.message.replaceAll('"', '""')}"`
     const candleUtc = r.candleTime != null ? new Date(r.candleTime * 1000).toISOString() : ''
-    return [utc, r.signal, r.barrier, r.ok ? '1' : '0', r.contractId ?? '', msg, candleUtc].join(',')
+    return [
+      utc, r.signal, r.barrier, r.ok ? '1' : '0', r.contractId ?? '',
+      r.buyPrice ?? '', r.payout ?? '', r.entrySpot ?? '', r.profit ?? '',
+      r.settled ? '1' : '0', r.source ?? '', msg, candleUtc, r.absoluteBarrier ?? '', r.accountId ?? '', r.attemptId ?? '',
+    ].join(',')
   })
   return [header, ...lines].join('\n')
+}
+
+export type ManualFillInfo = {
+  side: 'RISE' | 'FALL'
+  contractId: number
+  accountId: string
+  currency: string
+  absoluteBarrier: number | null
+  barrier: string
+  buyPrice: number | null
+  payout: number | null
+  entrySpot: number | null
 }
 
 type StoredPrefs = {
@@ -248,13 +288,24 @@ export function useAutoTrade(symbol: string) {
   const [balance, setBalance] = useState<number | null>(null)
   const [currency, setCurrency] = useState(prefs0.currency)
   const [log, setLog] = useState<TradeLogRow[]>(() => loadTradeHistory())
+  const [liveQuote, setLiveQuote] = useState<QuoteDisplay>({
+    available: false,
+    reason: 'Quote unavailable',
+  })
+  const [quoteSide, setQuoteSideState] = useState<'RISE' | 'FALL' | null>(null)
+  const quoteSideRef = useRef<'RISE' | 'FALL' | null>(null)
+  const [contracts] = useState(() => {
+    try { return { rows: loadTrackedContracts(), error: null as string | null } }
+    catch { return { rows: new Map<string, TrackedContract>(), error: 'Unable to read saved contract tracking.' } }
+  })
+  const onSettlementRef = useRef<((row: ManualSettlement) => void) | null>(null)
+  const sessionRef = useRef<{ client: DerivTradingClient; accountId: string; subscriptions: Set<number> } | null>(null)
   const [cooldownUntil, setCooldownUntil] = useState(prefs0.cooldownUntil)
   const [cooldownLeft, setCooldownLeft] = useState(0)
   const clientRef = useRef<DerivTradingClient | null>(null)
   const tradedSignals = useRef(new Set<string>())
   const cooldownUntilRef = useRef(prefs0.cooldownUntil)
   const tradeLockRef = useRef(false)
-  const restoreTried = useRef(false)
   const pendingAuto = useRef(prefs0.autoEnabled)
   const readyToPersist = useRef(false)
   const settingsRef = useRef({
@@ -323,12 +374,59 @@ export function useAutoTrade(symbol: string) {
     saveTradeHistory([])
   }, [])
 
+  const storeContract = useCallback((row: TrackedContract) => {
+    const key = trackingKey(row.accountId, row.contractId)
+    contracts.rows.set(key, row)
+    try { localStorage.setItem(key, JSON.stringify(row)) }
+    catch { setError('Could not save the contract for recovery after reload.') }
+  }, [contracts])
+
+  const forgetContract = useCallback((account: string, contractId: number) => {
+    const key = trackingKey(account, contractId)
+    contracts.rows.delete(key)
+    try { localStorage.removeItem(key) }
+    catch { setError('Could not clear the saved settlement receipt.') }
+  }, [contracts])
+
+  const acknowledgeSettlement = useCallback((account: string, contractId: number) => {
+    const row = contracts.rows.get(trackingKey(account, contractId))
+    if (row && isManualSettlement(row) && row.profit != null) forgetContract(account, contractId)
+  }, [contracts, forgetContract])
+
+  const setOnSettlement = useCallback((listener: ((row: ManualSettlement) => void) | null) => {
+    onSettlementRef.current = listener
+    if (!listener) return
+    for (const record of contracts.rows.values()) {
+      if (isManualSettlement(record)) listener(record)
+    }
+  }, [contracts])
+
+  const subscribeContracts = useCallback(() => {
+    const session = sessionRef.current
+    if (!session || session.client.connectionStatus !== 'CONNECTED') return
+    for (const row of contracts.rows.values()) {
+      if (row.accountId !== session.accountId || (row.settled && row.profit != null)
+        || session.subscriptions.has(row.contractId)) continue
+      session.subscriptions.add(row.contractId)
+      void session.client.request({
+        proposal_open_contract: 1, contract_id: row.contractId, subscribe: 1,
+      }).catch(() => { session.subscriptions.delete(row.contractId) })
+    }
+  }, [contracts])
+
+  useEffect(() => {
+    if (contracts.error) setError(contracts.error)
+    const retry = setInterval(subscribeContracts, 15000)
+    return () => clearInterval(retry)
+  }, [contracts, subscribeContracts])
+
   const disconnect = useCallback(() => {
     pendingAuto.current = false
     setAutoEnabled(false)
     setWantConnected(false)
     clientRef.current?.close()
     clientRef.current = null
+    sessionRef.current = null
     setStatus('DISCONNECTED')
     setBalance(null)
   }, [])
@@ -383,17 +481,54 @@ export function useAutoTrade(symbol: string) {
     setWantConnected(true)
     clientRef.current?.close()
     const client = new DerivTradingClient(t, a, id)
-    client.setStatusHandler(setStatus)
+    const session = { client, accountId: id, subscriptions: new Set<number>() }
+    sessionRef.current = session
+    clientRef.current = client
+    client.setStatusHandler((nextStatus) => {
+      if (sessionRef.current !== session) return
+      setStatus(nextStatus)
+      if (nextStatus === 'CONNECTED') subscribeContracts()
+      else {
+        session.subscriptions.clear()
+        setLiveQuote({ available: false, reason: 'Quote unavailable' })
+      }
+    })
     client.subscribe((msg) => {
+      if (sessionRef.current !== session) return
       if (msg.msg_type === 'balance') {
         const b = msg.balance as { balance?: number; currency?: string } | undefined
         if (typeof b?.balance === 'number') setBalance(b.balance)
         if (typeof b?.currency === 'string') setCurrency(b.currency)
       }
+      if (msg.msg_type === 'proposal_open_contract') {
+        const detail = msg.proposal_open_contract as Record<string, unknown> | undefined
+        const contractId = brokerNumber(detail?.contract_id)
+        if (!detail || contractId == null) return
+        const previous = contracts.rows.get(trackingKey(id, contractId))
+        if (!previous) return
+        const updated = reconcileContract(previous, detail)
+        if (updated === previous) return
+        storeContract(updated)
+        setLog((prev) => {
+          const next = prev.map((row) =>
+            row.contractId === contractId && row.accountId === id
+              ? { ...row, entrySpot: updated.entrySpot, absoluteBarrier: updated.absoluteBarrier,
+                  buyPrice: updated.buyPrice, payout: updated.payout, profit: updated.profit, settled: updated.settled }
+              : row,
+          )
+          saveTradeHistory(next)
+          return next
+        })
+        if (updated.settled) {
+          session.subscriptions.delete(contractId)
+          if (isManualSettlement(updated)) onSettlementRef.current?.(updated)
+          else if (updated.profit != null) forgetContract(id, contractId)
+        }
+      }
     })
     try {
       await client.connect()
-      clientRef.current = client
+      if (sessionRef.current !== session) return false
       const bal = await client.request({ balance: 1, subscribe: 1 })
       const b = bal.balance as { balance?: number; currency?: string } | undefined
       if (typeof b?.balance === 'number') setBalance(b.balance)
@@ -406,6 +541,8 @@ export function useAutoTrade(symbol: string) {
       return true
     } catch (err) {
       client.close()
+      if (sessionRef.current !== session) return false
+      sessionRef.current = null
       clientRef.current = null
       setStatus('DISCONNECTED')
       // Keep Auto trade ON preference after refresh/reconnect failure — only Disconnect clears it.
@@ -414,12 +551,11 @@ export function useAutoTrade(symbol: string) {
     } finally {
       setBusy(false)
     }
-  }, [appId, token, accountId])
+  }, [appId, token, accountId, contracts, forgetContract, storeContract, subscribeContracts])
 
   // Restore saved credentials + reconnect after refresh/close.
+  const initialConnection = useRef({ loadAccounts, connect })
   useEffect(() => {
-    if (restoreTried.current) return
-    restoreTried.current = true
     if (!prefs0.appId.trim() || !prefs0.token.trim()) return
 
     let cancelled = false
@@ -429,7 +565,7 @@ export function useAutoTrade(symbol: string) {
     if (wantAuto) setAutoEnabled(true)
 
     void (async () => {
-      const rows = await loadAccounts({
+      const rows = await initialConnection.current.loadAccounts({
         token: prefs0.token,
         appId: prefs0.appId,
         accountId: prefs0.accountId,
@@ -440,7 +576,7 @@ export function useAutoTrade(symbol: string) {
         || rows[0]?.account_id
         || prefs0.accountId
       if (!wantWs || !id) return
-      await connect({
+      await initialConnection.current.connect({
         token: prefs0.token,
         appId: prefs0.appId,
         accountId: id,
@@ -452,8 +588,9 @@ export function useAutoTrade(symbol: string) {
       cancelled = true
       clientRef.current?.close()
       clientRef.current = null
+      sessionRef.current = null
     }
-  }, [loadAccounts, connect, prefs0])
+  }, [prefs0])
 
   /**
    * Once the VPS worker successfully takes ownership, keep it until Auto OFF.
@@ -587,6 +724,69 @@ export function useAutoTrade(symbol: string) {
     return () => { cancelled = true; clearInterval(id) }
   }, [autoEnabled, applyRemoteCooldown, setVpsOwnsAuto])
 
+  const setQuoteSide = useCallback((side: 'RISE' | 'FALL' | null) => {
+    quoteSideRef.current = side
+    setQuoteSideState(side)
+    if (!side) setLiveQuote({ available: false, reason: 'Quote unavailable' })
+  }, [])
+
+  // Throttled display quote for the current watch/active side (never buys).
+  useEffect(() => {
+    let cancelled = false
+    const tick = async () => {
+      const side = quoteSideRef.current
+      const client = clientRef.current
+      const s = settingsRef.current
+      if (!side || !client || client.connectionStatus !== 'CONNECTED') {
+        if (!cancelled) setLiveQuote({ available: false, reason: 'Quote unavailable' })
+        return
+      }
+      try {
+        const barrier = formatTouchBarrier(s.barrierAbs, side === 'RISE' ? 1 : -1)
+        let tradeStake = s.stake
+        if (s.useFullStake && typeof balance === 'number' && balance > 0) {
+          tradeStake = Math.max(0.35, Math.floor(balance * 100) / 100)
+        }
+        const quoted = await proposeOneTouch(client, {
+          symbol: s.symbol,
+          currency: s.currency,
+          stake: tradeStake,
+          barrierAbs: s.barrierAbs,
+          duration: s.duration,
+          durationUnit: s.durationUnit,
+          mode: 'signal',
+        }, barrier)
+        if (cancelled || quoteSideRef.current !== side) return
+        setLiveQuote(quoteEconomicsFromProposal({
+          ask: quoted.ask,
+          payout: quoted.payout,
+          barrier: quoted.barrier,
+          responseEpoch: quoted.responseEpoch,
+          nowSec: Date.now() / 1000,
+        }))
+      } catch {
+        if (!cancelled) setLiveQuote({ available: false, reason: 'Quote unavailable' })
+      }
+    }
+    void tick()
+    const id = window.setInterval(() => { void tick() }, 2500)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [quoteSide, status, barrierAbs, duration, durationUnit, stake, useFullStake, currency, balance, symbol])
+
+  // Age out stale quotes on the 1s clock used by App.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      setLiveQuote((prev) => {
+        if (!prev.available) return prev
+        if (Date.now() / 1000 - prev.responseEpoch > QUOTE_MAX_AGE_SEC) {
+          return { available: false, reason: 'Quote unavailable' }
+        }
+        return prev
+      })
+    }, 1000)
+    return () => clearInterval(id)
+  }, [])
+
   const executeTrade = useCallback(async (
     side: 'RISE' | 'FALL',
     opts: {
@@ -596,18 +796,23 @@ export function useAutoTrade(symbol: string) {
       expiresAt?: number
       strategyId?: 'C5'
       candleTime?: number
+      attemptId?: string
     },
-  ) => {
+  ): Promise<ManualFillInfo[]> => {
     const s = settingsRef.current
     const logTrade = (row: Omit<TradeLogRow, 'id' | 'at'>) => pushLog({
-      ...row, candleTime: opts.candleTime,
+      ...row,
+      candleTime: opts.candleTime,
+      source: row.source ?? opts.source,
+      accountId: row.accountId ?? sessionRef.current?.accountId,
+      attemptId: row.attemptId ?? opts.attemptId,
     })
     if (tradeLockRef.current) {
       logTrade({
         signal: side, barrier: '—', ok: false,
         message: `${opts.source === 'manual' ? 'Manual' : 'C5'} skipped · trade already in progress`,
       })
-      return
+      return []
     }
 
     const client = clientRef.current
@@ -620,7 +825,7 @@ export function useAutoTrade(symbol: string) {
           ? 'Manual skipped · connect trade WS first (Trade settings)'
           : 'Skipped · trading socket not connected',
       })
-      return
+      return []
     }
 
     if (opts.source === 'auto' && opts.expiresAt != null && isC5EntryExpired(opts.expiresAt, Date.now() / 1000)) {
@@ -630,7 +835,7 @@ export function useAutoTrade(symbol: string) {
         ok: false,
         message: 'C5 skipped · entry window expired before buy prep',
       })
-      return
+      return []
     }
 
     // Cooldown blocks both auto and manual until the wait interval ends.
@@ -653,7 +858,7 @@ export function useAutoTrade(symbol: string) {
           }`,
         })
       }
-      return
+      return []
     }
 
     if (opts.dedupeKey) tradedSignals.current.add(opts.dedupeKey)
@@ -676,6 +881,7 @@ export function useAutoTrade(symbol: string) {
     setBusy(true)
     try {
       let tradeStake = s.stake
+      let tradeCurrency = s.currency
       if (s.useFullStake) {
         const balMsg = await client.request({ balance: 1 })
         if (opts.source === 'auto' && opts.expiresAt != null && isC5EntryExpired(opts.expiresAt, Date.now() / 1000)) {
@@ -690,14 +896,17 @@ export function useAutoTrade(symbol: string) {
             setCooldownUntil(0)
             persistCooldownUntil(0)
           }
-          return
+          return []
         }
         if (client.connectionStatus !== 'CONNECTED') {
           throw new Error('C5 skipped · trading socket disconnected during prep')
         }
         const balObj = balMsg.balance as { balance?: number; currency?: string } | undefined
         const bal = typeof balObj?.balance === 'number' ? balObj.balance : null
-        if (typeof balObj?.currency === 'string') setCurrency(balObj.currency)
+        if (typeof balObj?.currency === 'string') {
+          tradeCurrency = balObj.currency
+          setCurrency(balObj.currency)
+        }
         if (bal == null || !(bal > 0)) throw new Error('Full stake: no account balance')
         tradeStake = floorStake(bal)
         setBalance(bal)
@@ -726,7 +935,7 @@ export function useAutoTrade(symbol: string) {
           setCooldownUntil(0)
           persistCooldownUntil(0)
         }
-        return
+        return []
       }
       if (client.connectionStatus !== 'CONNECTED') {
         throw new Error('C5 skipped · trading socket not connected before buy')
@@ -734,7 +943,7 @@ export function useAutoTrade(symbol: string) {
 
       const results = await placeTouchTrades(client, {
         symbol: s.symbol,
-        currency: s.currency,
+        currency: tradeCurrency,
         stake: tradeStake,
         barrierAbs: s.barrierAbs,
         duration: s.duration,
@@ -759,13 +968,55 @@ export function useAutoTrade(symbol: string) {
 
       const confLabel = opts.source === 'auto' ? ' · C5 4/4' : ''
       const srcLabel = opts.source === 'manual' ? 'MANUAL · ' : 'C5 AUTO · '
+      const purchaseAccount = sessionRef.current?.client === client
+        ? sessionRef.current.accountId
+        : null
+      if (!purchaseAccount) throw new Error('Trading account changed before contract tracking')
       for (const r of results) {
+        const relativeBarrier = Number(r.barrier)
+        const absoluteBarrier = r.entrySpot != null && Number.isFinite(relativeBarrier)
+          ? r.entrySpot + relativeBarrier
+          : null
+        const tracked: TrackedContract = {
+          accountId: purchaseAccount,
+          contractId: r.contractId,
+          source: opts.source,
+          attemptId: opts.source === 'manual' ? opts.attemptId ?? null : null,
+          side,
+          currency: tradeCurrency,
+          barrier: r.barrier,
+          absoluteBarrier,
+          entrySpot: r.entrySpot,
+          buyPrice: r.buyPrice,
+          payout: r.payout,
+          settled: false,
+          status: 'open',
+          profit: null,
+        }
+        // Persist before notifying the UI so a refresh cannot orphan the buy.
+        storeContract(tracked)
+        const activeSession = sessionRef.current
+        if (activeSession?.client === client) {
+          activeSession.subscriptions.add(r.contractId)
+          void client.request({
+            proposal_open_contract: 1,
+            contract_id: r.contractId,
+            subscribe: 1,
+          }).catch(() => { activeSession.subscriptions.delete(r.contractId) })
+        }
         logTrade({
           signal: side,
           barrier: r.barrier,
           ok: true,
           message: `${srcLabel}Bought ONETOUCH${confLabel} · stake≈${r.buyPrice ?? tradeStake}`,
           contractId: r.contractId,
+          buyPrice: r.buyPrice,
+          payout: r.payout,
+          entrySpot: r.entrySpot,
+          source: opts.source,
+          accountId: purchaseAccount,
+          attemptId: opts.attemptId,
+          absoluteBarrier,
         })
       }
 
@@ -775,6 +1026,19 @@ export function useAutoTrade(symbol: string) {
         setCooldownUntil(0)
         persistCooldownUntil(0)
       }
+      return results.map((r) => ({
+        side,
+        contractId: r.contractId,
+        accountId: purchaseAccount,
+        currency: tradeCurrency,
+        absoluteBarrier: r.entrySpot != null && Number.isFinite(Number(r.barrier))
+          ? r.entrySpot + Number(r.barrier)
+          : null,
+        barrier: r.barrier,
+        buyPrice: r.buyPrice,
+        payout: r.payout,
+        entrySpot: r.entrySpot,
+      }))
     } catch (err) {
       if (s.cooldownSec > 0) {
         cooldownUntilRef.current = 0
@@ -793,11 +1057,12 @@ export function useAutoTrade(symbol: string) {
           message: prefixed,
         })
       }
+      return []
     } finally {
       tradeLockRef.current = false
       setBusy(false)
     }
-  }, [pushLog])
+  }, [pushLog, storeContract])
 
   const onTradeSignal = useCallback(async (sig: AutoTradeSignal) => {
     const s = settingsRef.current
@@ -872,7 +1137,10 @@ export function useAutoTrade(symbol: string) {
     })
   }, [executeTrade, pushLog])
 
-  const placeManualTrade = useCallback(async (side: 'RISE' | 'FALL') => {
+  const placeManualTrade = useCallback(async (
+    side: 'RISE' | 'FALL',
+    attemptId: string,
+  ): Promise<ManualFillInfo[]> => {
     // Re-read stored cooldown (incl. VPS-synced) before manual click.
     const storedUntil = readStoredCooldownUntil()
     if (storedUntil > cooldownUntilRef.current) {
@@ -886,10 +1154,13 @@ export function useAutoTrade(symbol: string) {
         barrier: '—',
         ok: false,
         message: `Manual skipped · cooldown ${waitLeft}s left`,
+        source: 'manual',
+        attemptId,
+        accountId: sessionRef.current?.accountId,
       })
-      return
+      return []
     }
-    await executeTrade(side, { source: 'manual' })
+    return executeTrade(side, { source: 'manual', attemptId })
   }, [executeTrade, pushLog])
 
   return {
@@ -915,5 +1186,9 @@ export function useAutoTrade(symbol: string) {
     disconnect,
     onTradeSignal,
     placeManualTrade,
+    liveQuote,
+    setQuoteSide,
+    setOnSettlement,
+    acknowledgeSettlement,
   }
 }

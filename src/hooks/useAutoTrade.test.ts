@@ -9,6 +9,7 @@ const fake = vi.hoisted(() => ({
   listAccounts: vi.fn(),
   request: vi.fn(),
   clients: [] as { connectionStatus: ConnectionStatus; close: () => void }[],
+  tradingListeners: [] as Array<(msg: Record<string, unknown>) => void>,
   feedListener: null as null | ((state: MarketState, event?: { type: 'candle_close'; candle: Candle }) => void),
 }))
 
@@ -27,7 +28,10 @@ vi.mock('../lib/deriv/tradingClient', () => ({
     statusHandler: (s: ConnectionStatus) => void = () => {}
     constructor() { fake.clients.push(this) }
     setStatusHandler(fn: (s: ConnectionStatus) => void) { this.statusHandler = fn }
-    subscribe() { return () => {} }
+    subscribe(fn: (msg: Record<string, unknown>) => void) {
+      fake.tradingListeners.push(fn)
+      return () => {}
+    }
     async connect() { this.connectionStatus = 'CONNECTED'; this.statusHandler('CONNECTED') }
     close() { this.connectionStatus = 'DISCONNECTED'; this.statusHandler('DISCONNECTED') }
     request = fake.request
@@ -70,12 +74,13 @@ beforeEach(() => {
   vi.setSystemTime(now * 1000)
   localStorage.clear()
   fake.clients = []
+  fake.tradingListeners = []
   fake.feedListener = null
   fake.listAccounts.mockReset().mockResolvedValue([{ account_id: 'demo-test', account_type: 'demo', currency: 'USD' }])
   fake.request.mockReset().mockImplementation(async (p: Record<string, unknown>) => {
     if ('balance' in p) return { balance: { balance: 20, currency: 'USD' } }
     if ('proposal' in p) return { proposal: { id: 'test-proposal', ask_price: 1 } }
-    if ('buy' in p) return { buy: { contract_id: 42, buy_price: 1, payout: 1.1 } }
+    if ('buy' in p) return { buy: { contract_id: 42, buy_price: 1, payout: 1.1, entry_spot: 100.25 } }
     return {}
   })
 })
@@ -105,6 +110,75 @@ it('restores the fallback account when the saved account no longer exists', asyn
   expect(result.current.status).toBe('CONNECTED')
   await act(async () => { await result.current.onTradeSignal(signal()) })
   expect(buys()).toHaveLength(1)
+})
+
+it('recovers a mocked nine-minute manual purchase after refresh and emits settlement once', async () => {
+  savePrefs({
+    autoEnabled: false,
+    wantConnected: true,
+    barrierAbs: 0.01,
+    duration: 9,
+    durationUnit: 'm',
+  })
+  const first = renderHook(() => useAutoTrade('R_100'))
+  await flush()
+
+  let fills: Awaited<ReturnType<typeof first.result.current.placeManualTrade>> = []
+  await act(async () => {
+    fills = await first.result.current.placeManualTrade('FALL', 'attempt-9m')
+  })
+  expect(fills).toHaveLength(1)
+  expect(fills[0]).toMatchObject({
+    contractId: 42,
+    accountId: 'demo-test',
+    currency: 'USD',
+    entrySpot: 100.25,
+  })
+  const proposal = fake.request.mock.calls
+    .map(([payload]) => payload as Record<string, unknown>)
+    .find((payload) => 'proposal' in payload)
+  expect(proposal).toMatchObject({ barrier: '-0.01', duration: 9, duration_unit: 'm' })
+  const receiptKey = Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i))
+    .find((storedKey) => storedKey?.startsWith('v100_contract_v1:'))
+  expect(receiptKey).toBeTruthy()
+
+  first.unmount()
+  const refreshed = renderHook(() => useAutoTrade('R_100'))
+  await flush()
+  const settlements: Array<{ contractId: number; attemptId: string; profit: number | null }> = []
+  act(() => {
+    refreshed.result.current.setOnSettlement((row) => settlements.push(row))
+  })
+  const listener = fake.tradingListeners.at(-1)!
+  const terminal = {
+    msg_type: 'proposal_open_contract',
+    proposal_open_contract: {
+      contract_id: 42,
+      is_sold: 1,
+      status: 'won',
+      entry_spot: 100.25,
+      barrier: 100.24,
+      buy_price: 1,
+      payout: 1.8,
+      profit: 0.8,
+    },
+  }
+  act(() => listener(terminal))
+  act(() => listener(terminal))
+
+  expect(settlements).toHaveLength(1)
+  expect(settlements[0]).toMatchObject({
+    contractId: 42,
+    attemptId: 'attempt-9m',
+    profit: 0.8,
+  })
+  expect(refreshed.result.current.log.find((row) => row.contractId === 42)).toMatchObject({
+    settled: true,
+    profit: 0.8,
+    entrySpot: 100.25,
+  })
+  act(() => refreshed.result.current.acknowledgeSettlement('demo-test', 42))
+  expect(localStorage.getItem(receiptKey!)).toBeNull()
 })
 
 it('records a new C5 signal skipped while another order is in progress', async () => {

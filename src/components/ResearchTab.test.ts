@@ -36,6 +36,7 @@ it('keeps server results visible on disconnect, with aligned headers and explici
   expect(screen.getByText('-1.76 to 0.30')).toBeTruthy()
   expect(screen.getAllByRole('columnheader')).toHaveLength(21)
   expect(screen.getAllByRole('row')[1].querySelectorAll('td')).toHaveLength(21)
+  expect(screen.getByRole('button', { name: 'Start confirmation run' })).toBeTruthy()
   expect((screen.getByRole('button', { name: 'Resume' }) as HTMLButtonElement).disabled).toBe(true)
   expect(screen.queryByText(/using browser mode for now/i)).toBeNull()
 })

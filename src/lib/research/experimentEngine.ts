@@ -23,12 +23,22 @@ import {
 } from './horizons'
 import { advanceTouchPaper, maybeStartTouchPaper, expireTouchPaper, hasPendingTouch } from './touchPaper'
 import {
+  advanceC5TouchPaper,
+  expireC5TouchPaper,
+  hasPendingC5Touch,
+  summarizeC5CohortBundle,
+  tryRecordC5ContextObservation,
+  type C5CohortSummaryBundle,
+  type C5ContextObservation,
+} from './c5ContextStudy'
+import {
   DEFAULT_FROZEN_CONTRACT,
+  c5StudyContract,
   normalizeContractSettings,
   type FrozenContractSettings,
 } from './contractSettings'
 export { DEFAULT_FROZEN_CONTRACT, type FrozenContractSettings }
-export const RESEARCH_CODE_VERSION = 'v100-research-engine-3'
+export const RESEARCH_CODE_VERSION = 'v100-research-engine-5'
 export const DISCOVERY_HOURS = 72
 
 export type ExperimentStage =
@@ -72,6 +82,11 @@ export interface ExperimentState {
     metrics?: ResearchObservation['metrics']
     closeEpoch: number
   }>
+  c5ContextObservations: C5ContextObservation[]
+  /** Shared with the manual journal: C5:candleTime:side. */
+  c5AcceptedKeys: string[]
+  /** Frozen discovery cohort summary when confirmation starts. */
+  priorDiscoveryC5Summary: C5CohortSummaryBundle | null
 }
 
 export function createInitialState(
@@ -97,7 +112,25 @@ export function createInitialState(
     lastTickEpoch: null,
     feedHealthy: false,
     awaitingCloseEntry: [],
+    c5ContextObservations: [],
+    c5AcceptedKeys: [],
+    priorDiscoveryC5Summary: null,
   }
+}
+
+/** Start confirmation: fresh 72h run with prior discovery C5 cohorts frozen. */
+export function startConfirmation(
+  previous: ExperimentState,
+  nowMs: number,
+  enabledIds: StrategyId[] = previous.enabledStrategyIds,
+  contract = previous.contract,
+): ExperimentState {
+  if (previous.codeVersion !== RESEARCH_CODE_VERSION || previous.mode !== 'discovery' || previous.startedAt == null) {
+    throw new Error('Start a discovery with the current C5 methodology before starting confirmation.')
+  }
+  const priorDiscoveryC5Summary = summarizeC5CohortBundle(previous.c5ContextObservations ?? [])
+  const base = startDiscovery(createInitialState('confirmation', enabledIds, contract), nowMs)
+  return { ...base, priorDiscoveryC5Summary }
 }
 
 /** Start (or restart) a 72h discovery run. Always creates a fresh collecting state. */
@@ -253,6 +286,9 @@ export function onTick(
     observations: state.observations.map((o) => ({ ...o, horizons: o.horizons.map((h) => ({ ...h })) })),
     rejected: [...state.rejected],
     awaitingCloseEntry: [...state.awaitingCloseEntry],
+    c5ContextObservations: (state.c5ContextObservations ?? []).map((o) => ({ ...o, touch: o.touch ? { ...o.touch } : undefined })),
+    c5AcceptedKeys: [...(state.c5AcceptedKeys ?? [])],
+    priorDiscoveryC5Summary: state.priorDiscoveryC5Summary ?? null,
   }
   // Every member of a pair sees cooldowns from BEFORE this tick's batch.
   const admissionState = { ...next, cooldowns: { ...next.cooldowns } }
@@ -261,6 +297,8 @@ export function onTick(
     if (next.stage === 'collecting') next.stage = 'reconnecting'
     next.observations = next.observations.map((o) => advanceObservationHorizons(o, null, false))
     next.observations = next.observations.map((o) => advanceTouchPaper(o, null, false, next.contract))
+    next.c5ContextObservations = next.c5ContextObservations.map((o) =>
+      advanceC5TouchPaper(o, null, false, c5StudyContract(next.contract)))
     return next
   }
   if (next.stage === 'reconnecting') next.stage = 'collecting'
@@ -278,6 +316,10 @@ export function onTick(
     return adv
   })
   applyNewTouchWins(beforeTouch, next.observations, next)
+  next.c5ContextObservations = next.c5ContextObservations.map((o) => {
+    const adv = advanceC5TouchPaper(o, tick, true, c5StudyContract(next.contract), receiptEpoch)
+    return { ...adv, lastTickEpoch: tick.epoch }
+  })
   // Post-win cooldowns must also block same-tick admissions using the snapshot.
   for (const [k, until] of Object.entries(next.cooldowns)) {
     if ((admissionState.cooldowns[k] ?? 0) < until) admissionState.cooldowns[k] = until
@@ -332,6 +374,7 @@ export function onTick(
   // Finish when no pending work
   if (next.stage === 'finishing') {
     const pending = next.observations.some((o) => o.pendingHorizons || hasPendingTouch(o))
+      || next.c5ContextObservations.some(hasPendingC5Touch)
       || next.awaitingCloseEntry.length > 0
     if (!pending) {
       next.stage = 'completed'
@@ -411,6 +454,20 @@ export function onTick(
         atrCandles: candles,
       })
     }
+    if (next.startedAt != null && closeEpoch >= next.startedAt) {
+      const c5 = tryRecordC5ContextObservation(
+        next.c5AcceptedKeys,
+        candles,
+        lastClosed.time,
+        tick,
+        receiptEpoch,
+        c5StudyContract(next.contract),
+      )
+      if (c5) {
+        next.c5AcceptedKeys.push(c5.key)
+        next.c5ContextObservations.push(c5.observation)
+      }
+    }
   }
 
   return next
@@ -459,10 +516,14 @@ export function advanceExperimentClock(state: ExperimentState, now: number): Exp
       ? { ...h, status: 'unknown' as const, reason: 'No timely horizon tick (clock deadline)' } : h)
     return expireTouchPaper({ ...obs, horizons, pendingHorizons: horizons.some((h) => h.status === 'pending') }, now, state.contract)
   })
+  const c5ContextObservations = (state.c5ContextObservations ?? []).map((o) =>
+    expireC5TouchPaper(o, now, c5StudyContract(state.contract)))
   let stage: ExperimentStage = state.stage
   if (state.endsAt != null && now >= state.endsAt) stage = 'finishing'
-  if (stage === 'finishing' && !observations.some((o) => o.pendingHorizons || hasPendingTouch(o))) stage = 'completed'
-  return { ...state, observations, stage, finishedAt: stage === 'completed' ? now : state.finishedAt }
+  const pendingWork = observations.some((o) => o.pendingHorizons || hasPendingTouch(o))
+    || c5ContextObservations.some(hasPendingC5Touch)
+  if (stage === 'finishing' && !pendingWork) stage = 'completed'
+  return { ...state, observations, c5ContextObservations, stage, finishedAt: stage === 'completed' ? now : state.finishedAt }
 }
 
 export function interruptResearchFeed(state: ExperimentState): ExperimentState {
@@ -471,5 +532,7 @@ export function interruptResearchFeed(state: ExperimentState): ExperimentState {
     stage: state.stage === 'collecting' ? 'reconnecting' : state.stage,
     observations: state.observations.map((o) => advanceTouchPaper(
       advanceObservationHorizons(o, null, false), null, false, state.contract)),
+    c5ContextObservations: (state.c5ContextObservations ?? []).map((o) =>
+      advanceC5TouchPaper(o, null, false, c5StudyContract(state.contract))),
   }
 }
